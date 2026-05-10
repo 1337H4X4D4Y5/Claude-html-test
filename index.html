@@ -146,8 +146,8 @@
   #reset-btn:active { transform: scale(0.98); }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="sim.js?v=23"></script>
-<script src="test.js?v=23"></script>
+<script src="sim.js?v=24"></script>
+<script src="test.js?v=24"></script>
 </head>
 <body>
 <div id="permission-overlay">
@@ -167,7 +167,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v23 (2026-05-10 — 3D flow + wave injection)';
+  const APP_VERSION = 'v24 (2026-05-10 — particle fluid)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -290,269 +290,56 @@
   floorMesh.position.y = -halfBox + 0.001;
   scene.add(floorMesh);
 
-  // ---------- Height-field water surface ----------
-  // Water plane size: smaller than the box so it can rotate to follow gravity
-  // and remain inside the cube at most orientations. At extreme diagonals the
-  // corners may clip slightly through the glass walls.
-  const WATER_PLANE_SIZE = 1.5;
-  const WATER_OFFSET = 0.4;   // distance along gravity from box center to plane
-  const waterGeom = new THREE.PlaneGeometry(WATER_PLANE_SIZE, WATER_PLANE_SIZE, GRID_N - 1, GRID_N - 1);
-  const waterMat = new THREE.MeshPhongMaterial({
-    color: 0x3aa3e8,
+  // ---------- Particle fluid ----------
+  // v24: drop the height field surface entirely. Render a swarm of particles
+  // that fall under gravity, collide with the cube walls, and repel each
+  // other. This actually feels like fluid in 3D — particles pile up at the
+  // lowest face, slosh when you tilt, bounce off walls.
+  const FLUID_N = 240;
+  const fluid = new Fluid(FLUID_N, {
+    boxHalf: halfBox - 0.05,      // particle centers stop just inside the walls
+    interactRadius: 0.16,
+    pressureK: 9.0,
+    viscosity: 0.45,
+    restitution: 0.30,
+    velDamping: 0.992,
+    maxSpeed: 8.0
+  });
+  fluid.seed(7);
+
+  // Render particles as instanced semi-transparent blue spheres.
+  const PARTICLE_RADIUS = 0.07;
+  const fluidGeom = new THREE.SphereGeometry(PARTICLE_RADIUS, 8, 8);
+  const fluidMat = new THREE.MeshPhongMaterial({
+    color: 0x4aa3ff,
     emissive: 0x0a2540,
     transparent: true,
-    opacity: 0.92,
-    shininess: 140,
-    specular: 0xffffff,
-    side: THREE.DoubleSide,
-    flatShading: false
+    opacity: 0.85,
+    shininess: 100,
+    specular: 0xffffff
   });
-  const waterMesh = new THREE.Mesh(waterGeom, waterMat);
-  // Initial orientation: horizontal (will be overwritten every frame from gravity).
-  waterMesh.quaternion.setFromUnitVectors(
-    new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 1, 0)
-  );
-  waterMesh.position.set(0, -WATER_OFFSET, 0);
-  waterMesh.renderOrder = 2;
-  scene.add(waterMesh);
+  const fluidMesh = new THREE.InstancedMesh(fluidGeom, fluidMat, FLUID_N);
+  fluidMesh.renderOrder = 2;
+  scene.add(fluidMesh);
 
-  // Scratch vectors reused each frame for the water-plane orientation update.
-  const _gravUnit = new THREE.Vector3();
-  const _planeNormal = new THREE.Vector3();
-  const _planeDefault = new THREE.Vector3(0, 0, 1); // PlaneGeometry default normal
-  function updateWaterMeshOrientation() {
-    const len = gravity.length();
-    if (len < 1e-6) return;
-    _gravUnit.copy(gravity).divideScalar(len);
-    // Position: along the gravity direction so the surface sits at the bottom
-    // of the box relative to gravity. With gravity down: y = -OFFSET (lower
-    // part of box). With gravity right: x = +OFFSET (right side).
-    waterMesh.position.copy(_gravUnit).multiplyScalar(WATER_OFFSET);
-    // Orientation: plane normal = -gravity (pointing "up" relative to gravity).
-    _planeNormal.copy(_gravUnit).negate();
-    waterMesh.quaternion.setFromUnitVectors(_planeDefault, _planeNormal);
-  }
-
-  // Track gravity to inject wave packets when the phone rotates, so the user
-  // sees the surface ripple as they tilt.
-  const _lastGravity = new THREE.Vector3(0, -GRAVITY_MAG, 0);
-  function injectRotationWaves() {
-    const dx = gravity.x - _lastGravity.x;
-    const dy = gravity.y - _lastGravity.y;
-    const dz = gravity.z - _lastGravity.z;
-    const change = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    if (change > 0.20) {
-      const amp = Math.min(0.06, change * 0.04);
-      const ci = 12 + Math.floor(Math.random() * (GRID_N - 24));
-      const cj = 12 + Math.floor(Math.random() * (GRID_N - 24));
-      field.pokeGaussian(ci, cj, (Math.random() < 0.5 ? amp : -amp), 3.0);
+  // Scratch matrix reused each frame to push particle positions into the mesh.
+  const _fluidMtx = new THREE.Matrix4();
+  function updateFluidRender() {
+    for (let i = 0; i < FLUID_N; i++) {
+      _fluidMtx.makeTranslation(fluid.x[i], fluid.y[i], fluid.z[i]);
+      fluidMesh.setMatrixAt(i, _fluidMtx);
     }
-    _lastGravity.copy(gravity);
+    fluidMesh.instanceMatrix.needsUpdate = true;
   }
+  // A nominal HeightField is kept around so the legacy debug fields in the
+  // copy-debug report don't break — it isn't simulated or rendered.
+  const field = new HeightField(8);
 
-  // Gentle ambient ripple so the surface always shows tiny life even when
-  // the phone is still. Tiny amplitude — won't excite instability.
-  function injectAmbientRipple() {
-    if (Math.random() < 0.04) {
-      const ci = 4 + Math.floor(Math.random() * (GRID_N - 8));
-      const cj = 4 + Math.floor(Math.random() * (GRID_N - 8));
-      field.pokeGaussian(ci, cj, (Math.random() - 0.5) * 0.008, 2.0);
-    }
-  }
+  // Legacy helpers removed in v24 — no plane to convert grid coords to world.
 
-  // ---------- HeightField simulation ----------
-  // Class lives in sim.js so it can be unit-tested independently (see test.html).
-  const field = new HeightField(GRID_N, {
-    boxSize: WATER_PLANE_SIZE,    // match the actual water plane size
-    waveC: WAVE_C,
-    velDamping: VEL_DAMPING,
-    ampDamping: AMP_DAMPING,
-    tiltStiffness: TILT_STIFFNESS,
-    minVerticalG: MIN_VERTICAL_G,
-    maxEqAmp: MAX_EQ_AMP
-  });
-
-  // Seed with smooth Gaussian pokes for visible motion without spikes.
-  field.pokeGaussian(GRID_N >> 1, GRID_N >> 1, 0.12, 3.5);
-  field.pokeGaussian((GRID_N >> 1) - 10, (GRID_N >> 1) + 8, 0.07, 3.0);
-  field.pokeGaussian((GRID_N >> 1) + 12, (GRID_N >> 1) - 6, 0.07, 3.0);
-  field.startAtRest();
-
-  // Helper: convert grid (i,j) -> world (x, z) inside the box.
-  function gridToWorld(i, j) {
-    const halfN = (GRID_N - 1) / 2;
-    const x = (i - halfN) * field.dx;
-    const z = (j - halfN) * field.dx;
-    return { x: x, z: z };
-  }
-  function worldToGrid(x, z) {
-    const halfN = (GRID_N - 1) / 2;
-    const i = Math.round(x / field.dx + halfN);
-    const j = Math.round(z / field.dx + halfN);
-    return { i: i, j: j };
-  }
-
-  // Apply heights to plane geometry. Plane is rotated; pre-rotation Z becomes world Y.
-  const waterPos = waterGeom.attributes.position;
-  function syncWaterMesh() {
-    const arr = waterPos.array;
-    const h = field.h;
-    // PlaneGeometry vertex layout matches our (i,j) grid: vertex k = j*N + i.
-    for (let k = 0; k < h.length; k++) {
-      arr[k * 3 + 2] = h[k];
-    }
-    waterPos.needsUpdate = true;
-    waterGeom.computeVertexNormals();
-  }
-
-  // ---------- Particle system (splashes) ----------
-  function makeSpriteTexture() {
-    const size = 64;
-    const c = document.createElement('canvas');
-    c.width = c.height = size;
-    const ctx = c.getContext('2d');
-    const grd = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-    grd.addColorStop(0.0, 'rgba(220,240,255,1)');
-    grd.addColorStop(0.4, 'rgba(120,180,230,0.85)');
-    grd.addColorStop(1.0, 'rgba(60,120,200,0)');
-    ctx.fillStyle = grd;
-    ctx.fillRect(0, 0, size, size);
-    const tex = new THREE.CanvasTexture(c);
-    if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace;
-    tex.needsUpdate = true;
-    return tex;
-  }
-
-  const particleGeom = new THREE.BufferGeometry();
-  const particlePositions = new Float32Array(MAX_PARTICLES * 3);
-  for (let p = 0; p < MAX_PARTICLES; p++) {
-    particlePositions[p * 3 + 0] = 0;
-    particlePositions[p * 3 + 1] = -9999;
-    particlePositions[p * 3 + 2] = 0;
-  }
-  particleGeom.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
-  const particleMat = new THREE.PointsMaterial({
-    size: 0.07,
-    map: makeSpriteTexture(),
-    transparent: true,
-    depthWrite: false,
-    sizeAttenuation: true,
-    blending: THREE.NormalBlending,
-    color: 0xffffff
-  });
-  const particlePoints = new THREE.Points(particleGeom, particleMat);
-  scene.add(particlePoints);
-
-  const particles = new Array(MAX_PARTICLES);
-  for (let p = 0; p < MAX_PARTICLES; p++) {
-    particles[p] = {
-      x: 0, y: -9999, z: 0,
-      vx: 0, vy: 0, vz: 0,
-      life: 0,
-      alive: false
-    };
-  }
-
-  function findFreeParticle() {
-    for (let p = 0; p < MAX_PARTICLES; p++) {
-      if (!particles[p].alive) return p;
-    }
-    return -1;
-  }
-
-  // Scratch vectors for splash particle math, reused per call.
-  const _splashLocal = new THREE.Vector3();
-  const _splashTmp = new THREE.Vector3();
-  function spawnSplashParticles(gravity) {
-    const h = field.h;
-    const vel = field.vel;
-    const halfN = (GRID_N - 1) / 2;
-    const dx = field.dx;
-    for (let j = 2; j < GRID_N - 2; j += 2) {
-      for (let i = 2; i < GRID_N - 2; i += 2) {
-        const k = j * GRID_N + i;
-        if (vel[k] > SPAWN_THRESHOLD && Math.random() < SPAWN_PROBABILITY) {
-          const slot = findFreeParticle();
-          if (slot < 0) return;
-          const p = particles[slot];
-          // Local (plane-frame) position: PlaneGeometry vertex k has local
-          // (x = (i-halfN)*dx, y = -(j-halfN)*dx, z = h[k]). Transform to
-          // world using the water mesh's current orientation.
-          _splashLocal.set(
-            (i - halfN) * dx,
-            -(j - halfN) * dx,
-            h[k] + 0.02
-          );
-          waterMesh.localToWorld(_splashLocal);
-          p.x = _splashLocal.x;
-          p.y = _splashLocal.y;
-          p.z = _splashLocal.z;
-          const gmag = Math.sqrt(gravity.x * gravity.x + gravity.y * gravity.y + gravity.z * gravity.z) || 1;
-          const ux = -gravity.x / gmag;
-          const uy = -gravity.y / gmag;
-          const uz = -gravity.z / gmag;
-          const speed = Math.min(vel[k], 4.0) * 0.55;
-          p.vx = ux * speed + (Math.random() - 0.5) * 0.4;
-          p.vy = uy * speed + (Math.random() - 0.5) * 0.2;
-          p.vz = uz * speed + (Math.random() - 0.5) * 0.4;
-          p.life = PARTICLE_LIFE;
-          p.alive = true;
-        }
-      }
-    }
-  }
-
-  function stepParticles(dt, gravity) {
-    const arr = particlePositions;
-    for (let pi = 0; pi < MAX_PARTICLES; pi++) {
-      const p = particles[pi];
-      if (!p.alive) {
-        arr[pi * 3 + 1] = -9999;
-        continue;
-      }
-      p.vx += gravity.x * dt;
-      p.vy += gravity.y * dt;
-      p.vz += gravity.z * dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      p.z += p.vz * dt;
-      p.life -= dt;
-
-      // Box wall collisions (all 6 faces).
-      if (p.x < -halfBox) { p.x = -halfBox; p.vx = -p.vx * 0.4; }
-      else if (p.x > halfBox) { p.x = halfBox; p.vx = -p.vx * 0.4; }
-      if (p.y < -halfBox) { p.y = -halfBox; p.vy = -p.vy * 0.4; }
-      else if (p.y > halfBox) { p.y = halfBox; p.vy = -p.vy * 0.4; }
-      if (p.z < -halfBox) { p.z = -halfBox; p.vz = -p.vz * 0.4; }
-      else if (p.z > halfBox) { p.z = halfBox; p.vz = -p.vz * 0.4; }
-
-      // Water surface detection in the rotated plane: signed distance from
-      // the plane along its normal. Positive = above surface (in air),
-      // negative = particle has re-entered the water.
-      _splashTmp.set(
-        p.x - waterMesh.position.x,
-        p.y - waterMesh.position.y,
-        p.z - waterMesh.position.z
-      );
-      const distFromSurface = _splashTmp.dot(_planeNormal);
-
-      let dead = false;
-      if (distFromSurface < -0.03) dead = true;   // back into water
-      if (p.life <= 0) dead = true;
-
-      if (dead) {
-        p.alive = false;
-        arr[pi * 3 + 0] = 0;
-        arr[pi * 3 + 1] = -9999;
-        arr[pi * 3 + 2] = 0;
-      } else {
-        arr[pi * 3 + 0] = p.x;
-        arr[pi * 3 + 1] = p.y;
-        arr[pi * 3 + 2] = p.z;
-      }
-    }
-    particleGeom.attributes.position.needsUpdate = true;
-  }
+  // v24: legacy 'splash' system removed. The fluid particles ARE the water now.
+  // Stubs kept to avoid touching all the debug-report code that references them.
+  const particles = [];   // empty array — 'alive splashes: 0 / 0' in debug
 
   // ---------- Gravity (gyroscope + fallback) ----------
   const gravity = new THREE.Vector3(0, -GRAVITY_MAG, 0);
@@ -985,21 +772,14 @@
     // Smoothly approach gravity target.
     gravity.lerp(gravityTarget, 0.15);
 
-    // v23: water plane rotates to follow gravity, so the height-field sim
-    // runs in the plane's local frame where gravity is always 'down' from
-    // its perspective. Pass a constant local gravity into the sim.
-    updateWaterMeshOrientation();    // computes _planeNormal for splash math
-    injectAmbientRipple();
-    injectRotationWaves();
-
-    // Step physics with a fixed substep for stability.
+    // v24: step the particle fluid. Each substep runs the SPH-style
+    // pressure + viscosity + gravity + wall-collision pass.
     let acc = dt;
     let safety = 8;
     while (acc > 0 && safety-- > 0) {
       const step = Math.min(FIXED_DT, acc);
-      field.step(step, 0, -GRAVITY_MAG, 0);
+      fluid.step(step, gravity.x, gravity.y, gravity.z);
       stepsRun++;
-      stepParticles(step, gravity);
       // Per-step trace: max|h| right after each physics step.
       if (!stepTraceFrozen) {
         const m = field.maxAbsHeight();
@@ -1010,9 +790,7 @@
       acc -= step;
     }
 
-    spawnSplashParticles(gravity);
-    syncWaterMesh();
-
+    updateFluidRender();
     renderer.render(scene, camera);
 
     // FPS readout.

@@ -5,6 +5,7 @@
   const mod = isNode ? require('./sim.js') : root;
   const HeightField = mod.HeightField;
   const mapOrientationToGravity = mod.mapOrientationToGravity;
+  const Fluid = mod.Fluid;
 
   const results = [];
   function test(name, fn) {
@@ -468,6 +469,113 @@
     secondAvg /= (r.energy.length - half);
     assertLT(secondAvg, firstAvg * 1.5,
       'energy grew: firstAvg=' + firstAvg.toFixed(4) + ' secondAvg=' + secondAvg.toFixed(4));
+  });
+
+  // ---------- Particle fluid tests ----------
+
+  function makeFluid(seed) {
+    const f = new Fluid(200);
+    f.seed(seed != null ? seed : 1);
+    return f;
+  }
+
+  test('fluid: initial seed places all particles inside the box', () => {
+    const f = makeFluid();
+    assert(f.allInBox(), 'some particles started outside the box');
+  });
+
+  test('fluid: gravity straight down settles particles to the lower half', () => {
+    const f = makeFluid();
+    for (let s = 0; s < 60 * 5; s++) f.step(1/60, 0, -9.8, 0);
+    assert(!f.hasNaN(), 'NaN');
+    assert(f.allInBox(), 'particles escaped the box');
+    const com = f.centerOfMass();
+    assertLT(com.y, -0.3, 'center of mass should be in lower half: y=' + com.y.toFixed(3));
+  });
+
+  test('fluid: gravity sideways settles particles to the lower side', () => {
+    const f = makeFluid();
+    // gravity in +x direction means 'down' is +x.
+    for (let s = 0; s < 60 * 5; s++) f.step(1/60, 9.8, 0, 0);
+    assert(!f.hasNaN(), 'NaN');
+    assert(f.allInBox(), 'particles escaped the box');
+    const com = f.centerOfMass();
+    assert(com.x > 0.3, 'center of mass should be on +x side: x=' + com.x.toFixed(3));
+  });
+
+  test('fluid: upside-down gravity settles particles to the top', () => {
+    const f = makeFluid();
+    for (let s = 0; s < 60 * 5; s++) f.step(1/60, 0, 9.8, 0);
+    assert(!f.hasNaN(), 'NaN');
+    assert(f.allInBox(), 'particles escaped the box');
+    const com = f.centerOfMass();
+    assert(com.y > 0.3, 'center of mass should be in upper half: y=' + com.y.toFixed(3));
+  });
+
+  test('fluid: total kinetic energy stays bounded over 30s of sustained gravity', () => {
+    const f = makeFluid();
+    let peakKE = 0;
+    for (let s = 0; s < 60 * 30; s++) {
+      f.step(1/60, 0, -9.8, 0);
+      const ke = f.totalKE();
+      if (ke > peakKE) peakKE = ke;
+    }
+    assert(!f.hasNaN(), 'NaN');
+    assert(f.allInBox(), 'particles escaped');
+    // Total KE = 0.5 * sum v^2. With max speed ~8 capped, n=200, peak <= 0.5*200*64 = 6400.
+    assertLT(peakKE, 1500, 'KE blew up: ' + peakKE.toFixed(1));
+    // Final KE should be small (mostly settled).
+    assertLT(f.totalKE(), 50, 'fluid did not settle: final KE=' + f.totalKE().toFixed(2));
+  });
+
+  test('fluid: survives a full beta sweep -180 to +180 over 30 seconds', () => {
+    const f = makeFluid();
+    const STEPS = 30 * 60;
+    let maxKE = 0;
+    for (let s = 0; s < STEPS; s++) {
+      const beta = -180 + (s / STEPS) * 360;
+      const g = mapOrientationToGravity(beta, 0, 0, 9.8);
+      f.step(1/60, g.x, g.y, g.z);
+      const ke = f.totalKE();
+      if (ke > maxKE) maxKE = ke;
+    }
+    assert(!f.hasNaN(), 'NaN');
+    assert(f.allInBox(), 'particles escaped');
+    assertLT(maxKE, 3000, 'KE during sweep grew too large: ' + maxKE.toFixed(1));
+  });
+
+  test('fluid: random orientation jumps every 0.5s stays bounded', () => {
+    const f = makeFluid(7);
+    const rng = mkRng(123);
+    let g = { x: 0, y: -9.8, z: 0 };
+    for (let s = 0; s < 60 * 30; s++) {
+      if (s % 30 === 0) {
+        const b = -180 + rng() * 360;
+        const gm = -90 + rng() * 180;
+        g = mapOrientationToGravity(b, gm, 0, 9.8);
+      }
+      f.step(1/60, g.x, g.y, g.z);
+    }
+    assert(!f.hasNaN(), 'NaN');
+    assert(f.allInBox(), 'particles escaped');
+  });
+
+  test('fluid: pair distances stay bounded (no particle merging)', () => {
+    // Repulsion should keep particles separated. Find min pair distance.
+    const f = makeFluid();
+    for (let s = 0; s < 60 * 5; s++) f.step(1/60, 0, -9.8, 0);
+    let minR2 = Infinity;
+    for (let i = 0; i < f.n; i++) {
+      for (let j = i + 1; j < f.n; j++) {
+        const dx = f.x[j] - f.x[i];
+        const dy = f.y[j] - f.y[i];
+        const dz = f.z[j] - f.z[i];
+        const r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < minR2) minR2 = r2;
+      }
+    }
+    const minR = Math.sqrt(minR2);
+    assert(minR > 0.02, 'particles overlap too much: min dist ' + minR.toFixed(4));
   });
 
   // ---------- Reporting ----------

@@ -11,7 +11,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
 
   // Bump on every change so the loaded build is verifiable.
-  const SIM_VERSION = 'sim-23';
+  const SIM_VERSION = 'sim-24';
 
   // Map DeviceOrientationEvent (beta, gamma in degrees) plus screen rotation
   // angle (degrees) to a scene-frame gravity vector. Output magnitude equals
@@ -210,9 +210,166 @@
     return false;
   };
 
+  // ---------- Particle fluid (simple SPH-style) ----------
+  // Each particle has position + velocity. Forces per step:
+  //   1. Gravity (acceleration in world frame)
+  //   2. Short-range repulsion + viscosity from neighbors within interactRadius
+  //   3. Wall collisions at +/- boxHalf with restitution
+  //   4. Velocity damping each frame
+  // Pure JS, no Three.js dependency — testable in isolation.
+  function Fluid(n, opts) {
+    opts = opts || {};
+    this.n             = n;
+    this.boxHalf       = opts.boxHalf       != null ? opts.boxHalf       : 0.92;
+    this.interactRadius = opts.interactRadius != null ? opts.interactRadius : 0.14;
+    this.pressureK     = opts.pressureK     != null ? opts.pressureK     : 9.0;
+    this.viscosity     = opts.viscosity     != null ? opts.viscosity     : 0.45;
+    this.restitution   = opts.restitution   != null ? opts.restitution   : 0.30;
+    this.velDamping    = opts.velDamping    != null ? opts.velDamping    : 0.992;
+    this.maxSpeed      = opts.maxSpeed      != null ? opts.maxSpeed      : 8.0;
+    this.x  = new Float32Array(n);
+    this.y  = new Float32Array(n);
+    this.z  = new Float32Array(n);
+    this.vx = new Float32Array(n);
+    this.vy = new Float32Array(n);
+    this.vz = new Float32Array(n);
+  }
+
+  // Place particles in a tight cube near the bottom of the container.
+  Fluid.prototype.seed = function (seed) {
+    let rng = (seed != null ? seed : 1) | 0;
+    function rand() { rng = (rng * 1103515245 + 12345) & 0x7fffffff; return rng / 0x7fffffff; }
+    const h = this.boxHalf;
+    const side = Math.ceil(Math.pow(this.n, 1/3));
+    const spacing = (1.4 * h) / side;
+    const startY = -h + spacing * 0.5;
+    let k = 0;
+    for (let yi = 0; yi < side && k < this.n; yi++) {
+      for (let zi = 0; zi < side && k < this.n; zi++) {
+        for (let xi = 0; xi < side && k < this.n; xi++) {
+          this.x[k]  = -h * 0.7 + (xi + 0.5) * spacing + (rand() - 0.5) * 0.01;
+          this.y[k]  = startY + yi * spacing + (rand() - 0.5) * 0.01;
+          this.z[k]  = -h * 0.7 + (zi + 0.5) * spacing + (rand() - 0.5) * 0.01;
+          this.vx[k] = 0;
+          this.vy[k] = 0;
+          this.vz[k] = 0;
+          k++;
+        }
+      }
+    }
+    // Fill remaining slots (if any) inside the volume.
+    while (k < this.n) {
+      this.x[k] = (rand() - 0.5) * h;
+      this.y[k] = -h * 0.5;
+      this.z[k] = (rand() - 0.5) * h;
+      this.vx[k] = this.vy[k] = this.vz[k] = 0;
+      k++;
+    }
+  };
+
+  Fluid.prototype.step = function (dt, gx, gy, gz) {
+    const n = this.n;
+    const radius = this.interactRadius;
+    const radius2 = radius * radius;
+    const boxHalf = this.boxHalf;
+    const kPress = this.pressureK;
+    const visc = this.viscosity;
+    const rest = this.restitution;
+    const damp = this.velDamping;
+    const maxSpd2 = this.maxSpeed * this.maxSpeed;
+    const x = this.x, y = this.y, z = this.z;
+    const vx = this.vx, vy = this.vy, vz = this.vz;
+
+    // 1) Apply gravity.
+    for (let i = 0; i < n; i++) {
+      vx[i] += gx * dt;
+      vy[i] += gy * dt;
+      vz[i] += gz * dt;
+    }
+
+    // 2) Pairwise repulsion + viscosity. O(n^2) — fine for n <= 300.
+    for (let i = 0; i < n; i++) {
+      const xi = x[i], yi = y[i], zi = z[i];
+      const vxi = vx[i], vyi = vy[i], vzi = vz[i];
+      for (let j = i + 1; j < n; j++) {
+        const dx = x[j] - xi;
+        const dy = y[j] - yi;
+        const dz = z[j] - zi;
+        const r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < radius2 && r2 > 1e-8) {
+          const r = Math.sqrt(r2);
+          const t = (radius - r) / radius;      // 0..1, 1 = full overlap
+          const force = kPress * t * t * dt;
+          const nx = dx / r, ny = dy / r, nz = dz / r;
+          // Repulsion: push particles apart along (nx,ny,nz).
+          vx[i] -= nx * force; vy[i] -= ny * force; vz[i] -= nz * force;
+          vx[j] += nx * force; vy[j] += ny * force; vz[j] += nz * force;
+          // Viscosity: average a fraction of the velocity difference.
+          const dvx = vx[j] - vx[i];
+          const dvy = vy[j] - vy[i];
+          const dvz = vz[j] - vz[i];
+          const vf = visc * t * dt;
+          vx[i] += dvx * vf; vy[i] += dvy * vf; vz[i] += dvz * vf;
+          vx[j] -= dvx * vf; vy[j] -= dvy * vf; vz[j] -= dvz * vf;
+        }
+      }
+    }
+
+    // 3) Clamp speed so a one-off close encounter can't fling a particle.
+    for (let i = 0; i < n; i++) {
+      const sp2 = vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i];
+      if (sp2 > maxSpd2) {
+        const s = this.maxSpeed / Math.sqrt(sp2);
+        vx[i] *= s; vy[i] *= s; vz[i] *= s;
+      }
+    }
+
+    // 4) Integrate + collide with cube walls.
+    for (let i = 0; i < n; i++) {
+      x[i] += vx[i] * dt;
+      y[i] += vy[i] * dt;
+      z[i] += vz[i] * dt;
+      if (x[i] < -boxHalf) { x[i] = -boxHalf; vx[i] = -vx[i] * rest; }
+      else if (x[i] > boxHalf) { x[i] = boxHalf; vx[i] = -vx[i] * rest; }
+      if (y[i] < -boxHalf) { y[i] = -boxHalf; vy[i] = -vy[i] * rest; }
+      else if (y[i] > boxHalf) { y[i] = boxHalf; vy[i] = -vy[i] * rest; }
+      if (z[i] < -boxHalf) { z[i] = -boxHalf; vz[i] = -vz[i] * rest; }
+      else if (z[i] > boxHalf) { z[i] = boxHalf; vz[i] = -vz[i] * rest; }
+      // Global velocity damping (viscous drag).
+      vx[i] *= damp; vy[i] *= damp; vz[i] *= damp;
+    }
+  };
+
+  Fluid.prototype.centerOfMass = function () {
+    let sx = 0, sy = 0, sz = 0;
+    for (let i = 0; i < this.n; i++) { sx += this.x[i]; sy += this.y[i]; sz += this.z[i]; }
+    return { x: sx / this.n, y: sy / this.n, z: sz / this.n };
+  };
+  Fluid.prototype.totalKE = function () {
+    let e = 0;
+    for (let i = 0; i < this.n; i++) e += this.vx[i]*this.vx[i] + this.vy[i]*this.vy[i] + this.vz[i]*this.vz[i];
+    return 0.5 * e;
+  };
+  Fluid.prototype.hasNaN = function () {
+    for (let i = 0; i < this.n; i++) {
+      if (!isFinite(this.x[i]) || !isFinite(this.y[i]) || !isFinite(this.z[i])) return true;
+      if (!isFinite(this.vx[i]) || !isFinite(this.vy[i]) || !isFinite(this.vz[i])) return true;
+    }
+    return false;
+  };
+  Fluid.prototype.allInBox = function () {
+    const eps = 1e-3;
+    const h = this.boxHalf + eps;
+    for (let i = 0; i < this.n; i++) {
+      if (Math.abs(this.x[i]) > h || Math.abs(this.y[i]) > h || Math.abs(this.z[i]) > h) return false;
+    }
+    return true;
+  };
+
   return {
     HeightField: HeightField,
     SIM_VERSION: SIM_VERSION,
-    mapOrientationToGravity: mapOrientationToGravity
+    mapOrientationToGravity: mapOrientationToGravity,
+    Fluid: Fluid
   };
 }));

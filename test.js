@@ -163,6 +163,27 @@
     assertLE(peak, f.hmax + 1e-3, 'stress peak ' + peak.toFixed(3) + ' exceeded clamp');
   });
 
+  test('stable across the range of dt values a browser might pass (1/240 to 1/30)', () => {
+    // The original tests only covered dt=1/60. iPhone at v18 was exploding
+    // because some path in the live render loop fed a dt that pushed CFL
+    // (c*dt/dx <= 1/sqrt(2)) over the edge with WAVE_C=0.9. Verify that the
+    // sim stays bounded across every realistic frame timing.
+    const dts = [1/240, 1/144, 1/120, 1/90, 1/72, 1/60, 1/45, 1/30];
+    for (const dt of dts) {
+      const f = new HeightField(64, { waveC: 0.6 });
+      f.pokeGaussian(32, 32, 0.12, 3.5);
+      f.startAtRest();
+      let peak = 0;
+      for (let s = 0; s < 600; s++) {
+        f.step(dt, 0, -9.8, 0);
+        const m = f.maxAbsHeight();
+        if (m > peak) peak = m;
+        assert(!f.hasNaN(), 'NaN at dt=' + dt + ' step ' + s);
+      }
+      assertLT(peak, 0.3, 'dt=' + dt.toFixed(5) + ' peak ' + peak.toFixed(4));
+    }
+  });
+
   test('repeated runtime pokes (splash impacts) do not excite high-freq spikes', () => {
     // This mirrors what index.html does each frame: step the simulation, then
     // have ~10 particle impacts call pokeGaussian. Earlier versions of poke

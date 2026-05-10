@@ -147,7 +147,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v18 (2026-05-10 — per-step trace, normals off)';
+  const APP_VERSION = 'v19 (2026-05-10 — slower wave, smaller substep)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -156,10 +156,11 @@
   const BOX_SIZE = 2.0;
   const WATER_REST_Y = -0.35;
   const MAX_PARTICLES = 300;
-  // CFL stability for 2D wave equation requires WAVE_C * dt / dx <= 1/sqrt(2).
-  // With dt = 1/60 and dx = BOX_SIZE/(N-1) = 2/63, WAVE_C must be < ~1.34.
-  // Stay well under that for safety margin.
-  const WAVE_C = 0.9;
+  // CFL stability for 2D wave equation: WAVE_C * dt / dx <= 1/sqrt(2) ~ 0.707.
+  // With dx = 2/63, dt = 1/120 (substep cap below), critical is c <= 1.78.
+  // We use c = 0.6 for very generous margin so any browser timing weirdness
+  // can't push us into the unstable regime.
+  const WAVE_C = 0.6;
   // Velocity drag (1/s). Damps motion without biasing the equilibrium.
   // Under-critical for the slosh mode (critical would be 2*sqrt(STIFFNESS)).
   const VEL_DAMPING = 2.4;
@@ -179,9 +180,12 @@
   const PARTICLE_LIFE = 1.5;
   const GRAVITY_MAG = 9.8;
   const PIXEL_RATIO_CAP = 2;
-  const DT_CLAMP_MIN = 1 / 120;
+  const DT_CLAMP_MIN = 1 / 240;
   const DT_CLAMP_MAX = 1 / 30;
-  const FIXED_DT = 1 / 60;
+  // Substep cap: each physics step uses at most this dt. Smaller value gives
+  // the wave equation more CFL margin; we use 1/120 so even a 30fps frame
+  // produces only sub-1/60-safe substeps.
+  const FIXED_DT = 1 / 120;
 
   const DEG2RAD = Math.PI / 180;
 

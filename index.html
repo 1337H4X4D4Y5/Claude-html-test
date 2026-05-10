@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<title>Water Box</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #050913;
+    color: #e8f1ff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    overscroll-behavior: none;
+    touch-action: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #permission-overlay {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 22px;
+    background: radial-gradient(circle at 50% 40%, rgba(20,40,80,0.92), rgba(0,0,0,0.95));
+    z-index: 10;
+    padding:
+      env(safe-area-inset-top, 0)
+      env(safe-area-inset-right, 0)
+      env(safe-area-inset-bottom, 0)
+      env(safe-area-inset-left, 0);
+    text-align: center;
+  }
+  #permission-overlay h1 {
+    margin: 0; font-size: 26px; font-weight: 600; letter-spacing: 0.5px;
+  }
+  #permission-overlay p {
+    margin: 0 24px; font-size: 15px; opacity: 0.8; max-width: 320px; line-height: 1.4;
+  }
+  #permission-btn {
+    appearance: none; -webkit-appearance: none;
+    border: none;
+    min-width: 240px; min-height: 56px;
+    padding: 0 28px;
+    border-radius: 28px;
+    background: linear-gradient(135deg, #4aa3ff, #2a7fb8);
+    color: #fff;
+    font-size: 17px; font-weight: 600;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    box-shadow: 0 8px 24px rgba(74,163,255,0.35);
+    -webkit-tap-highlight-color: transparent;
+  }
+  #permission-btn:active { transform: scale(0.98); }
+  #hint { font-size: 12px; opacity: 0.55; margin-top: 8px; }
+  #fps {
+    position: fixed; top: env(safe-area-inset-top, 8px); left: 8px;
+    font-size: 11px; opacity: 0.5; pointer-events: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+</style>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+</head>
+<body>
+<div id="permission-overlay">
+  <h1>Water Box</h1>
+  <p>Tilt your phone to slosh the water inside the glass. On iPhone, tap below to allow motion access.</p>
+  <button id="permission-btn">Tap to begin</button>
+  <div id="hint">Desktop: drag the canvas to tilt</div>
+</div>
+<div id="fps"></div>
+<script>
+(function () {
+  'use strict';
+
+  // ---------- Constants ----------
+  const GRID_N = 64;
+  const BOX_SIZE = 2.0;
+  const WATER_REST_Y = 0.0;
+  const MAX_PARTICLES = 300;
+  const WAVE_C = 1.5;
+  const DAMPING = 0.992;
+  const TILT_GAIN = 0.06;
+  const SPAWN_THRESHOLD = 0.55;
+  const SPAWN_PROBABILITY = 0.22;
+  const PARTICLE_LIFE = 1.5;
+  const GRAVITY_MAG = 9.8;
+  const PIXEL_RATIO_CAP = 2;
+  const DT_CLAMP_MIN = 1 / 120;
+  const DT_CLAMP_MAX = 1 / 30;
+  const FIXED_DT = 1 / 60;
+
+  const DEG2RAD = Math.PI / 180;
+
+  // ---------- Three.js setup ----------
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x050913);
+  scene.fog = new THREE.Fog(0x050913, 6, 14);
+
+  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+  camera.position.set(0, 1.6, 4.0);
+  camera.lookAt(0, 0, 0);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, PIXEL_RATIO_CAP));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
+  document.body.appendChild(renderer.domElement);
+
+  // ---------- Lights ----------
+  scene.add(new THREE.AmbientLight(0x8090b0, 0.55));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.0);
+  keyLight.position.set(3, 5, 2);
+  scene.add(keyLight);
+  const fillLight = new THREE.HemisphereLight(0x88aaff, 0x202030, 0.45);
+  scene.add(fillLight);
+
+  // ---------- Glass box ----------
+  const halfBox = BOX_SIZE / 2;
+  const boxGeom = new THREE.BoxGeometry(BOX_SIZE, BOX_SIZE, BOX_SIZE);
+  const boxMat = new THREE.MeshPhongMaterial({
+    color: 0x88ccff,
+    transparent: true,
+    opacity: 0.08,
+    shininess: 120,
+    specular: 0xffffff,
+    side: THREE.DoubleSide,
+    depthWrite: false
+  });
+  const boxMesh = new THREE.Mesh(boxGeom, boxMat);
+  scene.add(boxMesh);
+
+  const edgeGeom = new THREE.EdgesGeometry(boxGeom);
+  const edgeMat = new THREE.LineBasicMaterial({ color: 0xa8d8ff, transparent: true, opacity: 0.6 });
+  const edgeLines = new THREE.LineSegments(edgeGeom, edgeMat);
+  scene.add(edgeLines);
+
+  // Floor inside box (helps depth perception)
+  const floorGeom = new THREE.PlaneGeometry(BOX_SIZE, BOX_SIZE);
+  const floorMat = new THREE.MeshPhongMaterial({ color: 0x102030, side: THREE.DoubleSide, shininess: 30 });
+  const floorMesh = new THREE.Mesh(floorGeom, floorMat);
+  floorMesh.rotation.x = -Math.PI / 2;
+  floorMesh.position.y = -halfBox + 0.001;
+  scene.add(floorMesh);
+
+  // ---------- Height-field water surface ----------
+  const waterGeom = new THREE.PlaneGeometry(BOX_SIZE, BOX_SIZE, GRID_N - 1, GRID_N - 1);
+  const waterMat = new THREE.MeshPhongMaterial({
+    color: 0x2f8fcf,
+    transparent: true,
+    opacity: 0.82,
+    shininess: 110,
+    specular: 0xddeeff,
+    side: THREE.DoubleSide,
+    flatShading: false
+  });
+  const waterMesh = new THREE.Mesh(waterGeom, waterMat);
+  waterMesh.rotation.x = -Math.PI / 2;
+  waterMesh.position.y = WATER_REST_Y;
+  scene.add(waterMesh);
+
+  // ---------- HeightField simulation ----------
+  function HeightField(n) {
+    this.n = n;
+    this.h = new Float32Array(n * n);
+    this.hPrev = new Float32Array(n * n);
+    this.vel = new Float32Array(n * n);
+    this.dx = BOX_SIZE / (n - 1);
+  }
+  HeightField.prototype.idx = function (i, j) { return j * this.n + i; };
+  HeightField.prototype.poke = function (i, j, amount) {
+    if (i < 1 || i >= this.n - 1 || j < 1 || j >= this.n - 1) return;
+    this.h[this.idx(i, j)] += amount;
+  };
+  HeightField.prototype.step = function (dt, gx, gz) {
+    const n = this.n;
+    const h = this.h;
+    const hp = this.hPrev;
+    const vel = this.vel;
+    const c2dt2 = WAVE_C * WAVE_C * dt * dt / (this.dx * this.dx);
+    const tiltScale = TILT_GAIN * dt;
+
+    // Use hPrev as scratch for h_new, then rotate buffers.
+    const hNew = hp;
+    const invN1 = 1 / (n - 1);
+
+    for (let j = 1; j < n - 1; j++) {
+      for (let i = 1; i < n - 1; i++) {
+        const k = j * n + i;
+        const lap = h[k - 1] + h[k + 1] + h[k - n] + h[k + n] - 4 * h[k];
+        const nx = i * invN1 * 2 - 1;
+        const nz = j * invN1 * 2 - 1;
+        const tilt = (nx * gx + nz * gz) * tiltScale;
+        const next = (2 * h[k] - hp[k] + c2dt2 * lap + tilt) * DAMPING;
+        hNew[k] = next;
+      }
+    }
+
+    // Reflective boundary: copy edges from inward neighbors.
+    for (let i = 0; i < n; i++) {
+      hNew[this.idx(i, 0)]     = hNew[this.idx(i, 1)];
+      hNew[this.idx(i, n - 1)] = hNew[this.idx(i, n - 2)];
+      hNew[this.idx(0, i)]     = hNew[this.idx(1, i)];
+      hNew[this.idx(n - 1, i)] = hNew[this.idx(n - 2, i)];
+    }
+
+    // Vertical velocity for splash detection (h_new - h_curr)/dt.
+    const invDt = 1 / dt;
+    for (let k = 0; k < n * n; k++) {
+      vel[k] = (hNew[k] - h[k]) * invDt;
+    }
+
+    // Swap: hPrev <- h, h <- hNew.
+    this.hPrev = h;
+    this.h = hNew;
+  };
+
+  const field = new HeightField(GRID_N);
+
+  // Seed with a small center poke for visual feedback.
+  field.poke(GRID_N >> 1, GRID_N >> 1, 0.25);
+
+  // Helper: convert grid (i,j) -> world (x, z) inside the box.
+  function gridToWorld(i, j) {
+    const halfN = (GRID_N - 1) / 2;
+    const x = (i - halfN) * field.dx;
+    const z = (j - halfN) * field.dx;
+    return { x: x, z: z };
+  }
+  function worldToGrid(x, z) {
+    const halfN = (GRID_N - 1) / 2;
+    const i = Math.round(x / field.dx + halfN);
+    const j = Math.round(z / field.dx + halfN);
+    return { i: i, j: j };
+  }
+
+  // Apply heights to plane geometry. Plane is rotated; pre-rotation Z becomes world Y.
+  const waterPos = waterGeom.attributes.position;
+  function syncWaterMesh() {
+    const arr = waterPos.array;
+    const h = field.h;
+    // PlaneGeometry vertex layout matches our (i,j) grid: vertex k = j*N + i.
+    for (let k = 0; k < h.length; k++) {
+      arr[k * 3 + 2] = h[k];
+    }
+    waterPos.needsUpdate = true;
+    waterGeom.computeVertexNormals();
+  }
+
+  // ---------- Particle system (splashes) ----------
+  function makeSpriteTexture() {
+    const size = 64;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const ctx = c.getContext('2d');
+    const grd = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    grd.addColorStop(0.0, 'rgba(220,240,255,1)');
+    grd.addColorStop(0.4, 'rgba(120,180,230,0.85)');
+    grd.addColorStop(1.0, 'rgba(60,120,200,0)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(c);
+    if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  const particleGeom = new THREE.BufferGeometry();
+  const particlePositions = new Float32Array(MAX_PARTICLES * 3);
+  for (let p = 0; p < MAX_PARTICLES; p++) {
+    particlePositions[p * 3 + 0] = 0;
+    particlePositions[p * 3 + 1] = -9999;
+    particlePositions[p * 3 + 2] = 0;
+  }
+  particleGeom.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+  const particleMat = new THREE.PointsMaterial({
+    size: 0.07,
+    map: makeSpriteTexture(),
+    transparent: true,
+    depthWrite: false,
+    sizeAttenuation: true,
+    blending: THREE.NormalBlending,
+    color: 0xffffff
+  });
+  const particlePoints = new THREE.Points(particleGeom, particleMat);
+  scene.add(particlePoints);
+
+  const particles = new Array(MAX_PARTICLES);
+  for (let p = 0; p < MAX_PARTICLES; p++) {
+    particles[p] = {
+      x: 0, y: -9999, z: 0,
+      vx: 0, vy: 0, vz: 0,
+      life: 0,
+      alive: false
+    };
+  }
+
+  function findFreeParticle() {
+    for (let p = 0; p < MAX_PARTICLES; p++) {
+      if (!particles[p].alive) return p;
+    }
+    return -1;
+  }
+
+  function spawnSplashParticles(gravity) {
+    const h = field.h;
+    const vel = field.vel;
+    const halfN = (GRID_N - 1) / 2;
+    // Sample only interior cells; skip a step for perf.
+    for (let j = 2; j < GRID_N - 2; j += 2) {
+      for (let i = 2; i < GRID_N - 2; i += 2) {
+        const k = j * GRID_N + i;
+        if (vel[k] > SPAWN_THRESHOLD && Math.random() < SPAWN_PROBABILITY) {
+          const slot = findFreeParticle();
+          if (slot < 0) return;
+          const p = particles[slot];
+          const wx = (i - halfN) * field.dx;
+          const wz = (j - halfN) * field.dx;
+          p.x = wx;
+          p.y = WATER_REST_Y + h[k] + 0.02;
+          p.z = wz;
+          // Up direction = -gravity normalized (so droplets shoot away from "down").
+          const gmag = Math.sqrt(gravity.x * gravity.x + gravity.y * gravity.y + gravity.z * gravity.z) || 1;
+          const ux = -gravity.x / gmag;
+          const uy = -gravity.y / gmag;
+          const uz = -gravity.z / gmag;
+          const speed = Math.min(vel[k], 4.0) * 0.55;
+          p.vx = ux * speed + (Math.random() - 0.5) * 0.4;
+          p.vy = uy * speed + (Math.random() - 0.5) * 0.2;
+          p.vz = uz * speed + (Math.random() - 0.5) * 0.4;
+          p.life = PARTICLE_LIFE;
+          p.alive = true;
+        }
+      }
+    }
+  }
+
+  function stepParticles(dt, gravity) {
+    const arr = particlePositions;
+    for (let pi = 0; pi < MAX_PARTICLES; pi++) {
+      const p = particles[pi];
+      if (!p.alive) {
+        arr[pi * 3 + 1] = -9999;
+        continue;
+      }
+      p.vx += gravity.x * dt;
+      p.vy += gravity.y * dt;
+      p.vz += gravity.z * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+      p.life -= dt;
+
+      // Wall collisions inside the box.
+      if (p.x < -halfBox) { p.x = -halfBox; p.vx = -p.vx * 0.4; }
+      else if (p.x > halfBox) { p.x = halfBox; p.vx = -p.vx * 0.4; }
+      if (p.z < -halfBox) { p.z = -halfBox; p.vz = -p.vz * 0.4; }
+      else if (p.z > halfBox) { p.z = halfBox; p.vz = -p.vz * 0.4; }
+      if (p.y > halfBox) { p.y = halfBox; p.vy = -p.vy * 0.4; }
+
+      // Water surface collision: poke field where it lands.
+      const grid = worldToGrid(p.x, p.z);
+      const surface = (grid.i >= 0 && grid.i < GRID_N && grid.j >= 0 && grid.j < GRID_N)
+        ? WATER_REST_Y + field.h[grid.j * GRID_N + grid.i]
+        : WATER_REST_Y;
+
+      let dead = false;
+      if (p.y < surface) {
+        field.poke(grid.i, grid.j, -Math.min(0.25, Math.abs(p.vy) * 0.04));
+        dead = true;
+      }
+      if (p.life <= 0) dead = true;
+      if (p.y < -halfBox - 0.5) dead = true;
+
+      if (dead) {
+        p.alive = false;
+        arr[pi * 3 + 0] = 0;
+        arr[pi * 3 + 1] = -9999;
+        arr[pi * 3 + 2] = 0;
+      } else {
+        arr[pi * 3 + 0] = p.x;
+        arr[pi * 3 + 1] = p.y;
+        arr[pi * 3 + 2] = p.z;
+      }
+    }
+    particleGeom.attributes.position.needsUpdate = true;
+  }
+
+  // ---------- Gravity (gyroscope + fallback) ----------
+  const gravity = new THREE.Vector3(0, -GRAVITY_MAG, 0);
+  const gravityTarget = new THREE.Vector3(0, -GRAVITY_MAG, 0);
+
+  function updateGravityFromOrientation(beta, gamma) {
+    const b = (beta || 0) * DEG2RAD;
+    const g = (gamma || 0) * DEG2RAD;
+    const gxDev = Math.sin(g);
+    const gyDev = -Math.cos(b) * Math.cos(g);
+    const gzDev = Math.sin(b);
+    const orient = (screen.orientation && typeof screen.orientation.angle === 'number')
+      ? screen.orientation.angle
+      : (typeof window.orientation === 'number' ? window.orientation : 0);
+    const o = orient * DEG2RAD;
+    const cosO = Math.cos(o);
+    const sinO = Math.sin(o);
+    const gx =  cosO * gxDev + sinO * gyDev;
+    const gy = -sinO * gxDev + cosO * gyDev;
+    const gz =  gzDev;
+    gravityTarget.set(gx, gy, gz);
+    if (gravityTarget.lengthSq() < 1e-6) gravityTarget.set(0, -1, 0);
+    gravityTarget.normalize().multiplyScalar(GRAVITY_MAG);
+  }
+
+  function onDeviceOrientation(e) {
+    updateGravityFromOrientation(e.beta, e.gamma);
+  }
+
+  // ---------- iOS permission flow ----------
+  const overlay = document.getElementById('permission-overlay');
+  const permissionBtn = document.getElementById('permission-btn');
+
+  function attachOrientationListener() {
+    window.addEventListener('deviceorientation', onDeviceOrientation, true);
+  }
+
+  function hideOverlay() {
+    overlay.style.display = 'none';
+  }
+
+  permissionBtn.addEventListener('click', function () {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      // iOS 13+: must call inside the user-gesture handler.
+      DeviceOrientationEvent.requestPermission().then(function (state) {
+        if (state === 'granted') attachOrientationListener();
+        // Even if denied: still hide overlay; drag fallback works.
+        hideOverlay();
+      }).catch(function () {
+        hideOverlay();
+      });
+    } else {
+      // Non-iOS or old iOS: just attach.
+      attachOrientationListener();
+      hideOverlay();
+    }
+  });
+
+  // ---------- Pointer-drag fallback (desktop and any device) ----------
+  let dragging = false;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  const canvas = renderer.domElement;
+
+  canvas.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    if (canvas.setPointerCapture) try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  canvas.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    const dx = (e.clientX - dragStartX) / window.innerWidth;
+    const dy = (e.clientY - dragStartY) / window.innerHeight;
+    // Clamp drag intensity.
+    const tx = Math.max(-1, Math.min(1, dx * 2));
+    const tz = Math.max(-1, Math.min(1, dy * 2));
+    gravityTarget.set(tx, -1.0, tz).normalize().multiplyScalar(GRAVITY_MAG);
+  });
+  function endDrag(e) {
+    if (!dragging) return;
+    dragging = false;
+    gravityTarget.set(0, -1, 0).multiplyScalar(GRAVITY_MAG);
+    if (canvas.releasePointerCapture && e && e.pointerId !== undefined) {
+      try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+  }
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('pointerleave', endDrag);
+
+  // Prevent default touch behaviors on canvas (extra safety on iOS).
+  canvas.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+
+  // ---------- Resize / orientation change ----------
+  function onResize() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, PIXEL_RATIO_CAP));
+    renderer.setSize(w, h);
+  }
+  window.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', onResize);
+  if (screen.orientation && screen.orientation.addEventListener) {
+    screen.orientation.addEventListener('change', onResize);
+  }
+
+  // ---------- FPS overlay (optional, lightweight) ----------
+  const fpsEl = document.getElementById('fps');
+  let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
+
+  // ---------- Main loop ----------
+  let lastT = performance.now() / 1000;
+  function loop() {
+    requestAnimationFrame(loop);
+
+    const nowT = performance.now() / 1000;
+    let dt = nowT - lastT;
+    lastT = nowT;
+
+    if (document.hidden) return;
+    if (dt > DT_CLAMP_MAX) dt = DT_CLAMP_MAX;
+    if (dt < DT_CLAMP_MIN) dt = DT_CLAMP_MIN;
+
+    // Smoothly approach gravity target.
+    gravity.lerp(gravityTarget, 0.15);
+
+    // Step physics with a fixed substep for stability.
+    let acc = dt;
+    let safety = 4;
+    while (acc > 0 && safety-- > 0) {
+      const step = Math.min(FIXED_DT, acc);
+      field.step(step, gravity.x, gravity.z);
+      stepParticles(step, gravity);
+      acc -= step;
+    }
+
+    spawnSplashParticles(gravity);
+    syncWaterMesh();
+
+    renderer.render(scene, camera);
+
+    // FPS readout.
+    fpsAccum += dt; fpsFrames++; fpsTimer += dt;
+    if (fpsTimer > 0.5) {
+      const fps = fpsFrames / fpsAccum;
+      fpsEl.textContent = fps.toFixed(0) + ' fps';
+      fpsAccum = 0; fpsFrames = 0; fpsTimer = 0;
+    }
+  }
+  loop();
+})();
+</script>
+</body>
+</html>

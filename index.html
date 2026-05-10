@@ -81,6 +81,22 @@
     opacity: 0.55;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
+  #debug {
+    position: fixed;
+    bottom: calc(env(safe-area-inset-bottom, 8px) + 8px);
+    left: 8px;
+    right: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(0,0,0,0.55);
+    color: #cfe6ff;
+    font-size: 11px;
+    line-height: 1.5;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    pointer-events: none;
+    z-index: 20;
+    white-space: pre;
+  }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <script src="sim.js"></script>
@@ -95,13 +111,14 @@
 </div>
 <div id="fps"></div>
 <div id="version"></div>
+<div id="debug">gyro: waiting…</div>
 <script>
 (function () {
   'use strict';
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v8 (2026-05-10)';
+  const APP_VERSION = 'v9 (2026-05-10)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -399,6 +416,15 @@
   const gravity = new THREE.Vector3(0, -GRAVITY_MAG, 0);
   const gravityTarget = new THREE.Vector3(0, -GRAVITY_MAG, 0);
 
+  // Diagnostics: surfaced in the on-screen debug panel.
+  const gyro = {
+    permission: 'unknown',  // 'unknown' | 'granted' | 'denied' | 'no-api' | 'error'
+    eventCount: 0,
+    lastBeta: 0,
+    lastGamma: 0,
+    lastEventTime: 0
+  };
+
   function updateGravityFromOrientation(beta, gamma) {
     const b = (beta || 0) * DEG2RAD;
     const g = (gamma || 0) * DEG2RAD;
@@ -420,6 +446,10 @@
   }
 
   function onDeviceOrientation(e) {
+    gyro.eventCount++;
+    gyro.lastBeta = e.beta || 0;
+    gyro.lastGamma = e.gamma || 0;
+    gyro.lastEventTime = performance.now();
     updateGravityFromOrientation(e.beta, e.gamma);
   }
 
@@ -440,14 +470,16 @@
         typeof DeviceOrientationEvent.requestPermission === 'function') {
       // iOS 13+: must call inside the user-gesture handler.
       DeviceOrientationEvent.requestPermission().then(function (state) {
+        gyro.permission = state;
         if (state === 'granted') attachOrientationListener();
-        // Even if denied: still hide overlay; drag fallback works.
         hideOverlay();
-      }).catch(function () {
+      }).catch(function (err) {
+        gyro.permission = 'error: ' + (err && err.message ? err.message : 'unknown');
         hideOverlay();
       });
     } else {
       // Non-iOS or old iOS: just attach.
+      gyro.permission = (typeof DeviceOrientationEvent === 'undefined') ? 'no-api' : 'granted';
       attachOrientationListener();
       hideOverlay();
     }
@@ -504,9 +536,32 @@
     screen.orientation.addEventListener('change', onResize);
   }
 
-  // ---------- FPS overlay (optional, lightweight) ----------
+  // ---------- FPS + gyro debug overlays ----------
   const fpsEl = document.getElementById('fps');
+  const debugEl = document.getElementById('debug');
   let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
+  let debugTimer = 0;
+  function formatNum(v, w) {
+    const s = (v >= 0 ? ' ' : '') + v.toFixed(2);
+    return s.padStart(w || 6, ' ');
+  }
+  function updateDebug() {
+    const age = gyro.lastEventTime
+      ? ((performance.now() - gyro.lastEventTime) / 1000).toFixed(1) + 's ago'
+      : 'never';
+    debugEl.textContent =
+      'gyro: ' + gyro.permission +
+      '  events: ' + gyro.eventCount +
+      '  last: ' + age + '\n' +
+      'β: ' + formatNum(gyro.lastBeta) +
+      '  γ: ' + formatNum(gyro.lastGamma) + '\n' +
+      'gravity   x:' + formatNum(gravity.x) +
+      ' y:' + formatNum(gravity.y) +
+      ' z:' + formatNum(gravity.z) + '\n' +
+      'target    x:' + formatNum(gravityTarget.x) +
+      ' y:' + formatNum(gravityTarget.y) +
+      ' z:' + formatNum(gravityTarget.z);
+  }
 
   // ---------- Main loop ----------
   let lastT = performance.now() / 1000;
@@ -546,6 +601,10 @@
       fpsEl.textContent = fps.toFixed(0) + ' fps';
       fpsAccum = 0; fpsFrames = 0; fpsTimer = 0;
     }
+
+    // Debug panel ~5 Hz to keep it readable.
+    debugTimer += dt;
+    if (debugTimer > 0.2) { updateDebug(); debugTimer = 0; }
   }
   loop();
 })();

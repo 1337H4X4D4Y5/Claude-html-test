@@ -136,7 +136,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v12 (2026-05-10 — gyro disabled)';
+  const APP_VERSION = 'v13 (2026-05-10 — gyro + splashes disabled)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -673,11 +673,14 @@
     while (acc > 0 && safety-- > 0) {
       const step = Math.min(FIXED_DT, acc);
       field.step(step, gravity.x, gravity.y, gravity.z);
-      stepParticles(step, gravity);
+      // Particles disabled in v13: 300/300 alive splashes were creating a
+      // runaway feedback loop (impacts -> ripples -> more spawns -> more
+      // impacts). Re-enable once we confirm the bare sim is stable.
+      // stepParticles(step, gravity);
       acc -= step;
     }
 
-    spawnSplashParticles(gravity);
+    // spawnSplashParticles(gravity);  // disabled in v13
     syncWaterMesh();
 
     renderer.render(scene, camera);

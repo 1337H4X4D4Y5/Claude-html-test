@@ -10,6 +10,9 @@
   }
 }(typeof self !== 'undefined' ? self : this, function () {
 
+  // Bump on every change so the loaded build is verifiable.
+  const SIM_VERSION = 'sim-14';
+
   function HeightField(n, opts) {
     opts = opts || {};
     this.n = n;
@@ -168,5 +171,5 @@
     return false;
   };
 
-  return { HeightField: HeightField };
+  return { HeightField: HeightField, SIM_VERSION: SIM_VERSION };
 }));

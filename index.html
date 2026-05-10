@@ -117,7 +117,7 @@
   #copy-btn.copied { background: rgba(80,200,120,0.45); }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="sim.js"></script>
+<script src="sim.js?v=14"></script>
 </head>
 <body>
 <div id="permission-overlay">
@@ -136,7 +136,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v13 (2026-05-10 — gyro + splashes disabled)';
+  const APP_VERSION = 'v14 (2026-05-10 — gyro + splashes disabled, cache-busted)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -570,6 +570,7 @@
     return [
       '=== Water Box debug report ===',
       'version:    ' + APP_VERSION,
+      'sim:        ' + (typeof SIM_VERSION !== 'undefined' ? SIM_VERSION : 'UNKNOWN (stale sim.js cached!)'),
       'time:       ' + new Date().toISOString(),
       'fps:        ' + lastFps.toFixed(1),
       '',

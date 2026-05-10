@@ -100,7 +100,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v6 (2026-05-10)';
+  const APP_VERSION = 'v7 (2026-05-10)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -113,7 +113,11 @@
   // With dt = 1/60 and dx = BOX_SIZE/(N-1) = 2/63, WAVE_C must be < ~1.34.
   // Stay well under that for safety margin.
   const WAVE_C = 0.9;
-  const DAMPING = 0.995;
+  // Velocity drag (1/s). Damps motion without biasing the equilibrium.
+  // Under-critical for the slosh mode (critical would be 2*sqrt(STIFFNESS)).
+  const VEL_DAMPING = 2.4;
+  // Tiny amplitude floor for numerical hygiene only.
+  const AMP_DAMPING = 0.9999;
   // Spring stiffness pulling surface toward the gravity-tilted equilibrium plane.
   // Higher = surface follows the phone more rigidly. Units roughly 1/s^2.
   const TILT_STIFFNESS = 10.0;
@@ -239,6 +243,11 @@
     const vel = this.vel;
     const c2dt2 = WAVE_C * WAVE_C * dt * dt / (this.dx * this.dx);
     const dt2 = dt * dt;
+    // Velocity damping coefficients: h_new = (2 - gammaDt)*h - (1 - gammaDt)*hp + accel*dt^2.
+    // Damps velocity (h - hp) without pulling h toward zero.
+    const gammaDt = VEL_DAMPING * dt;
+    const aCoef = 2 - gammaDt;
+    const bCoef = 1 - gammaDt;
 
     // Tilted equilibrium plane: surface perpendicular to gravity.
     // dh/dx = gx/|gy|, dh/dz = gz/|gy|, capped so the plane stays inside the box.
@@ -268,7 +277,7 @@
         const wx = (i - halfN) * dx;
         const hEq = slopeX * wx + slopeZ * wz;
         const restore = (hEq - h[k]) * TILT_STIFFNESS;
-        const next = (2 * h[k] - hp[k] + c2dt2 * lap + restore * dt2) * DAMPING;
+        const next = (aCoef * h[k] - bCoef * hp[k] + c2dt2 * lap + restore * dt2) * AMP_DAMPING;
         hNew[k] = next;
       }
     }

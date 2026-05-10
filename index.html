@@ -100,7 +100,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v4 (2026-05-10)';
+  const APP_VERSION = 'v5 (2026-05-10)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -115,8 +115,8 @@
   const WAVE_C = 0.9;
   const DAMPING = 0.995;
   const TILT_GAIN = 0.06;
-  const SPAWN_THRESHOLD = 0.55;
-  const SPAWN_PROBABILITY = 0.22;
+  const SPAWN_THRESHOLD = 1.8;
+  const SPAWN_PROBABILITY = 0.15;
   const PARTICLE_LIFE = 1.5;
   const GRAVITY_MAG = 9.8;
   const PIXEL_RATIO_CAP = 2;
@@ -280,9 +280,13 @@
   const field = new HeightField(GRID_N);
 
   // Seed with smooth Gaussian pokes for visible motion without spikes.
-  field.pokeGaussian(GRID_N >> 1, GRID_N >> 1, 0.18, 3.0);
-  field.pokeGaussian((GRID_N >> 1) - 10, (GRID_N >> 1) + 8, 0.10, 2.5);
-  field.pokeGaussian((GRID_N >> 1) + 12, (GRID_N >> 1) - 6, 0.10, 2.5);
+  field.pokeGaussian(GRID_N >> 1, GRID_N >> 1, 0.12, 3.5);
+  field.pokeGaussian((GRID_N >> 1) - 10, (GRID_N >> 1) + 8, 0.07, 3.0);
+  field.pokeGaussian((GRID_N >> 1) + 12, (GRID_N >> 1) - 6, 0.07, 3.0);
+  // CRITICAL: initialize hPrev = h so the wave equation starts at rest.
+  // Without this, the first step interprets the bumps as a huge initial
+  // velocity and the surface immediately explodes into spikes.
+  field.hPrev.set(field.h);
 
   // Helper: convert grid (i,j) -> world (x, z) inside the box.
   function gridToWorld(i, j) {
@@ -430,7 +434,8 @@
 
       let dead = false;
       if (p.y < surface) {
-        field.poke(grid.i, grid.j, -Math.min(0.25, Math.abs(p.vy) * 0.04));
+        const impact = -Math.min(0.05, Math.abs(p.vy) * 0.012);
+        field.pokeGaussian(grid.i, grid.j, impact, 1.6);
         dead = true;
       }
       if (p.life <= 0) dead = true;

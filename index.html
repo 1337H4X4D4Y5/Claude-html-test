@@ -80,7 +80,7 @@
   // ---------- Constants ----------
   const GRID_N = 64;
   const BOX_SIZE = 2.0;
-  const WATER_REST_Y = 0.0;
+  const WATER_REST_Y = -0.35;
   const MAX_PARTICLES = 300;
   const WAVE_C = 1.5;
   const DAMPING = 0.992;
@@ -125,18 +125,20 @@
   const boxMat = new THREE.MeshPhongMaterial({
     color: 0x88ccff,
     transparent: true,
-    opacity: 0.08,
+    opacity: 0.05,
     shininess: 120,
     specular: 0xffffff,
-    side: THREE.DoubleSide,
+    side: THREE.BackSide,
     depthWrite: false
   });
   const boxMesh = new THREE.Mesh(boxGeom, boxMat);
+  boxMesh.renderOrder = 0;
   scene.add(boxMesh);
 
   const edgeGeom = new THREE.EdgesGeometry(boxGeom);
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0xa8d8ff, transparent: true, opacity: 0.6 });
+  const edgeMat = new THREE.LineBasicMaterial({ color: 0xa8d8ff, transparent: true, opacity: 0.85 });
   const edgeLines = new THREE.LineSegments(edgeGeom, edgeMat);
+  edgeLines.renderOrder = 3;
   scene.add(edgeLines);
 
   // Floor inside box (helps depth perception)
@@ -150,17 +152,19 @@
   // ---------- Height-field water surface ----------
   const waterGeom = new THREE.PlaneGeometry(BOX_SIZE, BOX_SIZE, GRID_N - 1, GRID_N - 1);
   const waterMat = new THREE.MeshPhongMaterial({
-    color: 0x2f8fcf,
+    color: 0x3aa3e8,
+    emissive: 0x0a2540,
     transparent: true,
-    opacity: 0.82,
-    shininess: 110,
-    specular: 0xddeeff,
+    opacity: 0.92,
+    shininess: 140,
+    specular: 0xffffff,
     side: THREE.DoubleSide,
     flatShading: false
   });
   const waterMesh = new THREE.Mesh(waterGeom, waterMat);
   waterMesh.rotation.x = -Math.PI / 2;
   waterMesh.position.y = WATER_REST_Y;
+  waterMesh.renderOrder = 2;
   scene.add(waterMesh);
 
   // ---------- HeightField simulation ----------
@@ -221,8 +225,10 @@
 
   const field = new HeightField(GRID_N);
 
-  // Seed with a small center poke for visual feedback.
-  field.poke(GRID_N >> 1, GRID_N >> 1, 0.25);
+  // Seed with a strong center poke + a few off-center pokes for visible motion.
+  field.poke(GRID_N >> 1, GRID_N >> 1, 0.6);
+  field.poke((GRID_N >> 1) - 8, (GRID_N >> 1) + 6, 0.35);
+  field.poke((GRID_N >> 1) + 10, (GRID_N >> 1) - 5, 0.35);
 
   // Helper: convert grid (i,j) -> world (x, z) inside the box.
   function gridToWorld(i, j) {

@@ -93,10 +93,28 @@
     font-size: 11px;
     line-height: 1.5;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    pointer-events: none;
     z-index: 20;
     white-space: pre;
   }
+  #debug-text { pointer-events: none; }
+  #copy-btn {
+    appearance: none; -webkit-appearance: none;
+    display: block;
+    margin-top: 8px;
+    width: 100%;
+    min-height: 40px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(74,163,255,0.30);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #copy-btn:active { transform: scale(0.98); background: rgba(74,163,255,0.45); }
+  #copy-btn.copied { background: rgba(80,200,120,0.45); }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <script src="sim.js"></script>
@@ -111,14 +129,14 @@
 </div>
 <div id="fps"></div>
 <div id="version"></div>
-<div id="debug">gyro: waiting…</div>
+<div id="debug"><div id="debug-text">gyro: waiting…</div><button id="copy-btn">Copy debug info</button></div>
 <script>
 (function () {
   'use strict';
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v11 (2026-05-10 — gyro disabled)';
+  const APP_VERSION = 'v12 (2026-05-10 — gyro disabled)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -492,18 +510,20 @@
 
   // ---------- FPS + gyro debug overlays ----------
   const fpsEl = document.getElementById('fps');
-  const debugEl = document.getElementById('debug');
+  const debugTextEl = document.getElementById('debug-text');
+  const copyBtn = document.getElementById('copy-btn');
   let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
   let debugTimer = 0;
+  let lastFps = 0;
   function formatNum(v, w) {
     const s = (v >= 0 ? ' ' : '') + v.toFixed(2);
     return s.padStart(w || 6, ' ');
   }
-  function updateDebug() {
+  function buildDebugText() {
     const age = gyro.lastEventTime
       ? ((performance.now() - gyro.lastEventTime) / 1000).toFixed(1) + 's ago'
       : 'never';
-    debugEl.textContent =
+    return (
       'gyro: ' + gyro.permission +
       '  events: ' + gyro.eventCount +
       '  last: ' + age + '\n' +
@@ -514,8 +534,122 @@
       ' z:' + formatNum(gravity.z) + '\n' +
       'target    x:' + formatNum(gravityTarget.x) +
       ' y:' + formatNum(gravityTarget.y) +
-      ' z:' + formatNum(gravityTarget.z);
+      ' z:' + formatNum(gravityTarget.z)
+    );
   }
+  function updateDebug() {
+    debugTextEl.textContent = buildDebugText();
+  }
+  function buildFullReport() {
+    // Sim health snapshot.
+    let maxH = 0, sumSq = 0, nans = 0, edgeMaxAbsDiff = 0;
+    const h = field.h;
+    for (let k = 0; k < h.length; k++) {
+      if (!isFinite(h[k])) nans++;
+      else {
+        const a = Math.abs(h[k]);
+        if (a > maxH) maxH = a;
+        sumSq += h[k] * h[k];
+      }
+    }
+    // Largest height jump between any two adjacent cells (high-freq indicator).
+    const N = field.n;
+    let maxAdjDiff = 0;
+    for (let j = 1; j < N - 1; j++) {
+      for (let i = 1; i < N - 2; i++) {
+        const k = j * N + i;
+        const d1 = Math.abs(h[k] - h[k + 1]);
+        if (d1 > maxAdjDiff) maxAdjDiff = d1;
+        const d2 = Math.abs(h[k] - h[k + N]);
+        if (d2 > maxAdjDiff) maxAdjDiff = d2;
+      }
+    }
+    // Particle count alive.
+    let alive = 0;
+    for (let p = 0; p < particles.length; p++) if (particles[p].alive) alive++;
+    return [
+      '=== Water Box debug report ===',
+      'version:    ' + APP_VERSION,
+      'time:       ' + new Date().toISOString(),
+      'fps:        ' + lastFps.toFixed(1),
+      '',
+      '-- gyro --',
+      'permission: ' + gyro.permission,
+      'events:     ' + gyro.eventCount,
+      'last evt:   ' + (gyro.lastEventTime
+        ? ((performance.now() - gyro.lastEventTime) / 1000).toFixed(2) + 's ago'
+        : 'never'),
+      'beta:       ' + gyro.lastBeta.toFixed(3),
+      'gamma:      ' + gyro.lastGamma.toFixed(3),
+      'screen.orientation.angle: ' +
+        ((screen.orientation && typeof screen.orientation.angle === 'number')
+          ? screen.orientation.angle
+          : 'n/a'),
+      'window.orientation: ' +
+        (typeof window.orientation === 'number' ? window.orientation : 'n/a'),
+      '',
+      '-- gravity --',
+      'gravity x:  ' + gravity.x.toFixed(3),
+      'gravity y:  ' + gravity.y.toFixed(3),
+      'gravity z:  ' + gravity.z.toFixed(3),
+      'target  x:  ' + gravityTarget.x.toFixed(3),
+      'target  y:  ' + gravityTarget.y.toFixed(3),
+      'target  z:  ' + gravityTarget.z.toFixed(3),
+      '',
+      '-- sim health --',
+      'grid:           ' + N + 'x' + N,
+      'max |h|:        ' + maxH.toFixed(4) + '  (clamp at ' + field.hmax + ')',
+      'sum h^2:        ' + sumSq.toFixed(4),
+      'NaN cells:      ' + nans,
+      'max adj diff:   ' + maxAdjDiff.toFixed(4) + '  (high-freq indicator)',
+      'alive splashes: ' + alive + ' / ' + particles.length,
+      '',
+      '-- environment --',
+      'window:        ' + window.innerWidth + 'x' + window.innerHeight,
+      'devicePixelRatio: ' + (window.devicePixelRatio || 1),
+      'WebGL:         ' + (renderer.capabilities && renderer.capabilities.isWebGL2 ? 'WebGL2' : 'WebGL1'),
+      'userAgent:     ' + navigator.userAgent
+    ].join('\n');
+  }
+  copyBtn.addEventListener('click', function () {
+    const text = buildFullReport();
+    function showCopied() {
+      copyBtn.textContent = 'Copied! ✓';
+      copyBtn.classList.add('copied');
+      setTimeout(function () {
+        copyBtn.textContent = 'Copy debug info';
+        copyBtn.classList.remove('copied');
+      }, 1500);
+    }
+    function fallback() {
+      // Legacy fallback: a textarea + execCommand. Still works in iOS Safari
+      // when navigator.clipboard isn't available or fails.
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '0';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+      if (ok) showCopied();
+      else {
+        copyBtn.textContent = 'Copy failed — long-press text';
+        setTimeout(function () {
+          copyBtn.textContent = 'Copy debug info';
+        }, 2000);
+      }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(showCopied, fallback);
+    } else {
+      fallback();
+    }
+  });
 
   // ---------- Main loop ----------
   let lastT = performance.now() / 1000;
@@ -551,8 +685,8 @@
     // FPS readout.
     fpsAccum += dt; fpsFrames++; fpsTimer += dt;
     if (fpsTimer > 0.5) {
-      const fps = fpsFrames / fpsAccum;
-      fpsEl.textContent = fps.toFixed(0) + ' fps';
+      lastFps = fpsFrames / fpsAccum;
+      fpsEl.textContent = lastFps.toFixed(0) + ' fps';
       fpsAccum = 0; fpsFrames = 0; fpsTimer = 0;
     }
 

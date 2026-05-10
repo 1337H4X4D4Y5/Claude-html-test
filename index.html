@@ -115,6 +115,16 @@
   }
   #copy-btn:active { transform: scale(0.98); background: rgba(74,163,255,0.45); }
   #copy-btn.copied { background: rgba(80,200,120,0.45); }
+  #reset-btn {
+    appearance: none; -webkit-appearance: none;
+    display: block; margin-top: 6px; width: 100%; min-height: 36px;
+    border: none; border-radius: 8px;
+    background: rgba(220,140,80,0.30); color: #fff;
+    font-size: 13px; font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  #reset-btn:active { transform: scale(0.98); }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <script src="sim.js?v=14"></script>
@@ -130,14 +140,14 @@
 </div>
 <div id="fps"></div>
 <div id="version"></div>
-<div id="debug"><div id="debug-text">gyro: waiting…</div><button id="copy-btn">Copy debug info</button></div>
+<div id="debug"><div id="debug-text">gyro: waiting…</div><button id="copy-btn">Copy debug info</button><button id="reset-btn">Reset simulation</button></div>
 <script>
 (function () {
   'use strict';
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v15 (2026-05-10 — gyro+splashes off, on-device tests)';
+  const APP_VERSION = 'v16 (2026-05-10 — time-series diagnostic)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -581,6 +591,32 @@
   // Snapshot the live field's initial seed amplitude for comparison.
   const _liveInitialMaxH = field.maxAbsHeight();
 
+  // Time-series of max|h| sampled every 0.5s. Lets us see exactly when the
+  // simulation transitions from calm to explosive on the device.
+  const TIMELINE_INTERVAL = 0.5;
+  const TIMELINE_LEN = 30; // last 15 seconds
+  const timeline = [];
+  let timelineTimer = 0;
+  const startWallTime = performance.now();
+  function pushTimeline() {
+    let madj = 0;
+    const N = field.n;
+    const h = field.h;
+    for (let j = 1; j < N - 1; j++) {
+      for (let i = 1; i < N - 2; i++) {
+        const k = j * N + i;
+        const d = Math.abs(h[k] - h[k + 1]);
+        if (d > madj) madj = d;
+      }
+    }
+    timeline.push({
+      t: ((performance.now() - startWallTime) / 1000),
+      maxH: field.maxAbsHeight(),
+      maxAdj: madj
+    });
+    while (timeline.length > TIMELINE_LEN) timeline.shift();
+  }
+
   function buildFullReport() {
     // Sim health snapshot.
     let maxH = 0, sumSq = 0, nans = 0, edgeMaxAbsDiff = 0;
@@ -653,6 +689,14 @@
         ', finalAdj ' + _selfTest.finalAdj.toFixed(4),
       'live initial max|h|: ' + _liveInitialMaxH.toFixed(4) + '  (expected ~0.12)',
       '',
+      '-- live timeline (sampled every ' + TIMELINE_INTERVAL + 's, last ' + (TIMELINE_LEN * TIMELINE_INTERVAL) + 's) --',
+      timeline.length === 0 ? '(no samples yet)' :
+        timeline.map(function (s) {
+          return '  t=' + s.t.toFixed(1).padStart(5, ' ') +
+                 's  max|h|=' + s.maxH.toFixed(4) +
+                 '  maxAdj=' + s.maxAdj.toFixed(4);
+        }).join('\n'),
+      '',
       '-- unit tests (run on load) --',
       (function () {
         const r = window.__TEST_RESULTS__ || [];
@@ -673,6 +717,19 @@
       'userAgent:     ' + navigator.userAgent
     ].join('\n');
   }
+  document.getElementById('reset-btn').addEventListener('click', function () {
+    // Re-seed the live field from a clean state.
+    field.h.fill(0);
+    field.hPrev.fill(0);
+    if (field._scratch) field._scratch.fill(0);
+    field.pokeGaussian(GRID_N >> 1, GRID_N >> 1, 0.12, 3.5);
+    field.pokeGaussian((GRID_N >> 1) - 10, (GRID_N >> 1) + 8, 0.07, 3.0);
+    field.pokeGaussian((GRID_N >> 1) + 12, (GRID_N >> 1) - 6, 0.07, 3.0);
+    field.startAtRest();
+    timeline.length = 0;
+    timelineTimer = 0;
+  });
+
   copyBtn.addEventListener('click', function () {
     const text = buildFullReport();
     function showCopied() {
@@ -758,6 +815,10 @@
     // Debug panel ~5 Hz to keep it readable.
     debugTimer += dt;
     if (debugTimer > 0.2) { updateDebug(); debugTimer = 0; }
+
+    // Timeline sampler.
+    timelineTimer += dt;
+    if (timelineTimer > TIMELINE_INTERVAL) { pushTimeline(); timelineTimer = 0; }
   }
   loop();
 })();

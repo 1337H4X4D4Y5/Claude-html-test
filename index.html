@@ -118,7 +118,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v10 (2026-05-10)';
+  const APP_VERSION = 'v11 (2026-05-10 — gyro disabled)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -454,70 +454,24 @@
   }
 
   // ---------- iOS permission flow ----------
+  // GYRO DISABLED in v11 to isolate the source of the surface spikes.
+  // Tap-to-begin still hides the overlay but does NOT attach any orientation
+  // listener; gravity stays at the default (0, -G, 0). Re-enable later.
   const overlay = document.getElementById('permission-overlay');
   const permissionBtn = document.getElementById('permission-btn');
-
-  function attachOrientationListener() {
-    window.addEventListener('deviceorientation', onDeviceOrientation, true);
-  }
 
   function hideOverlay() {
     overlay.style.display = 'none';
   }
 
   permissionBtn.addEventListener('click', function () {
-    if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      // iOS 13+: must call inside the user-gesture handler.
-      DeviceOrientationEvent.requestPermission().then(function (state) {
-        gyro.permission = state;
-        if (state === 'granted') attachOrientationListener();
-        hideOverlay();
-      }).catch(function (err) {
-        gyro.permission = 'error: ' + (err && err.message ? err.message : 'unknown');
-        hideOverlay();
-      });
-    } else {
-      // Non-iOS or old iOS: just attach.
-      gyro.permission = (typeof DeviceOrientationEvent === 'undefined') ? 'no-api' : 'granted';
-      attachOrientationListener();
-      hideOverlay();
-    }
+    gyro.permission = 'disabled (v11 isolation)';
+    hideOverlay();
   });
 
-  // ---------- Pointer-drag fallback (desktop and any device) ----------
-  let dragging = false;
-  let dragStartX = 0;
-  let dragStartY = 0;
+  // ---------- Pointer-drag fallback DISABLED in v11 ----------
+  // No input is attached to the canvas. gravityTarget stays at (0, -G, 0).
   const canvas = renderer.domElement;
-
-  canvas.addEventListener('pointerdown', function (e) {
-    dragging = true;
-    dragStartX = e.clientX;
-    dragStartY = e.clientY;
-    if (canvas.setPointerCapture) try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
-  });
-  canvas.addEventListener('pointermove', function (e) {
-    if (!dragging) return;
-    const dx = (e.clientX - dragStartX) / window.innerWidth;
-    const dy = (e.clientY - dragStartY) / window.innerHeight;
-    // Clamp drag intensity.
-    const tx = Math.max(-1, Math.min(1, dx * 2));
-    const tz = Math.max(-1, Math.min(1, dy * 2));
-    gravityTarget.set(tx, -1.0, tz).normalize().multiplyScalar(GRAVITY_MAG);
-  });
-  function endDrag(e) {
-    if (!dragging) return;
-    dragging = false;
-    gravityTarget.set(0, -1, 0).multiplyScalar(GRAVITY_MAG);
-    if (canvas.releasePointerCapture && e && e.pointerId !== undefined) {
-      try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
-    }
-  }
-  canvas.addEventListener('pointerup', endDrag);
-  canvas.addEventListener('pointercancel', endDrag);
-  canvas.addEventListener('pointerleave', endDrag);
-
   // Prevent default touch behaviors on canvas (extra safety on iOS).
   canvas.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
 

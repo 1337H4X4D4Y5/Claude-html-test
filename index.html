@@ -100,7 +100,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v3 (2026-05-10)';
+  const APP_VERSION = 'v4 (2026-05-10)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -109,8 +109,11 @@
   const BOX_SIZE = 2.0;
   const WATER_REST_Y = -0.35;
   const MAX_PARTICLES = 300;
-  const WAVE_C = 1.5;
-  const DAMPING = 0.992;
+  // CFL stability for 2D wave equation requires WAVE_C * dt / dx <= 1/sqrt(2).
+  // With dt = 1/60 and dx = BOX_SIZE/(N-1) = 2/63, WAVE_C must be < ~1.34.
+  // Stay well under that for safety margin.
+  const WAVE_C = 0.9;
+  const DAMPING = 0.995;
   const TILT_GAIN = 0.06;
   const SPAWN_THRESHOLD = 0.55;
   const SPAWN_PROBABILITY = 0.22;
@@ -207,6 +210,20 @@
     if (i < 1 || i >= this.n - 1 || j < 1 || j >= this.n - 1) return;
     this.h[this.idx(i, j)] += amount;
   };
+  // Smooth Gaussian-shaped poke; avoids single-cell spikes that look bad
+  // and that can excite high-frequency unstable modes.
+  HeightField.prototype.pokeGaussian = function (ci, cj, amp, sigma) {
+    const r = Math.ceil(sigma * 3);
+    const inv2s2 = 1 / (2 * sigma * sigma);
+    for (let dj = -r; dj <= r; dj++) {
+      for (let di = -r; di <= r; di++) {
+        const i = ci + di, j = cj + dj;
+        if (i < 1 || i >= this.n - 1 || j < 1 || j >= this.n - 1) continue;
+        const w = Math.exp(-(di * di + dj * dj) * inv2s2);
+        this.h[this.idx(i, j)] += amp * w;
+      }
+    }
+  };
   HeightField.prototype.step = function (dt, gx, gz) {
     const n = this.n;
     const h = this.h;
@@ -239,6 +256,16 @@
       hNew[this.idx(n - 1, i)] = hNew[this.idx(n - 2, i)];
     }
 
+    // Clamp + NaN guard so a one-off instability can't kill the visualization.
+    const HMAX = 0.6;
+    for (let k = 0; k < n * n; k++) {
+      let v = hNew[k];
+      if (!isFinite(v)) v = 0;
+      else if (v > HMAX) v = HMAX;
+      else if (v < -HMAX) v = -HMAX;
+      hNew[k] = v;
+    }
+
     // Vertical velocity for splash detection (h_new - h_curr)/dt.
     const invDt = 1 / dt;
     for (let k = 0; k < n * n; k++) {
@@ -252,10 +279,10 @@
 
   const field = new HeightField(GRID_N);
 
-  // Seed with a strong center poke + a few off-center pokes for visible motion.
-  field.poke(GRID_N >> 1, GRID_N >> 1, 0.6);
-  field.poke((GRID_N >> 1) - 8, (GRID_N >> 1) + 6, 0.35);
-  field.poke((GRID_N >> 1) + 10, (GRID_N >> 1) - 5, 0.35);
+  // Seed with smooth Gaussian pokes for visible motion without spikes.
+  field.pokeGaussian(GRID_N >> 1, GRID_N >> 1, 0.18, 3.0);
+  field.pokeGaussian((GRID_N >> 1) - 10, (GRID_N >> 1) + 8, 0.10, 2.5);
+  field.pokeGaussian((GRID_N >> 1) + 12, (GRID_N >> 1) - 6, 0.10, 2.5);
 
   // Helper: convert grid (i,j) -> world (x, z) inside the box.
   function gridToWorld(i, j) {

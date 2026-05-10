@@ -118,6 +118,7 @@
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <script src="sim.js?v=14"></script>
+<script src="test.js?v=15"></script>
 </head>
 <body>
 <div id="permission-overlay">
@@ -136,7 +137,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v14 (2026-05-10 — gyro + splashes disabled, cache-busted)';
+  const APP_VERSION = 'v15 (2026-05-10 — gyro+splashes off, on-device tests)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -540,6 +541,46 @@
   function updateDebug() {
     debugTextEl.textContent = buildDebugText();
   }
+  // ---------- On-device sanity check ----------
+  // Run a fresh sim with the EXACT same setup as the live one and report
+  // peak max|h| over 200 steps. In Node this peaks at ~0.115 then decays.
+  // If the iPhone reports something wildly different, the bug is below
+  // sim.js (JS engine, Float32Array semantics, etc).
+  const _selfTest = (function () {
+    const f2 = new HeightField(GRID_N, {
+      boxSize: BOX_SIZE,
+      waveC: WAVE_C,
+      velDamping: VEL_DAMPING,
+      ampDamping: AMP_DAMPING,
+      tiltStiffness: TILT_STIFFNESS,
+      minVerticalG: MIN_VERTICAL_G,
+      maxEqAmp: MAX_EQ_AMP
+    });
+    f2.pokeGaussian(GRID_N >> 1, GRID_N >> 1, 0.12, 3.5);
+    f2.pokeGaussian((GRID_N >> 1) - 10, (GRID_N >> 1) + 8, 0.07, 3.0);
+    f2.pokeGaussian((GRID_N >> 1) + 12, (GRID_N >> 1) - 6, 0.07, 3.0);
+    f2.startAtRest();
+    let peak = 0;
+    for (let s = 0; s < 200; s++) {
+      f2.step(1 / 60, 0, -9.8, 0);
+      const m = f2.maxAbsHeight();
+      if (m > peak) peak = m;
+    }
+    let final = f2.maxAbsHeight();
+    let finalAdj = 0;
+    for (let j = 1; j < f2.n - 1; j++) {
+      for (let i = 1; i < f2.n - 2; i++) {
+        const k = j * f2.n + i;
+        const d = Math.abs(f2.h[k] - f2.h[k + 1]);
+        if (d > finalAdj) finalAdj = d;
+      }
+    }
+    return { peak: peak, final: final, finalAdj: finalAdj };
+  })();
+
+  // Snapshot the live field's initial seed amplitude for comparison.
+  const _liveInitialMaxH = field.maxAbsHeight();
+
   function buildFullReport() {
     // Sim health snapshot.
     let maxH = 0, sumSq = 0, nans = 0, edgeMaxAbsDiff = 0;
@@ -604,6 +645,26 @@
       'NaN cells:      ' + nans,
       'max adj diff:   ' + maxAdjDiff.toFixed(4) + '  (high-freq indicator)',
       'alive splashes: ' + alive + ' / ' + particles.length,
+      '',
+      '-- on-device sanity (fresh sim, 200 steps, gravity straight down) --',
+      'expected (Node): peak~0.115, final~0, finalAdj~0',
+      'observed:        peak ' + _selfTest.peak.toFixed(4) +
+        ', final ' + _selfTest.final.toFixed(4) +
+        ', finalAdj ' + _selfTest.finalAdj.toFixed(4),
+      'live initial max|h|: ' + _liveInitialMaxH.toFixed(4) + '  (expected ~0.12)',
+      '',
+      '-- unit tests (run on load) --',
+      (function () {
+        const r = window.__TEST_RESULTS__ || [];
+        if (!r.length) return 'tests not loaded';
+        let p = 0, f = 0;
+        const fails = [];
+        for (const t of r) {
+          if (t.pass) p++;
+          else { f++; fails.push('  FAIL ' + t.name + ' — ' + t.msg); }
+        }
+        return p + ' passed, ' + f + ' failed' + (fails.length ? '\n' + fails.join('\n') : '');
+      })(),
       '',
       '-- environment --',
       'window:        ' + window.innerWidth + 'x' + window.innerHeight,

@@ -100,7 +100,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v5 (2026-05-10)';
+  const APP_VERSION = 'v6 (2026-05-10)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -114,7 +114,15 @@
   // Stay well under that for safety margin.
   const WAVE_C = 0.9;
   const DAMPING = 0.995;
-  const TILT_GAIN = 0.06;
+  // Spring stiffness pulling surface toward the gravity-tilted equilibrium plane.
+  // Higher = surface follows the phone more rigidly. Units roughly 1/s^2.
+  const TILT_STIFFNESS = 10.0;
+  // Below this vertical-gravity magnitude (phone near-vertical) the equilibrium
+  // tilt blows up; clamp to keep the sim bounded.
+  const MIN_VERTICAL_G = 3.0;
+  // Hard cap on how steep the equilibrium plane can be (in scene units across
+  // half the box). Prevents extreme tilts from driving heights past the box.
+  const MAX_EQ_AMP = 0.45;
   const SPAWN_THRESHOLD = 1.8;
   const SPAWN_PROBABILITY = 0.15;
   const PARTICLE_LIFE = 1.5;
@@ -224,26 +232,43 @@
       }
     }
   };
-  HeightField.prototype.step = function (dt, gx, gz) {
+  HeightField.prototype.step = function (dt, gx, gy, gz) {
     const n = this.n;
     const h = this.h;
     const hp = this.hPrev;
     const vel = this.vel;
     const c2dt2 = WAVE_C * WAVE_C * dt * dt / (this.dx * this.dx);
-    const tiltScale = TILT_GAIN * dt;
+    const dt2 = dt * dt;
+
+    // Tilted equilibrium plane: surface perpendicular to gravity.
+    // dh/dx = gx/|gy|, dh/dz = gz/|gy|, capped so the plane stays inside the box.
+    const gyEff = Math.max(Math.abs(gy), MIN_VERTICAL_G);
+    let slopeX = gx / gyEff;
+    let slopeZ = gz / gyEff;
+    // Cap slope so that at the box edge (half = BOX_SIZE/2) the equilibrium
+    // height never exceeds MAX_EQ_AMP.
+    const maxSlope = MAX_EQ_AMP / (BOX_SIZE * 0.5);
+    const slopeMag = Math.sqrt(slopeX * slopeX + slopeZ * slopeZ);
+    if (slopeMag > maxSlope) {
+      const s = maxSlope / slopeMag;
+      slopeX *= s;
+      slopeZ *= s;
+    }
 
     // Use hPrev as scratch for h_new, then rotate buffers.
     const hNew = hp;
-    const invN1 = 1 / (n - 1);
+    const halfN = (n - 1) * 0.5;
+    const dx = this.dx;
 
     for (let j = 1; j < n - 1; j++) {
+      const wz = (j - halfN) * dx;
       for (let i = 1; i < n - 1; i++) {
         const k = j * n + i;
         const lap = h[k - 1] + h[k + 1] + h[k - n] + h[k + n] - 4 * h[k];
-        const nx = i * invN1 * 2 - 1;
-        const nz = j * invN1 * 2 - 1;
-        const tilt = (nx * gx + nz * gz) * tiltScale;
-        const next = (2 * h[k] - hp[k] + c2dt2 * lap + tilt) * DAMPING;
+        const wx = (i - halfN) * dx;
+        const hEq = slopeX * wx + slopeZ * wz;
+        const restore = (hEq - h[k]) * TILT_STIFFNESS;
+        const next = (2 * h[k] - hp[k] + c2dt2 * lap + restore * dt2) * DAMPING;
         hNew[k] = next;
       }
     }
@@ -589,7 +614,7 @@
     let safety = 4;
     while (acc > 0 && safety-- > 0) {
       const step = Math.min(FIXED_DT, acc);
-      field.step(step, gravity.x, gravity.z);
+      field.step(step, gravity.x, gravity.y, gravity.z);
       stepParticles(step, gravity);
       acc -= step;
     }

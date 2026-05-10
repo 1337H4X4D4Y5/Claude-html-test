@@ -11,7 +11,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
 
   // Bump on every change so the loaded build is verifiable.
-  const SIM_VERSION = 'sim-22';
+  const SIM_VERSION = 'sim-23';
 
   // Map DeviceOrientationEvent (beta, gamma in degrees) plus screen rotation
   // angle (degrees) to a scene-frame gravity vector. Output magnitude equals

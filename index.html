@@ -146,8 +146,8 @@
   #reset-btn:active { transform: scale(0.98); }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="sim.js?v=22"></script>
-<script src="test.js?v=22"></script>
+<script src="sim.js?v=23"></script>
+<script src="test.js?v=23"></script>
 </head>
 <body>
 <div id="permission-overlay">
@@ -167,7 +167,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v22 (2026-05-10 — passive splashes + mesh rotation)';
+  const APP_VERSION = 'v23 (2026-05-10 — 3D flow + wave injection)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -291,7 +291,12 @@
   scene.add(floorMesh);
 
   // ---------- Height-field water surface ----------
-  const waterGeom = new THREE.PlaneGeometry(BOX_SIZE, BOX_SIZE, GRID_N - 1, GRID_N - 1);
+  // Water plane size: smaller than the box so it can rotate to follow gravity
+  // and remain inside the cube at most orientations. At extreme diagonals the
+  // corners may clip slightly through the glass walls.
+  const WATER_PLANE_SIZE = 1.5;
+  const WATER_OFFSET = 0.4;   // distance along gravity from box center to plane
+  const waterGeom = new THREE.PlaneGeometry(WATER_PLANE_SIZE, WATER_PLANE_SIZE, GRID_N - 1, GRID_N - 1);
   const waterMat = new THREE.MeshPhongMaterial({
     color: 0x3aa3e8,
     emissive: 0x0a2540,
@@ -303,15 +308,62 @@
     flatShading: false
   });
   const waterMesh = new THREE.Mesh(waterGeom, waterMat);
-  waterMesh.rotation.x = -Math.PI / 2;
-  waterMesh.position.y = WATER_REST_Y;
+  // Initial orientation: horizontal (will be overwritten every frame from gravity).
+  waterMesh.quaternion.setFromUnitVectors(
+    new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 1, 0)
+  );
+  waterMesh.position.set(0, -WATER_OFFSET, 0);
   waterMesh.renderOrder = 2;
   scene.add(waterMesh);
+
+  // Scratch vectors reused each frame for the water-plane orientation update.
+  const _gravUnit = new THREE.Vector3();
+  const _planeNormal = new THREE.Vector3();
+  const _planeDefault = new THREE.Vector3(0, 0, 1); // PlaneGeometry default normal
+  function updateWaterMeshOrientation() {
+    const len = gravity.length();
+    if (len < 1e-6) return;
+    _gravUnit.copy(gravity).divideScalar(len);
+    // Position: along the gravity direction so the surface sits at the bottom
+    // of the box relative to gravity. With gravity down: y = -OFFSET (lower
+    // part of box). With gravity right: x = +OFFSET (right side).
+    waterMesh.position.copy(_gravUnit).multiplyScalar(WATER_OFFSET);
+    // Orientation: plane normal = -gravity (pointing "up" relative to gravity).
+    _planeNormal.copy(_gravUnit).negate();
+    waterMesh.quaternion.setFromUnitVectors(_planeDefault, _planeNormal);
+  }
+
+  // Track gravity to inject wave packets when the phone rotates, so the user
+  // sees the surface ripple as they tilt.
+  const _lastGravity = new THREE.Vector3(0, -GRAVITY_MAG, 0);
+  function injectRotationWaves() {
+    const dx = gravity.x - _lastGravity.x;
+    const dy = gravity.y - _lastGravity.y;
+    const dz = gravity.z - _lastGravity.z;
+    const change = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (change > 0.20) {
+      const amp = Math.min(0.06, change * 0.04);
+      const ci = 12 + Math.floor(Math.random() * (GRID_N - 24));
+      const cj = 12 + Math.floor(Math.random() * (GRID_N - 24));
+      field.pokeGaussian(ci, cj, (Math.random() < 0.5 ? amp : -amp), 3.0);
+    }
+    _lastGravity.copy(gravity);
+  }
+
+  // Gentle ambient ripple so the surface always shows tiny life even when
+  // the phone is still. Tiny amplitude — won't excite instability.
+  function injectAmbientRipple() {
+    if (Math.random() < 0.04) {
+      const ci = 4 + Math.floor(Math.random() * (GRID_N - 8));
+      const cj = 4 + Math.floor(Math.random() * (GRID_N - 8));
+      field.pokeGaussian(ci, cj, (Math.random() - 0.5) * 0.008, 2.0);
+    }
+  }
 
   // ---------- HeightField simulation ----------
   // Class lives in sim.js so it can be unit-tested independently (see test.html).
   const field = new HeightField(GRID_N, {
-    boxSize: BOX_SIZE,
+    boxSize: WATER_PLANE_SIZE,    // match the actual water plane size
     waveC: WAVE_C,
     velDamping: VEL_DAMPING,
     ampDamping: AMP_DAMPING,
@@ -408,11 +460,14 @@
     return -1;
   }
 
+  // Scratch vectors for splash particle math, reused per call.
+  const _splashLocal = new THREE.Vector3();
+  const _splashTmp = new THREE.Vector3();
   function spawnSplashParticles(gravity) {
     const h = field.h;
     const vel = field.vel;
     const halfN = (GRID_N - 1) / 2;
-    // Sample only interior cells; skip a step for perf.
+    const dx = field.dx;
     for (let j = 2; j < GRID_N - 2; j += 2) {
       for (let i = 2; i < GRID_N - 2; i += 2) {
         const k = j * GRID_N + i;
@@ -420,12 +475,18 @@
           const slot = findFreeParticle();
           if (slot < 0) return;
           const p = particles[slot];
-          const wx = (i - halfN) * field.dx;
-          const wz = (j - halfN) * field.dx;
-          p.x = wx;
-          p.y = WATER_REST_Y + h[k] + 0.02;
-          p.z = wz;
-          // Up direction = -gravity normalized (so droplets shoot away from "down").
+          // Local (plane-frame) position: PlaneGeometry vertex k has local
+          // (x = (i-halfN)*dx, y = -(j-halfN)*dx, z = h[k]). Transform to
+          // world using the water mesh's current orientation.
+          _splashLocal.set(
+            (i - halfN) * dx,
+            -(j - halfN) * dx,
+            h[k] + 0.02
+          );
+          waterMesh.localToWorld(_splashLocal);
+          p.x = _splashLocal.x;
+          p.y = _splashLocal.y;
+          p.z = _splashLocal.z;
           const gmag = Math.sqrt(gravity.x * gravity.x + gravity.y * gravity.y + gravity.z * gravity.z) || 1;
           const ux = -gravity.x / gmag;
           const uy = -gravity.y / gmag;
@@ -457,29 +518,27 @@
       p.z += p.vz * dt;
       p.life -= dt;
 
-      // Wall collisions inside the box.
+      // Box wall collisions (all 6 faces).
       if (p.x < -halfBox) { p.x = -halfBox; p.vx = -p.vx * 0.4; }
       else if (p.x > halfBox) { p.x = halfBox; p.vx = -p.vx * 0.4; }
+      if (p.y < -halfBox) { p.y = -halfBox; p.vy = -p.vy * 0.4; }
+      else if (p.y > halfBox) { p.y = halfBox; p.vy = -p.vy * 0.4; }
       if (p.z < -halfBox) { p.z = -halfBox; p.vz = -p.vz * 0.4; }
       else if (p.z > halfBox) { p.z = halfBox; p.vz = -p.vz * 0.4; }
-      if (p.y > halfBox) { p.y = halfBox; p.vy = -p.vy * 0.4; }
 
-      // Water surface collision: poke field where it lands.
-      const grid = worldToGrid(p.x, p.z);
-      const surface = (grid.i >= 0 && grid.i < GRID_N && grid.j >= 0 && grid.j < GRID_N)
-        ? WATER_REST_Y + field.h[grid.j * GRID_N + grid.i]
-        : WATER_REST_Y;
+      // Water surface detection in the rotated plane: signed distance from
+      // the plane along its normal. Positive = above surface (in air),
+      // negative = particle has re-entered the water.
+      _splashTmp.set(
+        p.x - waterMesh.position.x,
+        p.y - waterMesh.position.y,
+        p.z - waterMesh.position.z
+      );
+      const distFromSurface = _splashTmp.dot(_planeNormal);
 
       let dead = false;
-      if (p.y < surface) {
-        // v22: splashes are pure visual fluff and DO NOT poke the height
-        // field anymore. Each impact added a tiny position displacement,
-        // and at ~1000 impacts/sec over 20+ seconds those accumulated into
-        // a slow drift to the clamp and a Nyquist-mode runaway on iPhone.
-        dead = true;
-      }
+      if (distFromSurface < -0.03) dead = true;   // back into water
       if (p.life <= 0) dead = true;
-      if (p.y < -halfBox - 0.5) dead = true;
 
       if (dead) {
         p.alive = false;
@@ -926,12 +985,19 @@
     // Smoothly approach gravity target.
     gravity.lerp(gravityTarget, 0.15);
 
+    // v23: water plane rotates to follow gravity, so the height-field sim
+    // runs in the plane's local frame where gravity is always 'down' from
+    // its perspective. Pass a constant local gravity into the sim.
+    updateWaterMeshOrientation();    // computes _planeNormal for splash math
+    injectAmbientRipple();
+    injectRotationWaves();
+
     // Step physics with a fixed substep for stability.
     let acc = dt;
     let safety = 8;
     while (acc > 0 && safety-- > 0) {
       const step = Math.min(FIXED_DT, acc);
-      field.step(step, gravity.x, gravity.y, gravity.z);
+      field.step(step, 0, -GRAVITY_MAG, 0);
       stepsRun++;
       stepParticles(step, gravity);
       // Per-step trace: max|h| right after each physics step.

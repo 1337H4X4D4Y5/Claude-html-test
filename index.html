@@ -62,6 +62,25 @@
     font-size: 11px; opacity: 0.5; pointer-events: none;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
+  #version {
+    position: fixed;
+    top: env(safe-area-inset-top, 8px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    padding: 4px 9px;
+    border-radius: 10px;
+    background: rgba(74,163,255,0.18);
+    color: #cfe6ff;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    pointer-events: none;
+    z-index: 20;
+  }
+  #overlay-version {
+    margin-top: 4px;
+    font-size: 12px;
+    opacity: 0.55;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 </head>
@@ -71,11 +90,19 @@
   <p>Tilt your phone to slosh the water inside the glass. On iPhone, tap below to allow motion access.</p>
   <button id="permission-btn">Tap to begin</button>
   <div id="hint">Desktop: drag the canvas to tilt</div>
+  <div id="overlay-version"></div>
 </div>
 <div id="fps"></div>
+<div id="version"></div>
 <script>
 (function () {
   'use strict';
+
+  // ---------- Version ----------
+  // Bump this on every commit so you can verify the page rebuilt.
+  const APP_VERSION = 'v3 (2026-05-10)';
+  document.getElementById('version').textContent = APP_VERSION;
+  document.getElementById('overlay-version').textContent = APP_VERSION;
 
   // ---------- Constants ----------
   const GRID_N = 64;

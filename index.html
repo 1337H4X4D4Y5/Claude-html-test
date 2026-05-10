@@ -147,7 +147,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v17 (2026-05-10 — explosion-moment snapshot)';
+  const APP_VERSION = 'v18 (2026-05-10 — per-step trace, normals off)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -298,7 +298,10 @@
       arr[k * 3 + 2] = h[k];
     }
     waterPos.needsUpdate = true;
-    waterGeom.computeVertexNormals();
+    // computeVertexNormals disabled in v18 to rule out any Three.js side
+    // effect on the position buffer. Lighting on the dynamic surface will
+    // be slightly off, but stability matters more right now.
+    // waterGeom.computeVertexNormals();
   }
 
   // ---------- Particle system (splashes) ----------
@@ -599,6 +602,11 @@
   let timelineTimer = 0;
   const startWallTime = performance.now();
   let stepsRun = 0;
+  // Per-step max|h| trace: stops growing once explosion is captured so we
+  // preserve the lead-up.
+  const STEP_TRACE_LEN = 100;
+  const stepTrace = [];
+  let stepTraceFrozen = false;
   // Capture a snapshot the FIRST time max|h| crosses the explosion threshold.
   let lastFrameMaxH = 0;
   let explosion = null;
@@ -734,6 +742,10 @@
                  '  maxAdj=' + s.maxAdj.toFixed(4);
         }).join('\n'),
       '',
+      '-- per-step max|h| trace (last ' + STEP_TRACE_LEN + ' steps, freezes on explosion) --',
+      stepTrace.length === 0 ? '(no steps yet)' :
+        '[' + stepTrace.map(function (v) { return v.toFixed(4); }).join(', ') + ']',
+      '',
       '-- explosion snapshot (first frame max|h| crossed 0.3) --',
       explosion === null ? '(no explosion detected yet — sim is calm)' : [
         'when:        t=' + explosion.t.toFixed(3) + 's  step #' + explosion.stepsRun,
@@ -779,6 +791,8 @@
     stepsRun = 0;
     lastFrameMaxH = 0;
     explosion = null;
+    stepTrace.length = 0;
+    stepTraceFrozen = false;
   });
 
   copyBtn.addEventListener('click', function () {
@@ -844,10 +858,14 @@
       const step = Math.min(FIXED_DT, acc);
       field.step(step, gravity.x, gravity.y, gravity.z);
       stepsRun++;
-      // Particles disabled in v13: 300/300 alive splashes were creating a
-      // runaway feedback loop (impacts -> ripples -> more spawns -> more
-      // impacts). Re-enable once we confirm the bare sim is stable.
-      // stepParticles(step, gravity);
+      // stepParticles(step, gravity);  // disabled in v13
+      // Per-step trace: max|h| right after each physics step.
+      if (!stepTraceFrozen) {
+        const m = field.maxAbsHeight();
+        stepTrace.push(m);
+        while (stepTrace.length > STEP_TRACE_LEN) stepTrace.shift();
+        if (m >= 0.3) stepTraceFrozen = true;
+      }
       acc -= step;
     }
 

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Water Sim Tests</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: #0a0f1a; color: #e8f1ff;
+    font-family: -apple-system, BlinkMacSystemFont, ui-monospace, monospace;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    min-height: 100vh;
+  }
+  h1 { margin: 16px; font-size: 18px; font-weight: 600; }
+  #summary {
+    margin: 0 16px 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  #summary.pass { background: rgba(40,180,120,0.25); color: #b6f0d4; }
+  #summary.fail { background: rgba(220,80,80,0.30); color: #ffc0c0; }
+  ol { margin: 0 12px 24px; padding: 0; list-style: none; font-size: 13px; line-height: 1.5; }
+  li {
+    margin: 6px 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.04);
+  }
+  li.pass::before { content: '✓ '; color: #6fe0a0; font-weight: 700; }
+  li.fail { background: rgba(220,80,80,0.18); }
+  li.fail::before { content: '✗ '; color: #ff8a8a; font-weight: 700; }
+  .msg { display: block; margin-top: 4px; color: #ffb6b6; font-size: 12px; }
+  a {
+    display: inline-block; margin: 0 16px 32px;
+    padding: 10px 16px; border-radius: 10px;
+    background: rgba(74,163,255,0.18);
+    color: #cfe6ff; text-decoration: none;
+    font-size: 14px;
+  }
+</style>
+<script src="sim.js"></script>
+<script src="test.js"></script>
+</head>
+<body>
+<h1>Water Simulation — Unit Tests</h1>
+<div id="summary"></div>
+<ol id="list"></ol>
+<a href="./">← Back to the water box</a>
+<script>
+  const results = window.__TEST_RESULTS__ || [];
+  const list = document.getElementById('list');
+  const summary = document.getElementById('summary');
+  let pass = 0, fail = 0;
+  for (const r of results) {
+    const li = document.createElement('li');
+    li.className = r.pass ? 'pass' : 'fail';
+    li.textContent = r.name;
+    if (!r.pass) {
+      const span = document.createElement('span');
+      span.className = 'msg';
+      span.textContent = r.msg;
+      li.appendChild(span);
+    }
+    list.appendChild(li);
+    r.pass ? pass++ : fail++;
+  }
+  summary.textContent = pass + ' passed' + (fail ? ', ' + fail + ' failed' : ', all green');
+  summary.className = fail ? 'fail' : 'pass';
+</script>
+</body>
+</html>

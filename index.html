@@ -83,6 +83,7 @@
   }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script src="sim.js"></script>
 </head>
 <body>
 <div id="permission-overlay">
@@ -100,7 +101,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v7 (2026-05-10)';
+  const APP_VERSION = 'v8 (2026-05-10)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -210,117 +211,22 @@
   scene.add(waterMesh);
 
   // ---------- HeightField simulation ----------
-  function HeightField(n) {
-    this.n = n;
-    this.h = new Float32Array(n * n);
-    this.hPrev = new Float32Array(n * n);
-    this.vel = new Float32Array(n * n);
-    this.dx = BOX_SIZE / (n - 1);
-  }
-  HeightField.prototype.idx = function (i, j) { return j * this.n + i; };
-  HeightField.prototype.poke = function (i, j, amount) {
-    if (i < 1 || i >= this.n - 1 || j < 1 || j >= this.n - 1) return;
-    this.h[this.idx(i, j)] += amount;
-  };
-  // Smooth Gaussian-shaped poke; avoids single-cell spikes that look bad
-  // and that can excite high-frequency unstable modes.
-  HeightField.prototype.pokeGaussian = function (ci, cj, amp, sigma) {
-    const r = Math.ceil(sigma * 3);
-    const inv2s2 = 1 / (2 * sigma * sigma);
-    for (let dj = -r; dj <= r; dj++) {
-      for (let di = -r; di <= r; di++) {
-        const i = ci + di, j = cj + dj;
-        if (i < 1 || i >= this.n - 1 || j < 1 || j >= this.n - 1) continue;
-        const w = Math.exp(-(di * di + dj * dj) * inv2s2);
-        this.h[this.idx(i, j)] += amp * w;
-      }
-    }
-  };
-  HeightField.prototype.step = function (dt, gx, gy, gz) {
-    const n = this.n;
-    const h = this.h;
-    const hp = this.hPrev;
-    const vel = this.vel;
-    const c2dt2 = WAVE_C * WAVE_C * dt * dt / (this.dx * this.dx);
-    const dt2 = dt * dt;
-    // Velocity damping coefficients: h_new = (2 - gammaDt)*h - (1 - gammaDt)*hp + accel*dt^2.
-    // Damps velocity (h - hp) without pulling h toward zero.
-    const gammaDt = VEL_DAMPING * dt;
-    const aCoef = 2 - gammaDt;
-    const bCoef = 1 - gammaDt;
-
-    // Tilted equilibrium plane: surface perpendicular to gravity.
-    // dh/dx = gx/|gy|, dh/dz = gz/|gy|, capped so the plane stays inside the box.
-    const gyEff = Math.max(Math.abs(gy), MIN_VERTICAL_G);
-    let slopeX = gx / gyEff;
-    let slopeZ = gz / gyEff;
-    // Cap slope so that at the box edge (half = BOX_SIZE/2) the equilibrium
-    // height never exceeds MAX_EQ_AMP.
-    const maxSlope = MAX_EQ_AMP / (BOX_SIZE * 0.5);
-    const slopeMag = Math.sqrt(slopeX * slopeX + slopeZ * slopeZ);
-    if (slopeMag > maxSlope) {
-      const s = maxSlope / slopeMag;
-      slopeX *= s;
-      slopeZ *= s;
-    }
-
-    // Use hPrev as scratch for h_new, then rotate buffers.
-    const hNew = hp;
-    const halfN = (n - 1) * 0.5;
-    const dx = this.dx;
-
-    for (let j = 1; j < n - 1; j++) {
-      const wz = (j - halfN) * dx;
-      for (let i = 1; i < n - 1; i++) {
-        const k = j * n + i;
-        const lap = h[k - 1] + h[k + 1] + h[k - n] + h[k + n] - 4 * h[k];
-        const wx = (i - halfN) * dx;
-        const hEq = slopeX * wx + slopeZ * wz;
-        const restore = (hEq - h[k]) * TILT_STIFFNESS;
-        const next = (aCoef * h[k] - bCoef * hp[k] + c2dt2 * lap + restore * dt2) * AMP_DAMPING;
-        hNew[k] = next;
-      }
-    }
-
-    // Reflective boundary: copy edges from inward neighbors.
-    for (let i = 0; i < n; i++) {
-      hNew[this.idx(i, 0)]     = hNew[this.idx(i, 1)];
-      hNew[this.idx(i, n - 1)] = hNew[this.idx(i, n - 2)];
-      hNew[this.idx(0, i)]     = hNew[this.idx(1, i)];
-      hNew[this.idx(n - 1, i)] = hNew[this.idx(n - 2, i)];
-    }
-
-    // Clamp + NaN guard so a one-off instability can't kill the visualization.
-    const HMAX = 0.6;
-    for (let k = 0; k < n * n; k++) {
-      let v = hNew[k];
-      if (!isFinite(v)) v = 0;
-      else if (v > HMAX) v = HMAX;
-      else if (v < -HMAX) v = -HMAX;
-      hNew[k] = v;
-    }
-
-    // Vertical velocity for splash detection (h_new - h_curr)/dt.
-    const invDt = 1 / dt;
-    for (let k = 0; k < n * n; k++) {
-      vel[k] = (hNew[k] - h[k]) * invDt;
-    }
-
-    // Swap: hPrev <- h, h <- hNew.
-    this.hPrev = h;
-    this.h = hNew;
-  };
-
-  const field = new HeightField(GRID_N);
+  // Class lives in sim.js so it can be unit-tested independently (see test.html).
+  const field = new HeightField(GRID_N, {
+    boxSize: BOX_SIZE,
+    waveC: WAVE_C,
+    velDamping: VEL_DAMPING,
+    ampDamping: AMP_DAMPING,
+    tiltStiffness: TILT_STIFFNESS,
+    minVerticalG: MIN_VERTICAL_G,
+    maxEqAmp: MAX_EQ_AMP
+  });
 
   // Seed with smooth Gaussian pokes for visible motion without spikes.
   field.pokeGaussian(GRID_N >> 1, GRID_N >> 1, 0.12, 3.5);
   field.pokeGaussian((GRID_N >> 1) - 10, (GRID_N >> 1) + 8, 0.07, 3.0);
   field.pokeGaussian((GRID_N >> 1) + 12, (GRID_N >> 1) - 6, 0.07, 3.0);
-  // CRITICAL: initialize hPrev = h so the wave equation starts at rest.
-  // Without this, the first step interprets the bumps as a huge initial
-  // velocity and the surface immediately explodes into spikes.
-  field.hPrev.set(field.h);
+  field.startAtRest();
 
   // Helper: convert grid (i,j) -> world (x, z) inside the box.
   function gridToWorld(i, j) {

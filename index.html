@@ -146,8 +146,8 @@
   #reset-btn:active { transform: scale(0.98); }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="sim.js?v=21"></script>
-<script src="test.js?v=21"></script>
+<script src="sim.js?v=22"></script>
+<script src="test.js?v=22"></script>
 </head>
 <body>
 <div id="permission-overlay">
@@ -167,7 +167,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v21 (2026-05-10 — gyro sweep + tuned)';
+  const APP_VERSION = 'v22 (2026-05-10 — passive splashes + mesh rotation)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -472,8 +472,10 @@
 
       let dead = false;
       if (p.y < surface) {
-        const impact = -Math.min(0.05, Math.abs(p.vy) * 0.012);
-        field.pokeGaussian(grid.i, grid.j, impact, 1.6);
+        // v22: splashes are pure visual fluff and DO NOT poke the height
+        // field anymore. Each impact added a tiny position displacement,
+        // and at ~1000 impacts/sec over 20+ seconds those accumulated into
+        // a slow drift to the clamp and a Nyquist-mode runaway on iPhone.
         dead = true;
       }
       if (p.life <= 0) dead = true;

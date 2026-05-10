@@ -236,6 +236,65 @@
     assertLT(maxDiff, 1e-4, 'boundary cells diverged from interior: ' + maxDiff);
   });
 
+  // ---------- Helpers for long-running tests ----------
+
+  function makeSeededField() {
+    const f = new HeightField(64, { waveC: 0.6, velDamping: 3.5, maxEqAmp: 0.30 });
+    f.pokeGaussian(32, 32, 0.12, 3.5);
+    f.startAtRest();
+    return f;
+  }
+  function maxAdjDiff(f) {
+    const N = f.n;
+    let m = 0;
+    for (let j = 1; j < N - 1; j++) {
+      for (let i = 1; i < N - 2; i++) {
+        const k = j * N + i;
+        const d = Math.abs(f.h[k] - f.h[k + 1]);
+        if (d > m) m = d;
+      }
+    }
+    return m;
+  }
+  // Cheap deterministic PRNG so splash positions are repeatable.
+  function mkRng(seed) {
+    let s = seed | 0;
+    return function () { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  }
+  // Run the sim for many steps. opts.getGravity(stepIndex) -> {x,y,z}.
+  // Optionally injects synthetic splash pokes to model the particle system.
+  function runLong(opts) {
+    const f = makeSeededField();
+    const STEPS = opts.steps || (30 * 60);
+    const dt = opts.dt || (1 / 60);
+    const getGravity = opts.getGravity;
+    const splashes = opts.splashes || 0;     // pokes per step
+    const splashAmp = opts.splashAmp || -0.035;
+    const rand = mkRng(opts.seed || 11);
+    const energy = [];
+    let peak = 0;
+    for (let s = 0; s < STEPS; s++) {
+      const g = getGravity(s);
+      f.step(dt, g.x, g.y, g.z);
+      for (let p = 0; p < splashes; p++) {
+        const i = 4 + Math.floor(rand() * 56);
+        const j = 4 + Math.floor(rand() * 56);
+        f.pokeGaussian(i, j, splashAmp, 1.6);
+      }
+      const m = f.maxAbsHeight();
+      if (m > peak) peak = m;
+      if (s % 60 === 0) energy.push(f.totalEnergy());
+    }
+    return {
+      f: f,
+      peak: peak,
+      finalMax: f.maxAbsHeight(),
+      finalAdj: maxAdjDiff(f),
+      energy: energy,
+      hasNaN: f.hasNaN()
+    };
+  }
+
   // ---------- Gyro mapping + full-range stability ----------
 
   test('mapOrientationToGravity: phone flat face-up -> down is scene -y', () => {
@@ -286,29 +345,18 @@
     }
   });
 
-  test('sim stays bounded for every (beta, gamma) on a coarse sweep', () => {
-    // For each orientation, set the gravity, run the sim for 5 seconds at
-    // 1/60 dt, and verify max|h| never exceeds 0.55 (leaving margin from
-    // the 0.6 clamp). This catches scenarios where a specific tilt makes
-    // the equilibrium plane drive heights into the clamp where they then
-    // turn into a checkerboard.
+  test('sustained tilt 5s at every (beta, gamma) on 9x5 grid stays bounded', () => {
+    // Quick sweep: 5s simulated time per orientation. Catches immediate
+    // instability for any reachable phone pose.
     const betas = [-180, -135, -90, -45, 0, 45, 90, 135, 180];
     const gammas = [-90, -45, 0, 45, 90];
     let worst = { beta: 0, gamma: 0, peak: 0 };
     for (const b of betas) {
       for (const gm of gammas) {
         const g = mapOrientationToGravity(b, gm, 0, 9.8);
-        const f = new HeightField(64, { waveC: 0.6 });
-        f.pokeGaussian(32, 32, 0.12, 3.5);
-        f.startAtRest();
-        let peak = 0;
-        for (let s = 0; s < 300; s++) {
-          f.step(1 / 60, g.x, g.y, g.z);
-          const m = f.maxAbsHeight();
-          if (m > peak) peak = m;
-          assert(!f.hasNaN(), 'NaN at beta=' + b + ' gamma=' + gm + ' step ' + s);
-        }
-        if (peak > worst.peak) worst = { beta: b, gamma: gm, peak: peak };
+        const r = runLong({ steps: 300, getGravity: function () { return g; } });
+        assert(!r.hasNaN, 'NaN at beta=' + b + ' gamma=' + gm);
+        if (r.peak > worst.peak) worst = { beta: b, gamma: gm, peak: r.peak };
       }
     }
     assertLT(worst.peak, 0.55,
@@ -316,26 +364,110 @@
       ' peak ' + worst.peak.toFixed(4));
   });
 
-  test('sim survives a slow rotation through all orientations (beta sweep)', () => {
-    // Continuously animate beta from 0 to 360 (with wraparound at +/-180) over
-    // 5 seconds while running the sim. This is what 'rotate the phone 360'
-    // looks like to the simulation. Verify it stays bounded.
-    const f = new HeightField(64, { waveC: 0.6 });
-    f.pokeGaussian(32, 32, 0.12, 3.5);
-    f.startAtRest();
-    const totalSteps = 300; // 5 sec at 1/60
-    let peak = 0;
-    for (let s = 0; s < totalSteps; s++) {
-      // beta sweeps from -180 to 180 over the run.
-      const t = s / totalSteps;
-      const beta = -180 + t * 360;
-      const g = mapOrientationToGravity(beta, 0, 0, 9.8);
-      f.step(1 / 60, g.x, g.y, g.z);
-      const m = f.maxAbsHeight();
-      if (m > peak) peak = m;
-      assert(!f.hasNaN(), 'NaN during beta sweep at step ' + s);
+  test('long-term stability: 30s sustained tilt at 5 representative orientations', () => {
+    // Catches drift that takes many seconds to manifest. The iPhone showed
+    // checkerboard emerge around t=20s under sustained tilt at v21.
+    const orientations = [
+      { b: 0,    gm: 0,   name: 'flat' },
+      { b: 90,   gm: 0,   name: 'upright' },
+      { b: -90,  gm: 0,   name: 'upside-down upright' },
+      { b: 180,  gm: 0,   name: 'face-down flat' },
+      { b: 45,   gm: 45,  name: 'diagonal tilt' }
+    ];
+    let worst = { name: '', peak: 0, finalAdj: 0 };
+    for (const o of orientations) {
+      const g = mapOrientationToGravity(o.b, o.gm, 0, 9.8);
+      const r = runLong({ steps: 30 * 60, getGravity: function () { return g; } });
+      assert(!r.hasNaN, 'NaN at ' + o.name);
+      if (r.peak > worst.peak) worst = { name: o.name, peak: r.peak, finalAdj: r.finalAdj };
     }
-    assertLT(peak, 0.55, 'beta sweep peaked at ' + peak.toFixed(4));
+    assertLT(worst.peak, 0.55, 'worst 30s sustained: ' + worst.name + ' peak ' + worst.peak.toFixed(4));
+    assertLT(worst.finalAdj, 0.3, 'worst 30s adj diff: ' + worst.name + ' ' + worst.finalAdj.toFixed(4));
+  });
+
+  test('long-term stability: 30s with synthetic splash pokes at extreme tilt', () => {
+    // Even with splash impacts modifying the field at ~1000 pokes/sec, the
+    // sim should remain bounded over 30s. (In v22 the live page disables
+    // field-feedback from splashes so this is overkill, but a regression
+    // safety net if someone re-enables them.)
+    const g = mapOrientationToGravity(-90, 0, 0, 9.8); // upside-down upright
+    const r = runLong({
+      steps: 30 * 60,
+      getGravity: function () { return g; },
+      splashes: 17,
+      splashAmp: -0.02      // moderate impact strength
+    });
+    assert(!r.hasNaN, 'NaN with splashes');
+    assertLT(r.peak, 0.55, 'splash 30s peak ' + r.peak.toFixed(4));
+  });
+
+  test('30s slow continuous rotation through all of beta stays bounded', () => {
+    const STEPS = 30 * 60;
+    const r = runLong({
+      steps: STEPS,
+      getGravity: function (s) {
+        const beta = -180 + (s / STEPS) * 360;
+        return mapOrientationToGravity(beta, 0, 0, 9.8);
+      }
+    });
+    assert(!r.hasNaN, 'NaN during beta sweep');
+    assertLT(r.peak, 0.55, 'beta sweep peak ' + r.peak.toFixed(4));
+    assertLT(r.finalAdj, 0.3, 'beta sweep final adj ' + r.finalAdj.toFixed(4));
+  });
+
+  test('30s Lissajous-style sweep through both beta and gamma stays bounded', () => {
+    // Beta and gamma oscillate at different frequencies tracing a Lissajous
+    // pattern through the full orientation space.
+    const STEPS = 30 * 60;
+    const r = runLong({
+      steps: STEPS,
+      getGravity: function (s) {
+        const t = s / STEPS;
+        const beta = Math.sin(t * Math.PI * 4) * 135;
+        const gamma = Math.cos(t * Math.PI * 3) * 75;
+        return mapOrientationToGravity(beta, gamma, 0, 9.8);
+      }
+    });
+    assert(!r.hasNaN, 'NaN during Lissajous sweep');
+    assertLT(r.peak, 0.55, 'Lissajous peak ' + r.peak.toFixed(4));
+  });
+
+  test('30s random orientation jumps every 0.5s stays bounded', () => {
+    // Simulates a user rapidly reorienting the phone.
+    const STEPS = 30 * 60;
+    const rng = mkRng(42);
+    let g = { x: 0, y: -9.8, z: 0 };
+    const r = runLong({
+      steps: STEPS,
+      getGravity: function (s) {
+        if (s % 30 === 0) {
+          const b = -180 + rng() * 360;
+          const gm = -90 + rng() * 180;
+          g = mapOrientationToGravity(b, gm, 0, 9.8);
+        }
+        return g;
+      }
+    });
+    assert(!r.hasNaN, 'NaN during random jumps');
+    assertLT(r.peak, 0.55, 'random jumps peak ' + r.peak.toFixed(4));
+    assertLT(r.finalAdj, 0.3, 'random jumps final adj ' + r.finalAdj.toFixed(4));
+  });
+
+  test('energy does not grow over time at sustained extreme tilt', () => {
+    // Verify that the simulation truly settles rather than slowly drifting up.
+    // Compare average energy in the second half of a 30s run to the first
+    // half: should be lower (settled) and definitely not 2x higher.
+    const g = mapOrientationToGravity(-90, 0, 0, 9.8);
+    const r = runLong({ steps: 30 * 60, getGravity: function () { return g; } });
+    assert(!r.hasNaN, 'NaN');
+    const half = r.energy.length >> 1;
+    let firstAvg = 0, secondAvg = 0;
+    for (let i = 5; i < half; i++) firstAvg += r.energy[i];        // skip initial transient
+    for (let i = half; i < r.energy.length; i++) secondAvg += r.energy[i];
+    firstAvg /= (half - 5);
+    secondAvg /= (r.energy.length - half);
+    assertLT(secondAvg, firstAvg * 1.5,
+      'energy grew: firstAvg=' + firstAvg.toFixed(4) + ' secondAvg=' + secondAvg.toFixed(4));
   });
 
   // ---------- Reporting ----------

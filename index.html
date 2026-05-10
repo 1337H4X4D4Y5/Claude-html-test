@@ -57,6 +57,25 @@
   }
   #permission-btn:active { transform: scale(0.98); }
   #hint { font-size: 12px; opacity: 0.55; margin-top: 8px; }
+  #overlay-tests {
+    margin-top: 12px;
+    padding: 6px 14px;
+    border-radius: 14px;
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: rgba(80,200,120,0.22);
+    color: #b6f0d4;
+    max-width: 320px;
+  }
+  #overlay-tests.fail { background: rgba(220,80,80,0.30); color: #ffc0c0; }
+  #overlay-tests.pending { background: rgba(160,160,180,0.18); color: #c8c8d4; }
+  #overlay-tests .fails {
+    margin-top: 6px;
+    font-size: 11px;
+    text-align: left;
+    line-height: 1.35;
+    word-break: break-word;
+  }
   #fps {
     position: fixed; top: env(safe-area-inset-top, 8px); left: 8px;
     font-size: 11px; opacity: 0.5; pointer-events: none;
@@ -127,14 +146,15 @@
   #reset-btn:active { transform: scale(0.98); }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="sim.js?v=14"></script>
-<script src="test.js?v=15"></script>
+<script src="sim.js?v=21"></script>
+<script src="test.js?v=21"></script>
 </head>
 <body>
 <div id="permission-overlay">
   <h1>Water Box</h1>
   <p>Tilt your phone to slosh the water inside the glass. On iPhone, tap below to allow motion access.</p>
   <button id="permission-btn">Tap to begin</button>
+  <div id="overlay-tests" class="pending">Unit tests: running…</div>
   <div id="hint">Desktop: drag the canvas to tilt</div>
   <div id="overlay-version"></div>
 </div>
@@ -147,9 +167,36 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v20 (2026-05-10 — features restored)';
+  const APP_VERSION = 'v21 (2026-05-10 — gyro sweep + tuned)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
+
+  // Surface unit-test results on the permission overlay so we know the
+  // shipped build is sound before tapping in.
+  (function showTestResults() {
+    const el = document.getElementById('overlay-tests');
+    const results = window.__TEST_RESULTS__ || [];
+    if (!results.length) {
+      el.textContent = 'Unit tests: not loaded';
+      el.className = 'fail';
+      return;
+    }
+    let pass = 0, fail = 0;
+    const failNames = [];
+    for (const r of results) {
+      if (r.pass) pass++;
+      else { fail++; failNames.push(r.name); }
+    }
+    if (fail === 0) {
+      el.textContent = 'Unit tests: ' + pass + ' passed ✓';
+      el.className = '';
+    } else {
+      el.innerHTML =
+        '<div>Unit tests: ' + pass + ' passed, ' + fail + ' failed ✗</div>' +
+        '<div class="fails">' + failNames.map(function (n) { return '• ' + n; }).join('<br>') + '</div>';
+      el.className = 'fail';
+    }
+  })();
 
   // ---------- Constants ----------
   const GRID_N = 64;
@@ -162,8 +209,9 @@
   // can't push us into the unstable regime.
   const WAVE_C = 0.6;
   // Velocity drag (1/s). Damps motion without biasing the equilibrium.
-  // Under-critical for the slosh mode (critical would be 2*sqrt(STIFFNESS)).
-  const VEL_DAMPING = 2.4;
+  // Set above half-critical so transient overshoot stays modest under any
+  // gyro orientation (verified by the gyro-sweep unit test).
+  const VEL_DAMPING = 3.5;
   // Tiny amplitude floor for numerical hygiene only.
   const AMP_DAMPING = 0.9999;
   // Spring stiffness pulling surface toward the gravity-tilted equilibrium plane.
@@ -174,7 +222,7 @@
   const MIN_VERTICAL_G = 3.0;
   // Hard cap on how steep the equilibrium plane can be (in scene units across
   // half the box). Prevents extreme tilts from driving heights past the box.
-  const MAX_EQ_AMP = 0.45;
+  const MAX_EQ_AMP = 0.30;
   const SPAWN_THRESHOLD = 1.8;
   const SPAWN_PROBABILITY = 0.15;
   const PARTICLE_LIFE = 1.5;
@@ -459,23 +507,12 @@
   };
 
   function updateGravityFromOrientation(beta, gamma) {
-    const b = (beta || 0) * DEG2RAD;
-    const g = (gamma || 0) * DEG2RAD;
-    const gxDev = Math.sin(g);
-    const gyDev = -Math.cos(b) * Math.cos(g);
-    const gzDev = Math.sin(b);
+    // Use the shared, unit-tested mapping from sim.js.
     const orient = (screen.orientation && typeof screen.orientation.angle === 'number')
       ? screen.orientation.angle
       : (typeof window.orientation === 'number' ? window.orientation : 0);
-    const o = orient * DEG2RAD;
-    const cosO = Math.cos(o);
-    const sinO = Math.sin(o);
-    const gx =  cosO * gxDev + sinO * gyDev;
-    const gy = -sinO * gxDev + cosO * gyDev;
-    const gz =  gzDev;
-    gravityTarget.set(gx, gy, gz);
-    if (gravityTarget.lengthSq() < 1e-6) gravityTarget.set(0, -1, 0);
-    gravityTarget.normalize().multiplyScalar(GRAVITY_MAG);
+    const g = mapOrientationToGravity(beta, gamma, orient, GRAVITY_MAG);
+    gravityTarget.set(g.x, g.y, g.z);
   }
 
   function onDeviceOrientation(e) {

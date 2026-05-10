@@ -11,18 +11,57 @@
 }(typeof self !== 'undefined' ? self : this, function () {
 
   // Bump on every change so the loaded build is verifiable.
-  const SIM_VERSION = 'sim-14';
+  const SIM_VERSION = 'sim-21';
+
+  // Map DeviceOrientationEvent (beta, gamma in degrees) plus screen rotation
+  // angle (degrees) to a scene-frame gravity vector. Output magnitude equals
+  // |gravityMag|. Pure function — testable in isolation.
+  //
+  // Coordinate convention used in the scene:
+  //   +x = right of screen, +y = up, +z = out of screen toward viewer.
+  // Phone-frame gravity is derived from the standard tilted-device model:
+  //   gx_device =  cos(beta) * sin(gamma)
+  //   gy_device = -sin(beta)
+  //   gz_device = -cos(beta) * cos(gamma)
+  // Then mapped to scene axes (device y is screen-up; we want scene +y up)
+  // and rotated by -screenAngle to compensate for portrait/landscape.
+  function mapOrientationToGravity(beta, gamma, screenAngle, gravityMag) {
+    const DEG = Math.PI / 180;
+    const b = (beta || 0) * DEG;
+    const g = (gamma || 0) * DEG;
+    const cb = Math.cos(b), sb = Math.sin(b);
+    const cg = Math.cos(g), sg = Math.sin(g);
+    // Gravity in device frame.
+    const gxDev =  cb * sg;
+    const gyDev = -sb;
+    const gzDev = -cb * cg;
+    // Map device frame (x=right, y=top, z=out-of-screen) to scene frame
+    // (x=right, y=up, z=out-of-screen). Device y matches scene y, device z
+    // matches scene z, device x matches scene x.
+    let sx = gxDev, sy = gyDev, sz = gzDev;
+    // Rotate around scene Z by -screenAngle to undo screen rotation.
+    const o = (screenAngle || 0) * DEG;
+    const co = Math.cos(o), so = Math.sin(o);
+    const rx =  co * sx + so * sy;
+    const ry = -so * sx + co * sy;
+    const rz = sz;
+    // Normalize and scale to requested magnitude. Guard near zero.
+    const mag = Math.sqrt(rx * rx + ry * ry + rz * rz);
+    const mag2 = mag < 1e-6 ? 1 : mag;
+    const s = (gravityMag != null ? gravityMag : 9.8) / mag2;
+    return { x: rx * s, y: ry * s, z: rz * s };
+  }
 
   function HeightField(n, opts) {
     opts = opts || {};
     this.n = n;
     this.boxSize       = opts.boxSize       != null ? opts.boxSize       : 2.0;
-    this.waveC         = opts.waveC         != null ? opts.waveC         : 0.9;
-    this.velDamping    = opts.velDamping    != null ? opts.velDamping    : 2.4;
+    this.waveC         = opts.waveC         != null ? opts.waveC         : 0.6;
+    this.velDamping    = opts.velDamping    != null ? opts.velDamping    : 3.5;
     this.ampDamping    = opts.ampDamping    != null ? opts.ampDamping    : 0.9999;
     this.tiltStiffness = opts.tiltStiffness != null ? opts.tiltStiffness : 10.0;
     this.minVerticalG  = opts.minVerticalG  != null ? opts.minVerticalG  : 3.0;
-    this.maxEqAmp      = opts.maxEqAmp      != null ? opts.maxEqAmp      : 0.45;
+    this.maxEqAmp      = opts.maxEqAmp      != null ? opts.maxEqAmp      : 0.30;
     this.hmax          = opts.hmax          != null ? opts.hmax          : 0.6;
     this.h     = new Float32Array(n * n);
     this.hPrev = new Float32Array(n * n);
@@ -171,5 +210,9 @@
     return false;
   };
 
-  return { HeightField: HeightField, SIM_VERSION: SIM_VERSION };
+  return {
+    HeightField: HeightField,
+    SIM_VERSION: SIM_VERSION,
+    mapOrientationToGravity: mapOrientationToGravity
+  };
 }));

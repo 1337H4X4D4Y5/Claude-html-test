@@ -2,7 +2,9 @@
 
 (function (root) {
   const isNode = typeof module === 'object' && module.exports;
-  const { HeightField } = isNode ? require('./sim.js') : root;
+  const mod = isNode ? require('./sim.js') : root;
+  const HeightField = mod.HeightField;
+  const mapOrientationToGravity = mod.mapOrientationToGravity;
 
   const results = [];
   function test(name, fn) {
@@ -232,6 +234,108 @@
       maxDiff = Math.max(maxDiff, Math.abs(f.h[i * n + (n-1)] - f.h[i * n + (n-2)]));   // right
     }
     assertLT(maxDiff, 1e-4, 'boundary cells diverged from interior: ' + maxDiff);
+  });
+
+  // ---------- Gyro mapping + full-range stability ----------
+
+  test('mapOrientationToGravity: phone flat face-up -> down is scene -y', () => {
+    const g = mapOrientationToGravity(0, 0, 0, 9.8);
+    assertNear(g.x, 0, 0.01, 'gx');
+    assertNear(g.y, 0, 0.01, 'gy');
+    assertNear(g.z, -9.8, 0.01, 'gz (should be away from viewer when face-up)');
+  });
+
+  test('mapOrientationToGravity: phone upright (beta=90) -> down is scene -y', () => {
+    const g = mapOrientationToGravity(90, 0, 0, 9.8);
+    assertNear(g.x, 0, 0.01, 'gx');
+    assertNear(g.y, -9.8, 0.01, 'gy');
+    assertNear(g.z, 0, 0.01, 'gz');
+  });
+
+  test('mapOrientationToGravity: phone tilted right (gamma=90) -> down is scene -x', () => {
+    const g = mapOrientationToGravity(0, 90, 0, 9.8);
+    assertNear(g.x, 9.8, 0.05, 'gx');
+    assertNear(g.y, 0, 0.05, 'gy');
+    assertNear(g.z, 0, 0.05, 'gz');
+  });
+
+  test('mapOrientationToGravity: magnitude is preserved across all angles', () => {
+    for (let b = -180; b <= 180; b += 30) {
+      for (let gm = -90; gm <= 90; gm += 30) {
+        const g = mapOrientationToGravity(b, gm, 0, 9.8);
+        const m = Math.sqrt(g.x * g.x + g.y * g.y + g.z * g.z);
+        assertNear(m, 9.8, 0.01, 'beta=' + b + ' gamma=' + gm + ' mag=' + m);
+      }
+    }
+  });
+
+  test('mapOrientationToGravity: continuous across beta wraparound (no jumps)', () => {
+    // Stepping through beta from 170 to 190 (which wraps to -170) should not
+    // produce a discontinuity in the gravity vector.
+    const samples = [];
+    for (let b = 170; b <= 190; b += 1) {
+      const eff = b > 180 ? b - 360 : b;
+      samples.push(mapOrientationToGravity(eff, 0, 0, 9.8));
+    }
+    for (let i = 1; i < samples.length; i++) {
+      const dx = samples[i].x - samples[i - 1].x;
+      const dy = samples[i].y - samples[i - 1].y;
+      const dz = samples[i].z - samples[i - 1].z;
+      const jump = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      assertLT(jump, 0.5, 'gravity jumped by ' + jump + ' at i=' + i);
+    }
+  });
+
+  test('sim stays bounded for every (beta, gamma) on a coarse sweep', () => {
+    // For each orientation, set the gravity, run the sim for 5 seconds at
+    // 1/60 dt, and verify max|h| never exceeds 0.55 (leaving margin from
+    // the 0.6 clamp). This catches scenarios where a specific tilt makes
+    // the equilibrium plane drive heights into the clamp where they then
+    // turn into a checkerboard.
+    const betas = [-180, -135, -90, -45, 0, 45, 90, 135, 180];
+    const gammas = [-90, -45, 0, 45, 90];
+    let worst = { beta: 0, gamma: 0, peak: 0 };
+    for (const b of betas) {
+      for (const gm of gammas) {
+        const g = mapOrientationToGravity(b, gm, 0, 9.8);
+        const f = new HeightField(64, { waveC: 0.6 });
+        f.pokeGaussian(32, 32, 0.12, 3.5);
+        f.startAtRest();
+        let peak = 0;
+        for (let s = 0; s < 300; s++) {
+          f.step(1 / 60, g.x, g.y, g.z);
+          const m = f.maxAbsHeight();
+          if (m > peak) peak = m;
+          assert(!f.hasNaN(), 'NaN at beta=' + b + ' gamma=' + gm + ' step ' + s);
+        }
+        if (peak > worst.peak) worst = { beta: b, gamma: gm, peak: peak };
+      }
+    }
+    assertLT(worst.peak, 0.55,
+      'worst orientation beta=' + worst.beta + ' gamma=' + worst.gamma +
+      ' peak ' + worst.peak.toFixed(4));
+  });
+
+  test('sim survives a slow rotation through all orientations (beta sweep)', () => {
+    // Continuously animate beta from 0 to 360 (with wraparound at +/-180) over
+    // 5 seconds while running the sim. This is what 'rotate the phone 360'
+    // looks like to the simulation. Verify it stays bounded.
+    const f = new HeightField(64, { waveC: 0.6 });
+    f.pokeGaussian(32, 32, 0.12, 3.5);
+    f.startAtRest();
+    const totalSteps = 300; // 5 sec at 1/60
+    let peak = 0;
+    for (let s = 0; s < totalSteps; s++) {
+      // beta sweeps from -180 to 180 over the run.
+      const t = s / totalSteps;
+      const beta = -180 + t * 360;
+      const g = mapOrientationToGravity(beta, 0, 0, 9.8);
+      f.step(1 / 60, g.x, g.y, g.z);
+      const m = f.maxAbsHeight();
+      if (m > peak) peak = m;
+      assert(!f.hasNaN(), 'NaN during beta sweep at step ' + s);
+    }
+    assertLT(peak, 0.55, 'beta sweep peaked at ' + peak.toFixed(4));
   });
 
   // ---------- Reporting ----------

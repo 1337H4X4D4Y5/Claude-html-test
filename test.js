@@ -560,6 +560,43 @@
     assert(f.allInBox(), 'particles escaped');
   });
 
+  test('fluid: spatial grid produces same results across scales (200 vs 500)', () => {
+    // The grid is an optimization; behavior shouldn't differ from pair-loop.
+    // We verify by ensuring both populations stay bounded under same forces.
+    for (const n of [200, 350, 500]) {
+      const f = new Fluid(n);
+      f.seed(7);
+      for (let s = 0; s < 60 * 5; s++) f.step(1/60, 0, -9.8, 0);
+      assert(!f.hasNaN(), 'NaN at n=' + n);
+      assert(f.allInBox(), 'escape at n=' + n);
+    }
+  });
+
+  test('fluid: under sideways gravity, particles spread along the lower face (not in a line)', () => {
+    // Catches the v24 chain-collapse bug. With gravity pulling in -x, we
+    // expect particles to spread across the y-z range of the -x wall, not
+    // collapse into a single x-aligned column.
+    const f = new Fluid(400);
+    f.seed(7);
+    for (let s = 0; s < 60 * 6; s++) f.step(1/60, -9.8, 0.5, 0);
+    // Standard deviation of y and z positions among particles near the -x
+    // wall: if particles are spread out we expect both to be > 0.2.
+    let nNear = 0, sy = 0, sz = 0, syy = 0, szz = 0;
+    for (let i = 0; i < f.n; i++) {
+      if (f.x[i] < -f.boxHalf + 0.2) {
+        sy += f.y[i]; sz += f.z[i];
+        syy += f.y[i] * f.y[i]; szz += f.z[i] * f.z[i];
+        nNear++;
+      }
+    }
+    assert(nNear > 50, 'too few particles reached the wall: ' + nNear);
+    const meanY = sy / nNear, meanZ = sz / nNear;
+    const stdY = Math.sqrt(syy / nNear - meanY * meanY);
+    const stdZ = Math.sqrt(szz / nNear - meanZ * meanZ);
+    assert(stdY > 0.2, 'particles collapsed in y: stdY=' + stdY.toFixed(3));
+    assert(stdZ > 0.2, 'particles collapsed in z: stdZ=' + stdZ.toFixed(3));
+  });
+
   test('fluid: pair distances stay bounded (no particle merging)', () => {
     // Repulsion should keep particles separated. Find min pair distance.
     const f = makeFluid();

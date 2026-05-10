@@ -11,7 +11,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
 
   // Bump on every change so the loaded build is verifiable.
-  const SIM_VERSION = 'sim-24';
+  const SIM_VERSION = 'sim-25';
 
   // Map DeviceOrientationEvent (beta, gamma in degrees) plus screen rotation
   // angle (degrees) to a scene-frame gravity vector. Output magnitude equals
@@ -235,35 +235,56 @@
     this.vz = new Float32Array(n);
   }
 
-  // Place particles in a tight cube near the bottom of the container.
+  // Place particles randomly in a slab at the bottom of the container, with
+  // small random initial velocities. Random placement (not a grid) is essential
+  // so the cloud doesn't fall in formation when gravity is applied — uniform
+  // grids stay aligned with gravity and collapse into chains. Small velocity
+  // jitter adds enough chaos that particles spread laterally as they fall.
   Fluid.prototype.seed = function (seed) {
     let rng = (seed != null ? seed : 1) | 0;
     function rand() { rng = (rng * 1103515245 + 12345) & 0x7fffffff; return rng / 0x7fffffff; }
     const h = this.boxHalf;
-    const side = Math.ceil(Math.pow(this.n, 1/3));
-    const spacing = (1.4 * h) / side;
-    const startY = -h + spacing * 0.5;
-    let k = 0;
-    for (let yi = 0; yi < side && k < this.n; yi++) {
-      for (let zi = 0; zi < side && k < this.n; zi++) {
-        for (let xi = 0; xi < side && k < this.n; xi++) {
-          this.x[k]  = -h * 0.7 + (xi + 0.5) * spacing + (rand() - 0.5) * 0.01;
-          this.y[k]  = startY + yi * spacing + (rand() - 0.5) * 0.01;
-          this.z[k]  = -h * 0.7 + (zi + 0.5) * spacing + (rand() - 0.5) * 0.01;
-          this.vx[k] = 0;
-          this.vy[k] = 0;
-          this.vz[k] = 0;
-          k++;
-        }
-      }
+    for (let k = 0; k < this.n; k++) {
+      this.x[k] = (rand() * 2 - 1) * h * 0.85;
+      this.y[k] = -h + rand() * h * 0.9;   // lower 45% of the box
+      this.z[k] = (rand() * 2 - 1) * h * 0.85;
+      this.vx[k] = (rand() - 0.5) * 0.3;
+      this.vy[k] = (rand() - 0.5) * 0.3;
+      this.vz[k] = (rand() - 0.5) * 0.3;
     }
-    // Fill remaining slots (if any) inside the volume.
-    while (k < this.n) {
-      this.x[k] = (rand() - 0.5) * h;
-      this.y[k] = -h * 0.5;
-      this.z[k] = (rand() - 0.5) * h;
-      this.vx[k] = this.vy[k] = this.vz[k] = 0;
-      k++;
+  };
+
+  // Build a uniform spatial grid of cell size = interactRadius, with a linked
+  // list of particle indices in each cell. Each particle then only needs to
+  // check its own cell and the 26 neighbors -> O(n) total instead of O(n^2).
+  Fluid.prototype._buildGrid = function () {
+    const r = this.interactRadius;
+    const span = 2 * this.boxHalf + 2 * r;          // extra padding so out-of-box
+    const origin = -this.boxHalf - r;               // particles still land in a cell
+    const side = Math.max(1, Math.floor(span / r));
+    const cells = side * side * side;
+    if (!this._grid || this._grid.length !== cells) {
+      this._grid = new Int32Array(cells);
+      this._next = new Int32Array(this.n);
+    }
+    this._gridSide = side;
+    this._gridOrigin = origin;
+    this._gridCell = span / side;
+    const inv = 1 / this._gridCell;
+    const grid = this._grid;
+    const next = this._next;
+    for (let c = 0; c < cells; c++) grid[c] = -1;
+    const x = this.x, y = this.y, z = this.z;
+    for (let i = 0; i < this.n; i++) {
+      let cx = ((x[i] - origin) * inv) | 0;
+      let cy = ((y[i] - origin) * inv) | 0;
+      let cz = ((z[i] - origin) * inv) | 0;
+      if (cx < 0) cx = 0; else if (cx >= side) cx = side - 1;
+      if (cy < 0) cy = 0; else if (cy >= side) cy = side - 1;
+      if (cz < 0) cz = 0; else if (cz >= side) cz = side - 1;
+      const ci = cx + side * (cy + side * cz);
+      next[i] = grid[ci];
+      grid[ci] = i;
     }
   };
 
@@ -287,30 +308,56 @@
       vz[i] += gz * dt;
     }
 
-    // 2) Pairwise repulsion + viscosity. O(n^2) — fine for n <= 300.
+    // 2) Pairwise repulsion + viscosity via spatial grid (O(n) average).
+    this._buildGrid();
+    const side = this._gridSide;
+    const origin = this._gridOrigin;
+    const cell = this._gridCell;
+    const inv = 1 / cell;
+    const grid = this._grid;
+    const next = this._next;
     for (let i = 0; i < n; i++) {
       const xi = x[i], yi = y[i], zi = z[i];
-      const vxi = vx[i], vyi = vy[i], vzi = vz[i];
-      for (let j = i + 1; j < n; j++) {
-        const dx = x[j] - xi;
-        const dy = y[j] - yi;
-        const dz = z[j] - zi;
-        const r2 = dx*dx + dy*dy + dz*dz;
-        if (r2 < radius2 && r2 > 1e-8) {
-          const r = Math.sqrt(r2);
-          const t = (radius - r) / radius;      // 0..1, 1 = full overlap
-          const force = kPress * t * t * dt;
-          const nx = dx / r, ny = dy / r, nz = dz / r;
-          // Repulsion: push particles apart along (nx,ny,nz).
-          vx[i] -= nx * force; vy[i] -= ny * force; vz[i] -= nz * force;
-          vx[j] += nx * force; vy[j] += ny * force; vz[j] += nz * force;
-          // Viscosity: average a fraction of the velocity difference.
-          const dvx = vx[j] - vx[i];
-          const dvy = vy[j] - vy[i];
-          const dvz = vz[j] - vz[i];
-          const vf = visc * t * dt;
-          vx[i] += dvx * vf; vy[i] += dvy * vf; vz[i] += dvz * vf;
-          vx[j] -= dvx * vf; vy[j] -= dvy * vf; vz[j] -= dvz * vf;
+      let cxi = ((xi - origin) * inv) | 0;
+      let cyi = ((yi - origin) * inv) | 0;
+      let czi = ((zi - origin) * inv) | 0;
+      if (cxi < 0) cxi = 0; else if (cxi >= side) cxi = side - 1;
+      if (cyi < 0) cyi = 0; else if (cyi >= side) cyi = side - 1;
+      if (czi < 0) czi = 0; else if (czi >= side) czi = side - 1;
+      const cx0 = cxi > 0 ? cxi - 1 : 0;
+      const cx1 = cxi < side - 1 ? cxi + 1 : side - 1;
+      const cy0 = cyi > 0 ? cyi - 1 : 0;
+      const cy1 = cyi < side - 1 ? cyi + 1 : side - 1;
+      const cz0 = czi > 0 ? czi - 1 : 0;
+      const cz1 = czi < side - 1 ? czi + 1 : side - 1;
+      for (let cz = cz0; cz <= cz1; cz++) {
+        for (let cy = cy0; cy <= cy1; cy++) {
+          for (let cx = cx0; cx <= cx1; cx++) {
+            let j = grid[cx + side * (cy + side * cz)];
+            while (j !== -1) {
+              if (j > i) {
+                const dx = x[j] - xi;
+                const dy = y[j] - yi;
+                const dz = z[j] - zi;
+                const r2 = dx*dx + dy*dy + dz*dz;
+                if (r2 < radius2 && r2 > 1e-8) {
+                  const r = Math.sqrt(r2);
+                  const t = (radius - r) / radius;
+                  const force = kPress * t * t * dt;
+                  const nxn = dx / r, nyn = dy / r, nzn = dz / r;
+                  vx[i] -= nxn * force; vy[i] -= nyn * force; vz[i] -= nzn * force;
+                  vx[j] += nxn * force; vy[j] += nyn * force; vz[j] += nzn * force;
+                  const dvx = vx[j] - vx[i];
+                  const dvy = vy[j] - vy[i];
+                  const dvz = vz[j] - vz[i];
+                  const vf = visc * t * dt;
+                  vx[i] += dvx * vf; vy[i] += dvy * vf; vz[i] += dvz * vf;
+                  vx[j] -= dvx * vf; vy[j] -= dvy * vf; vz[j] -= dvz * vf;
+                }
+              }
+              j = next[j];
+            }
+          }
         }
       }
     }
@@ -335,7 +382,6 @@
       else if (y[i] > boxHalf) { y[i] = boxHalf; vy[i] = -vy[i] * rest; }
       if (z[i] < -boxHalf) { z[i] = -boxHalf; vz[i] = -vz[i] * rest; }
       else if (z[i] > boxHalf) { z[i] = boxHalf; vz[i] = -vz[i] * rest; }
-      // Global velocity damping (viscous drag).
       vx[i] *= damp; vy[i] *= damp; vz[i] *= damp;
     }
   };

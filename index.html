@@ -146,8 +146,8 @@
   #reset-btn:active { transform: scale(0.98); }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="sim.js?v=24"></script>
-<script src="test.js?v=24"></script>
+<script src="sim.js?v=25"></script>
+<script src="test.js?v=25"></script>
 </head>
 <body>
 <div id="permission-overlay">
@@ -167,7 +167,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v24 (2026-05-10 — particle fluid)';
+  const APP_VERSION = 'v25 (2026-05-10 — spatial grid, more particles)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -295,21 +295,22 @@
   // that fall under gravity, collide with the cube walls, and repel each
   // other. This actually feels like fluid in 3D — particles pile up at the
   // lowest face, slosh when you tilt, bounce off walls.
-  const FLUID_N = 240;
+  const FLUID_N = 500;
+  // Particles render as spheres with this radius. The fluid's boxHalf must be
+  // halfBox - PARTICLE_RADIUS so the sphere SURFACE (not the center) stops at
+  // the wall — otherwise spheres clip visibly through the glass.
+  const PARTICLE_RADIUS = 0.055;
   const fluid = new Fluid(FLUID_N, {
-    boxHalf: halfBox - 0.05,      // particle centers stop just inside the walls
-    interactRadius: 0.16,
-    pressureK: 9.0,
-    viscosity: 0.45,
-    restitution: 0.30,
-    velDamping: 0.992,
-    maxSpeed: 8.0
+    boxHalf: halfBox - PARTICLE_RADIUS - 0.005,
+    interactRadius: 0.13,         // ~2.4x particle radius — neighbors overlap
+    pressureK: 14.0,              // stronger repulsion so they spread laterally
+    viscosity: 0.35,              // moderate cohesion
+    restitution: 0.20,            // soft bounces (less rattling)
+    velDamping: 0.990,
+    maxSpeed: 9.0
   });
   fluid.seed(7);
-
-  // Render particles as instanced semi-transparent blue spheres.
-  const PARTICLE_RADIUS = 0.07;
-  const fluidGeom = new THREE.SphereGeometry(PARTICLE_RADIUS, 8, 8);
+  const fluidGeom = new THREE.SphereGeometry(PARTICLE_RADIUS, 7, 6);
   const fluidMat = new THREE.MeshPhongMaterial({
     color: 0x4aa3ff,
     emissive: 0x0a2540,

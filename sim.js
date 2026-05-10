@@ -35,6 +35,12 @@
   };
 
   HeightField.prototype.pokeGaussian = function (ci, cj, amp, sigma) {
+    // Apply the delta to BOTH h and hPrev. This shifts the surface position
+    // without injecting velocity: the wave equation reads velocity from
+    // (h - hPrev)/dt, so writing only to h would create a phantom velocity
+    // spike at the poke site every step, which excites the Nyquist mode and
+    // produces the comb-of-spikes pattern. With both buffers updated, the
+    // poke is a clean position offset that ripples outward smoothly.
     const r = Math.ceil(sigma * 3);
     const inv2s2 = 1 / (2 * sigma * sigma);
     for (let dj = -r; dj <= r; dj++) {
@@ -42,7 +48,10 @@
         const i = ci + di, j = cj + dj;
         if (i < 1 || i >= this.n - 1 || j < 1 || j >= this.n - 1) continue;
         const w = Math.exp(-(di * di + dj * dj) * inv2s2);
-        this.h[this.idx(i, j)] += amp * w;
+        const delta = amp * w;
+        const k = this.idx(i, j);
+        this.h[k] += delta;
+        this.hPrev[k] += delta;
       }
     }
   };

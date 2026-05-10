@@ -163,6 +163,39 @@
     assertLE(peak, f.hmax + 1e-3, 'stress peak ' + peak.toFixed(3) + ' exceeded clamp');
   });
 
+  test('repeated runtime pokes (splash impacts) do not excite high-freq spikes', () => {
+    // This mirrors what index.html does each frame: step the simulation, then
+    // have ~10 particle impacts call pokeGaussian. Earlier versions of poke
+    // wrote only to h, leaving hPrev untouched, which the wave equation read
+    // as a huge instantaneous velocity at the impact site and amplified into
+    // the spike-comb pattern the user saw on iPhone.
+    const f = new HeightField(64);
+    f.pokeGaussian(32, 32, 0.12, 3.5);
+    f.startAtRest();
+    let rng = 42;
+    function rand() { rng = (rng * 1103515245 + 12345) & 0x7fffffff; return rng / 0x7fffffff; }
+    for (let s = 0; s < 1500; s++) {
+      f.step(1 / 60, -1.85, -2.80, 9.20);
+      for (let p = 0; p < 10; p++) {
+        const i = 4 + Math.floor(rand() * 56);
+        const j = 4 + Math.floor(rand() * 56);
+        f.pokeGaussian(i, j, -0.02, 1.6);
+      }
+      assert(!f.hasNaN(), 'NaN at step ' + s);
+    }
+    const n = f.n;
+    let maxAdjDiff = 0;
+    for (let j = 5; j < n - 5; j++) {
+      for (let i = 5; i < n - 5; i++) {
+        const k = j * n + i;
+        maxAdjDiff = Math.max(maxAdjDiff, Math.abs(f.h[k] - f.h[k + 1]));
+        maxAdjDiff = Math.max(maxAdjDiff, Math.abs(f.h[k] - f.h[k + n]));
+      }
+    }
+    assertLT(maxAdjDiff, 0.05, 'adjacent-cell difference grew to ' + maxAdjDiff.toFixed(4));
+    assertLT(f.maxAbsHeight(), 0.55, 'heights hit clamp: ' + f.maxAbsHeight().toFixed(4));
+  });
+
   test('boundary cells track interior values (no edge spikes)', () => {
     const f = new HeightField(32);
     f.pokeGaussian(16, 16, 0.2, 3);

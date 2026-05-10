@@ -147,7 +147,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v16 (2026-05-10 — time-series diagnostic)';
+  const APP_VERSION = 'v17 (2026-05-10 — explosion-moment snapshot)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -598,6 +598,42 @@
   const timeline = [];
   let timelineTimer = 0;
   const startWallTime = performance.now();
+  let stepsRun = 0;
+  // Capture a snapshot the FIRST time max|h| crosses the explosion threshold.
+  let lastFrameMaxH = 0;
+  let explosion = null;
+  function captureExplosionSnapshot() {
+    const N = field.n;
+    const h = field.h;
+    const hp = field.hPrev;
+    const halfN = (N - 1) / 2;
+    // Sample row j = N/2 across i (every 4th cell), and column i = N/2 across j.
+    const rowH = [], rowHp = [];
+    for (let i = 0; i < N; i += 4) {
+      rowH.push(h[(N >> 1) * N + i]);
+      rowHp.push(hp[(N >> 1) * N + i]);
+    }
+    const colH = [];
+    for (let j = 0; j < N; j += 4) colH.push(h[j * N + (N >> 1)]);
+    // Adjacent-cell histogram: count how many adjacent pairs are >0.3 apart.
+    let bigJumps = 0, totalPairs = 0;
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N - 1; i++) {
+        totalPairs++;
+        if (Math.abs(h[j * N + i] - h[j * N + i + 1]) > 0.3) bigJumps++;
+      }
+    }
+    return {
+      t: ((performance.now() - startWallTime) / 1000),
+      stepsRun: stepsRun,
+      maxH: field.maxAbsHeight(),
+      rowH: rowH.map(function (v) { return v.toFixed(3); }),
+      rowHp: rowHp.map(function (v) { return v.toFixed(3); }),
+      colH: colH.map(function (v) { return v.toFixed(3); }),
+      bigJumps: bigJumps,
+      totalPairs: totalPairs
+    };
+  }
   function pushTimeline() {
     let madj = 0;
     const N = field.n;
@@ -690,12 +726,24 @@
       'live initial max|h|: ' + _liveInitialMaxH.toFixed(4) + '  (expected ~0.12)',
       '',
       '-- live timeline (sampled every ' + TIMELINE_INTERVAL + 's, last ' + (TIMELINE_LEN * TIMELINE_INTERVAL) + 's) --',
+      'steps run total: ' + stepsRun,
       timeline.length === 0 ? '(no samples yet)' :
         timeline.map(function (s) {
           return '  t=' + s.t.toFixed(1).padStart(5, ' ') +
                  's  max|h|=' + s.maxH.toFixed(4) +
                  '  maxAdj=' + s.maxAdj.toFixed(4);
         }).join('\n'),
+      '',
+      '-- explosion snapshot (first frame max|h| crossed 0.3) --',
+      explosion === null ? '(no explosion detected yet — sim is calm)' : [
+        'when:        t=' + explosion.t.toFixed(3) + 's  step #' + explosion.stepsRun,
+        'max|h|:      ' + explosion.maxH.toFixed(4),
+        'big jumps:   ' + explosion.bigJumps + ' / ' + explosion.totalPairs +
+          ' pairs differ by >0.3 (checkerboard fingerprint)',
+        'row j=N/2 h:  [' + explosion.rowH.join(', ') + ']',
+        'row j=N/2 hp: [' + explosion.rowHp.join(', ') + ']',
+        'col i=N/2 h:  [' + explosion.colH.join(', ') + ']'
+      ].join('\n'),
       '',
       '-- unit tests (run on load) --',
       (function () {
@@ -728,6 +776,9 @@
     field.startAtRest();
     timeline.length = 0;
     timelineTimer = 0;
+    stepsRun = 0;
+    lastFrameMaxH = 0;
+    explosion = null;
   });
 
   copyBtn.addEventListener('click', function () {
@@ -792,6 +843,7 @@
     while (acc > 0 && safety-- > 0) {
       const step = Math.min(FIXED_DT, acc);
       field.step(step, gravity.x, gravity.y, gravity.z);
+      stepsRun++;
       // Particles disabled in v13: 300/300 alive splashes were creating a
       // runaway feedback loop (impacts -> ripples -> more spawns -> more
       // impacts). Re-enable once we confirm the bare sim is stable.
@@ -819,6 +871,13 @@
     // Timeline sampler.
     timelineTimer += dt;
     if (timelineTimer > TIMELINE_INTERVAL) { pushTimeline(); timelineTimer = 0; }
+
+    // Explosion detector: snapshot the FIRST frame max|h| crosses 0.3.
+    const curMaxH = field.maxAbsHeight();
+    if (!explosion && lastFrameMaxH < 0.3 && curMaxH >= 0.3) {
+      explosion = captureExplosionSnapshot();
+    }
+    lastFrameMaxH = curMaxH;
   }
   loop();
 })();

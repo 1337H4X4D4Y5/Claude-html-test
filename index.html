@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v78</span>
+    <span class="tag">v79</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v78 attacks the "discrete particle" look: smaller depth imposter (0.020 → 0.016) for finer detail, wider thickness imposter (1.6× depth) for smoother color blending, and 50% more blur passes on each (depth 4 → 6, thickness 2 → 4).</div>
+  <div class="desc">MLS-MPM on the GPU. v79 adds fractal-noise ripples to the surface — 4-octave fBm gradient perturbs the smooth SSF normal in tangent space, animated by elapsed time. Gives sub-grid detail (ripples, wavelets) without restructuring the simulation.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
@@ -112,7 +112,7 @@
 <a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
-    <span class="tag">55</span>
+    <span class="tag">56</span>
   </div>
   <div class="desc">Run the full simulation test suite in the browser. CPU sim stability + gpu-mpm regression checks (TDZ, error banner, SimParams / CompositeParams uniform layouts, CFL margin, wall-friction + viscosity, preset menu, thickness pass, WGSL reserved-word scanner).</div>
 </a>

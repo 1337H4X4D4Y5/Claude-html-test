@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v78 (2026-05-11 — finer depth + wider thickness + more blur (smoother surface))';
+const APP_VERSION = 'mpm-v79 (2026-05-11 — animated fBm ripples on surface (fake fine-grain detail))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1118,7 +1118,7 @@ struct CompositeParams {
   resolutionX: f32, resolutionY: f32, thicknessScale: f32, refractStrength: f32,
   lightDirX: f32, lightDirY: f32, lightDirZ: f32, _pad1: f32,
   absorptionR: f32, absorptionG: f32, absorptionB: f32, _pad2: f32,
-  baseColorR: f32, baseColorG: f32, baseColorB: f32, _pad3: f32,
+  baseColorR: f32, baseColorG: f32, baseColorB: f32, time: f32,
 };
 
 @group(0) @binding(0) var depthTex: texture_depth_2d;
@@ -1141,6 +1141,41 @@ fn viewPosFromDepth(fragXY: vec2<f32>, depth: f32) -> vec3<f32> {
   let viewX = -ndcX * viewZ / P.fAspect;
   let viewY = -ndcY * viewZ / P.fVert;
   return vec3<f32>(viewX, viewY, viewZ);
+}
+
+// v79: fractal noise for fine surface detail. The SSF rendering pipeline
+// can only express features at scales the bilateral blur preserves — too
+// coarse for water ripples. We add a procedural fBm (fractal Brownian
+// motion) field whose gradient perturbs the surface normal at render
+// time. Visually equivalent to a much higher-resolution simulation grid
+// but at near-zero cost; the ripples are animated, not just static
+// detail.
+fn hash21(p: vec2<f32>) -> f32 {
+  let h = dot(p, vec2<f32>(127.1, 311.7));
+  return fract(sin(h) * 43758.5453);
+}
+fn valueNoise2D(p: vec2<f32>) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let a = hash21(i);
+  let b = hash21(i + vec2<f32>(1.0, 0.0));
+  let c = hash21(i + vec2<f32>(0.0, 1.0));
+  let d = hash21(i + vec2<f32>(1.0, 1.0));
+  let u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+// 4-octave fractal — each octave doubles frequency, halves amplitude.
+// Animated by drift offset proportional to time.
+fn fbm2(p: vec2<f32>, t: f32) -> f32 {
+  var v: f32 = 0.0;
+  var amp: f32 = 0.5;
+  var pos: vec2<f32> = p + vec2<f32>(t * 0.20, t * 0.13);
+  for (var i: i32 = 0; i < 4; i = i + 1) {
+    v = v + amp * valueNoise2D(pos);
+    pos = pos * 2.13 + vec2<f32>(1.7, 5.3);
+    amp = amp * 0.5;
+  }
+  return v;
 }
 
 // Procedural three-stop sky gradient (view-space Y). Used by the Fresnel
@@ -1180,7 +1215,32 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let useUp   = abs(dU - depth) < abs(dD - depth);
   let dpx = select(pR - viewPos, viewPos - pL, useLeft);
   let dpy = select(pD - viewPos, viewPos - pU, useUp);
-  let n = normalize(cross(dpy, dpx));
+  let nSmooth = normalize(cross(dpy, dpx));
+
+  // v79: fractal ripple perturbation. Sample fBm at horizontal (X,Z) of
+  // the surface point, take the gradient via finite differences, project
+  // onto the tangent plane of nSmooth, and add to the normal. Two octaves
+  // mixed at different scales = surface looks like it has both broad
+  // swells and fine wavelets, animated continuously.
+  let noiseUV = vec2<f32>(viewPos.x, -viewPos.z) * 22.0;
+  let t = P.time;
+  let fC = fbm2(noiseUV, t * 0.4);
+  let fX = fbm2(noiseUV + vec2<f32>(0.5, 0.0), t * 0.4);
+  let fZ = fbm2(noiseUV + vec2<f32>(0.0, 0.5), t * 0.4);
+  // 2nd octave at higher frequency for fine ripple detail.
+  let hC = fbm2(noiseUV * 3.7 + vec2<f32>(11.0, 7.0), t * 0.7);
+  let hX = fbm2(noiseUV * 3.7 + vec2<f32>(11.5, 7.0), t * 0.7);
+  let hZ = fbm2(noiseUV * 3.7 + vec2<f32>(11.0, 7.5), t * 0.7);
+  let gX = (fX - fC) * 1.0 + (hX - hC) * 0.5;
+  let gZ = (fZ - fC) * 1.0 + (hZ - hC) * 0.5;
+  // Tangent-plane perturbation. Build a tangent basis around nSmooth so
+  // the ripple lies in the actual surface (not a fixed world plane),
+  // which keeps the effect coherent on tilted/wavy surfaces.
+  let upWorld = vec3<f32>(0.0, 1.0, 0.0);
+  let tBase = normalize(cross(nSmooth, upWorld) + vec3<f32>(0.0001, 0.0, 0.0));
+  let bBase = cross(nSmooth, tBase);
+  let rippleStrength = 0.45;
+  let n = normalize(nSmooth + (tBase * gX + bBase * gZ) * rippleStrength);
 
   let viewDir = -normalize(viewPos);
   let lightDir = normalize(vec3<f32>(P.lightDirX, P.lightDirY, P.lightDirZ));
@@ -1671,6 +1731,8 @@ async function initAndRun() {
 
   // --- Main loop ---
   let lastT = performance.now() / 1000;
+  // v79: clock used by the composite shader's fractal-noise ripples.
+  const startT = lastT;
   let frames = 0, fpsAcc = 0;
   function frame() {
     requestAnimationFrame(frame);
@@ -1790,7 +1852,10 @@ async function initAndRun() {
     compBuf[16] = SIM_TUNE.baseColorR;
     compBuf[17] = SIM_TUNE.baseColorG;
     compBuf[18] = SIM_TUNE.baseColorB;
-    compBuf[19] = 0;
+    // v79: elapsed wall-clock seconds. Drives the fBm ripple animation
+    // in the composite shader. Floats to 7 digits before frame jitter
+    // shows up; we wrap at 3600 s to avoid losing precision over time.
+    compBuf[19] = (now - startT) % 3600.0;
     device.queue.writeBuffer(compositeParamsBuf, 0, compBuf);
 
     const enc2 = device.createCommandEncoder();

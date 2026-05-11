@@ -964,7 +964,7 @@
         'resolutionX', 'resolutionY', 'thicknessScale', 'refractStrength',
         'lightDirX', 'lightDirY', 'lightDirZ', '_pad1',
         'absorptionR', 'absorptionG', 'absorptionB', '_pad2',
-        'baseColorR', 'baseColorG', 'baseColorB', '_pad3',
+        'baseColorR', 'baseColorG', 'baseColorB', 'time',
       ];
       assert(fields.length === expectedWgsl.length,
         'CompositeParams has ' + fields.length + ' fields, expected ' + expectedWgsl.length);
@@ -1131,6 +1131,30 @@
         'cs_g2p must compute speed-dependent rest weight via smoothstep(length(newV))');
       assert(g2p.indexOf('effectiveDamp') >= 0 || g2p.indexOf('effectiveVisc') >= 0,
         'cs_g2p must compute effective damping/viscosity from rest weight');
+    });
+
+    test('gpu-mpm v79: composite uses fractal noise to perturb surface normal', () => {
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      // fBm helpers exist and are called.
+      assert(compositeSrc.indexOf('fn fbm2') >= 0,
+        'composite must define fbm2() fractal-noise helper');
+      assert(compositeSrc.indexOf('fn valueNoise2D') >= 0,
+        'composite must define valueNoise2D() helper');
+      // fbm2 is actually called in fs_main.
+      const fbmCalls = (compositeSrc.match(/fbm2\(/g) || []).length;
+      assert(fbmCalls >= 4,
+        'composite must call fbm2() at least 4 times (centre + dX + dZ + finer octave); got ' + fbmCalls);
+      // The smooth normal is perturbed by the noise gradient.
+      assert(compositeSrc.indexOf('nSmooth') >= 0,
+        'composite must compute a smooth normal (nSmooth) before perturbation');
+      assert(compositeSrc.indexOf('rippleStrength') >= 0,
+        'composite must apply a rippleStrength scalar to the perturbation');
+      // Time uniform threaded in.
+      assert(compositeSrc.indexOf('P.time') >= 0,
+        'composite must consume P.time for animated ripples');
     });
 
     test('gpu-mpm v76: composite shader uses 5-tap normal + chromatic refraction', () => {

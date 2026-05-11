@@ -150,7 +150,7 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'gpu-v37 (2026-05-11 — much smaller particles)';
+const APP_VERSION = 'gpu-v38 (2026-05-11 — position projection + smaller particles)';
 
 // Particle count is configurable via the in-page settings panel which
 // reloads with ?n=NNNN. Clamped to a range that we know is stable.
@@ -164,12 +164,12 @@ document.getElementById('version').textContent = APP_VERSION;
 
 const N = readParticleCount();    // particle count (from ?n= URL param)
 const BOX_HALF = 1.0;             // simulation box half-extent (matches glass cube)
-// Sprite radius. Smaller this version after user feedback that the spheres
-// looked too big. At N=26500 this gives r=0.023 (was 0.044 in v35, 0.034
-// in v36). Still ~0.35 * SPH spacing — enough overlap inside the bulk that
-// the blur can find neighbours, while individual silhouettes are too small
-// to read as 'marbles'.
-const PARTICLE_RADIUS = Math.max(0.014, Math.min(0.045, 0.68 / Math.cbrt(N)));
+// Sprite radius. v38 shrinks further per user feedback. At N=26500 the
+// radius is now 0.018 (was 0.023 in v37). With v38's position-projection
+// also breaking the SPH lattice, the underlying packing is irregular, so
+// even small per-particle silhouettes don't add up to a visible worm
+// pattern.
+const PARTICLE_RADIUS = Math.max(0.011, Math.min(0.035, 0.52 / Math.cbrt(N)));
 const INTERACT_RADIUS = 0.13;     // SPH neighbour-search radius
 // Per-particle additive contribution scales inversely with N so the
 // brightness of an N-particle stack stays roughly constant regardless of
@@ -328,8 +328,12 @@ fn cs_simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cz = i32((p.z + h) / cs);
   let GS = i32(GRID_SIZE);
 
+  // PASS A: gather viscosity + approach damping (velocity-only forces).
+  // No spring-pressure here — the lattice-collapse problem comes from
+  // particles settling into a fixed equilibrium spacing under a Hookean
+  // pressure. Instead we keep only the viscous/damping velocity coupling
+  // and resolve non-overlap with position projection in pass B below.
   var force = vec3<f32>(0.0);
-  // Iterate own + 26 neighbour cells.
   for (var dz: i32 = -1; dz <= 1; dz = dz + 1) {
     let ncz = cz + dz;
     if (ncz < 0 || ncz >= GS) { continue; }
@@ -341,7 +345,6 @@ fn cs_simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (ncx < 0 || ncx >= GS) { continue; }
         let ci = u32(ncx) + u32(GS) * (u32(ncy) + u32(GS) * u32(ncz));
         var j = atomicLoad(&cellHead[ci]);
-        // Walk the linked list of particles in this cell.
         var guard: i32 = 0;
         while (j >= 0 && guard < 64) {
           guard = guard + 1;
@@ -354,19 +357,12 @@ fn cs_simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
               let dist = sqrt(d2);
               let t = (r - dist) / r;
               let n = d / dist;
-              // Soft repulsion along the line between i and j: push i away
-              // from j (so subtract along +n).
-              let fr = P.pressureK * t * t;
-              force = force - n * fr;
-              // Approach damping: when relative velocity is moving them
-              // together, cancel that component.
               let vj = vel[ju].xyz;
               let dv = vj - v;
               let radialV = dot(dv, n);
               if (radialV < 0.0) {
                 force = force + n * (radialV * P.approachDamp * t);
               }
-              // Viscosity: drift velocity toward neighbour's velocity.
               force = force + dv * (P.viscosity * t);
             }
           }
@@ -386,8 +382,60 @@ fn cs_simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
     v = v * (maxSp / sqrt(sp2));
   }
 
-  // Integrate position.
+  // Integrate predicted position.
   p = p + v * P.dt;
+
+  // PASS B: position projection — push apart any pair that's now closer
+  // than minDist. This is the same constraint that PBF (Position-Based
+  // Fluids, Macklin & Müller 2013) uses. No equilibrium spacing means
+  // no preferred lattice — particles can pack tightly but not at a
+  // regular geometry. Single-pass Jacobi: each thread reads neighbour
+  // positions from the original buffer and writes only its own.
+  let minDist = P.interactRadius * 0.55;
+  let minDist2 = minDist * minDist;
+  // Tiny per-step jitter, deterministic per particle, to nudge particles
+  // off any symmetry they happen to find. Magnitude is well below the
+  // particle radius so it doesn't add visible noise to the surface.
+  let seed = vec3<f32>(f32(i) * 0.13177, f32(i) * 0.31893, f32(i) * 0.71813);
+  let jitter = (fract(sin(seed) * 43758.5453) - 0.5) * 0.0008;
+  var correction = jitter;
+  // Recompute cell coords for the predicted position (might have moved
+  // out of its original cell). Reuse the grid we already built — for
+  // small dt the new cell is the same or adjacent.
+  let ncx = clamp(i32((p.x + h) / cs), 0, GS - 1);
+  let ncy = clamp(i32((p.y + h) / cs), 0, GS - 1);
+  let ncz = clamp(i32((p.z + h) / cs), 0, GS - 1);
+  for (var dz: i32 = -1; dz <= 1; dz = dz + 1) {
+    let cellZ = ncz + dz;
+    if (cellZ < 0 || cellZ >= GS) { continue; }
+    for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
+      let cellY = ncy + dy;
+      if (cellY < 0 || cellY >= GS) { continue; }
+      for (var dx2: i32 = -1; dx2 <= 1; dx2 = dx2 + 1) {
+        let cellX = ncx + dx2;
+        if (cellX < 0 || cellX >= GS) { continue; }
+        let ci2 = u32(cellX) + u32(GS) * (u32(cellY) + u32(GS) * u32(cellZ));
+        var jj = atomicLoad(&cellHead[ci2]);
+        var guard2: i32 = 0;
+        while (jj >= 0 && guard2 < 64) {
+          guard2 = guard2 + 1;
+          let ju2 = u32(jj);
+          if (ju2 != i) {
+            let pj2 = pos[ju2].xyz;
+            let d2v = p - pj2;
+            let dd2 = dot(d2v, d2v);
+            if (dd2 < minDist2 && dd2 > 1e-8) {
+              let dist2 = sqrt(dd2);
+              let overlap = minDist - dist2;
+              correction = correction + (d2v / dist2) * (overlap * 0.5);
+            }
+          }
+          jj = nextIdx[ju2];
+        }
+      }
+    }
+  }
+  p = p + correction;
 
   // Wall collisions.
   if (p.x < -h) { p.x = -h; v.x = -v.x * P.restitution; }

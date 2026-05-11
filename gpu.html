@@ -94,13 +94,14 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'gpu-v29 (2026-05-11 — cache-bust, fix uniform align)';
+const APP_VERSION = 'gpu-v30 (2026-05-11 — spatial hash + pairwise SPH)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
-const N = 4000;                // particle count
-const BOX_HALF = 1.0;           // simulation box half-extent (matches glass cube)
+const N = 4000;                  // particle count
+const BOX_HALF = 1.0;             // simulation box half-extent (matches glass cube)
 const PARTICLE_RADIUS = 0.05;
+const INTERACT_RADIUS = 0.13;     // SPH neighbour-search radius
 
 const overlay = document.getElementById('overlay');
 const overlayMsg = document.getElementById('overlay-msg');
@@ -180,6 +181,9 @@ startBtn.addEventListener('click', async function () {
 });
 
 // --- WebGPU init + main loop ---
+const GRID_SIZE = 16;
+const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;
+
 const WGSL_COMPUTE = `
 struct SimParams {
   gravity: vec3<f32>,
@@ -187,27 +191,132 @@ struct SimParams {
   boxHalf: f32,
   restitution: f32,
   velDamping: f32,
-  _pad: f32,
+  cellSize: f32,
+  interactRadius: f32,
+  pressureK: f32,
+  viscosity: f32,
+  approachDamp: f32,
 };
+
+const N: u32 = ${N}u;
+const GRID_SIZE: u32 = ${GRID_SIZE}u;
+const NUM_CELLS: u32 = ${NUM_CELLS}u;
 
 @group(0) @binding(0) var<storage, read_write> pos: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> vel: array<vec4<f32>>;
-@group(0) @binding(2) var<uniform> P: SimParams;
+@group(0) @binding(2) var<storage, read_write> cellHead: array<atomic<i32>>;
+@group(0) @binding(3) var<storage, read_write> nextIdx: array<i32>;
+@group(0) @binding(4) var<uniform> P: SimParams;
 
+// Pass 1: clear cell-head list (one thread per cell).
 @compute @workgroup_size(64)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn cs_clearGrid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
-  if (i >= ${N}u) { return; }
+  if (i >= NUM_CELLS) { return; }
+  atomicStore(&cellHead[i], -1);
+}
+
+// Pass 2: hash each particle into its cell and link into the cell's list.
+@compute @workgroup_size(64)
+fn cs_buildGrid(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= N) { return; }
+  let p = pos[i].xyz;
+  let h = P.boxHalf;
+  let cs = P.cellSize;
+  let gs = f32(GRID_SIZE) - 1.0;
+  let cx = u32(clamp(floor((p.x + h) / cs), 0.0, gs));
+  let cy = u32(clamp(floor((p.y + h) / cs), 0.0, gs));
+  let cz = u32(clamp(floor((p.z + h) / cs), 0.0, gs));
+  let ci = cx + GRID_SIZE * (cy + GRID_SIZE * cz);
+  // atomicExchange returns the previous head; we link to it.
+  let prev = atomicExchange(&cellHead[ci], i32(i));
+  nextIdx[i] = prev;
+}
+
+// Pass 3: pairwise SPH-style forces, integrate, wall collide, damp.
+// Each thread handles one particle and READS positions/velocities of
+// neighbours from the spatial grid. Forces are gathered by reading; no
+// atomic writes needed.
+@compute @workgroup_size(64)
+fn cs_simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= N) { return; }
   var p = pos[i].xyz;
   var v = vel[i].xyz;
 
-  // Gravity
-  v = v + P.gravity * P.dt;
-  // Integrate position
+  let h = P.boxHalf;
+  let cs = P.cellSize;
+  let r = P.interactRadius;
+  let r2 = r * r;
+
+  let cx = i32((p.x + h) / cs);
+  let cy = i32((p.y + h) / cs);
+  let cz = i32((p.z + h) / cs);
+  let GS = i32(GRID_SIZE);
+
+  var force = vec3<f32>(0.0);
+  // Iterate own + 26 neighbour cells.
+  for (var dz: i32 = -1; dz <= 1; dz = dz + 1) {
+    let ncz = cz + dz;
+    if (ncz < 0 || ncz >= GS) { continue; }
+    for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
+      let ncy = cy + dy;
+      if (ncy < 0 || ncy >= GS) { continue; }
+      for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
+        let ncx = cx + dx;
+        if (ncx < 0 || ncx >= GS) { continue; }
+        let ci = u32(ncx) + u32(GS) * (u32(ncy) + u32(GS) * u32(ncz));
+        var j = atomicLoad(&cellHead[ci]);
+        // Walk the linked list of particles in this cell.
+        var guard: i32 = 0;
+        while (j >= 0 && guard < 64) {
+          guard = guard + 1;
+          let ju = u32(j);
+          if (ju != i) {
+            let pj = pos[ju].xyz;
+            let d = pj - p;
+            let d2 = dot(d, d);
+            if (d2 < r2 && d2 > 1e-8) {
+              let dist = sqrt(d2);
+              let t = (r - dist) / r;
+              let n = d / dist;
+              // Soft repulsion along the line between i and j: push i away
+              // from j (so subtract along +n).
+              let fr = P.pressureK * t * t;
+              force = force - n * fr;
+              // Approach damping: when relative velocity is moving them
+              // together, cancel that component.
+              let vj = vel[ju].xyz;
+              let dv = vj - v;
+              let radialV = dot(dv, n);
+              if (radialV < 0.0) {
+                force = force + n * (radialV * P.approachDamp * t);
+              }
+              // Viscosity: drift velocity toward neighbour's velocity.
+              force = force + dv * (P.viscosity * t);
+            }
+          }
+          j = nextIdx[ju];
+        }
+      }
+    }
+  }
+
+  // Apply accumulated force + gravity.
+  v = v + (force + P.gravity) * P.dt;
+
+  // Speed cap.
+  let sp2 = dot(v, v);
+  let maxSp = 12.0;
+  if (sp2 > maxSp * maxSp) {
+    v = v * (maxSp / sqrt(sp2));
+  }
+
+  // Integrate position.
   p = p + v * P.dt;
 
-  // Wall collisions (axis-aligned cube).
-  let h = P.boxHalf;
+  // Wall collisions.
   if (p.x < -h) { p.x = -h; v.x = -v.x * P.restitution; }
   else if (p.x > h) { p.x = h; v.x = -v.x * P.restitution; }
   if (p.y < -h) { p.y = -h; v.y = -v.y * P.restitution; }
@@ -215,14 +324,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (p.z < -h) { p.z = -h; v.z = -v.z * P.restitution; }
   else if (p.z > h) { p.z = h; v.z = -v.z * P.restitution; }
 
-  // Speed cap so a near-zero dt step can't fling particles.
-  let sp2 = dot(v, v);
-  let maxSp = 12.0;
-  if (sp2 > maxSp * maxSp) {
-    v = v * (maxSp / sqrt(sp2));
-  }
-
-  // Global drag
+  // Global velocity damping.
   v = v * P.velDamping;
 
   pos[i] = vec4<f32>(p, 0.0);
@@ -276,7 +378,9 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
   // Soft falloff so overlapping sprites blend into a fluid glow.
   let glow = pow(1.0 - r, 2.0);
   let col = mix(vec3<f32>(0.16, 0.43, 0.78), vec3<f32>(0.78, 0.92, 1.0), glow);
-  return vec4<f32>(col, glow * 0.55);
+  // Very low per-particle contribution so a stack of many particles in the
+  // additive blend reaches reasonable brightness, not saturated white.
+  return vec4<f32>(col * glow * 0.10, 1.0);
 }
 `;
 
@@ -351,10 +455,22 @@ async function initAndRun() {
   });
   device.queue.writeBuffer(velBuf, 0, velData);
 
-  const SIM_PARAMS_SIZE = 32; // vec3 + 5 floats (with padding)
+  // SimParams: vec3 gravity (16-byte aligned) + 9 f32 = 12 floats = 48 bytes.
+  const SIM_PARAMS_SIZE = 48;
   const simParamsBuf = device.createBuffer({
     size: SIM_PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // Spatial-hash buffers: cell-head (one i32 per cell), next-pointer (one
+  // i32 per particle). Lets each particle find its neighbours in O(1).
+  const cellHeadBuf = device.createBuffer({
+    size: NUM_CELLS * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const nextIdxBuf = device.createBuffer({
+    size: N * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
   // Render uniforms: 64 (mat4) + 12+4 (right+size) + 12+4 (up+pad) = 96 bytes.
@@ -364,18 +480,43 @@ async function initAndRun() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
-  // --- Compute pipeline ---
+  // --- Compute pipelines (three passes per substep) ---
   const computeModule = device.createShaderModule({ code: WGSL_COMPUTE });
-  const computePipeline = device.createComputePipeline({
-    layout: 'auto',
-    compute: { module: computeModule, entryPoint: 'cs_main' },
+  // Use an explicit bind-group layout so all three pipelines can share a
+  // single bind group (and all the entries map correctly even when one of
+  // them doesn't read every binding).
+  const computeLayout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ],
+  });
+  const computePipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: [computeLayout],
+  });
+  const clearPipeline = device.createComputePipeline({
+    layout: computePipelineLayout,
+    compute: { module: computeModule, entryPoint: 'cs_clearGrid' },
+  });
+  const buildPipeline = device.createComputePipeline({
+    layout: computePipelineLayout,
+    compute: { module: computeModule, entryPoint: 'cs_buildGrid' },
+  });
+  const simulatePipeline = device.createComputePipeline({
+    layout: computePipelineLayout,
+    compute: { module: computeModule, entryPoint: 'cs_simulate' },
   });
   const computeBindGroup = device.createBindGroup({
-    layout: computePipeline.getBindGroupLayout(0),
+    layout: computeLayout,
     entries: [
       { binding: 0, resource: { buffer: posBuf } },
       { binding: 1, resource: { buffer: velBuf } },
-      { binding: 2, resource: { buffer: simParamsBuf } },
+      { binding: 2, resource: { buffer: cellHeadBuf } },
+      { binding: 3, resource: { buffer: nextIdxBuf } },
+      { binding: 4, resource: { buffer: simParamsBuf } },
     ],
   });
 
@@ -504,25 +645,35 @@ async function initAndRun() {
     const subSteps = Math.max(1, Math.min(8, Math.ceil(dt / SUB_DT)));
     const stepDt = dt / subSteps;
 
-    // Write sim params.
-    const simBuf = new Float32Array(SIM_PARAMS_SIZE / 4);
+    // Write sim params (must match WGSL SimParams field order/layout).
+    const simBuf = new Float32Array(SIM_PARAMS_SIZE / 4); // 12 floats
     simBuf[0] = state.gravity.x;
     simBuf[1] = state.gravity.y;
     simBuf[2] = state.gravity.z;
-    simBuf[3] = stepDt;
+    simBuf[3] = stepDt;        // packs into vec3's slack
     simBuf[4] = BOX_HALF;
-    simBuf[5] = 0.20;     // restitution
-    simBuf[6] = 0.992;    // velDamping
-    simBuf[7] = 0;        // pad
+    simBuf[5] = 0.20;          // restitution
+    simBuf[6] = 0.992;         // velDamping
+    simBuf[7] = INTERACT_RADIUS; // cellSize (= interactRadius for our grid)
+    simBuf[8] = INTERACT_RADIUS;
+    simBuf[9] = 80.0;          // pressureK
+    simBuf[10] = 0.55;         // viscosity
+    simBuf[11] = 4.0;          // approachDamp
     device.queue.writeBuffer(simParamsBuf, 0, simBuf);
 
-    // Compute pass(es).
+    // Compute passes: clearGrid → buildGrid → simulate, per substep.
+    const cellGroups = Math.ceil(NUM_CELLS / 64);
+    const particleGroups = Math.ceil(N / 64);
     for (let s = 0; s < subSteps; s++) {
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
-      pass.setPipeline(computePipeline);
       pass.setBindGroup(0, computeBindGroup);
-      pass.dispatchWorkgroups(Math.ceil(N / 64));
+      pass.setPipeline(clearPipeline);
+      pass.dispatchWorkgroups(cellGroups);
+      pass.setPipeline(buildPipeline);
+      pass.dispatchWorkgroups(particleGroups);
+      pass.setPipeline(simulatePipeline);
+      pass.dispatchWorkgroups(particleGroups);
       pass.end();
       device.queue.submit([enc.finish()]);
       state.steps++;

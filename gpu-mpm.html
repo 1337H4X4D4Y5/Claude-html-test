@@ -255,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v52 (2026-05-11 — grid 32^3 -> 48^3 (sharper surface, less numerical viscosity))';
+const APP_VERSION = 'mpm-v53 (2026-05-11 — thickness pass + Beer\'s law absorption + sky reflection)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -849,6 +849,55 @@ fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
 }
 `;
 
+// v53: thickness pass. Same billboard vertex layout as the depth pass, but
+// the fragment writes a smooth falloff value to a single-channel color
+// target with additive blending. The accumulated total per pixel is a
+// view-ray integrated "thickness" of fluid in front of the camera —
+// exactly the quantity Beer's law (the composite shader) needs to tint
+// water by depth (deep parts darker / more blue, shallow parts clearer).
+const WGSL_THICKNESS = `
+struct RenderParams {
+  viewProj: mat4x4<f32>,
+  cameraRight: vec3<f32>, particleSize: f32,
+  cameraUp: vec3<f32>, alphaScale: f32,
+};
+
+@group(0) @binding(0) var<storage, read> pos: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> R: RenderParams;
+
+struct VOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32,
+           @builtin(instance_index) ii: u32) -> VOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0)
+  );
+  let q = quad[vi];
+  let center = pos[ii].xyz;
+  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * R.particleSize;
+  var out: VOut;
+  out.position = R.viewProj * vec4<f32>(wp, 1.0);
+  out.uv = q;
+  return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.uv, in.uv);
+  if (r2 > 1.0) { discard; }
+  // Smooth falloff (1 - r^2). Integrated area = pi/2 per particle, so each
+  // accumulated pixel is a rough proxy for the number of particles whose
+  // imposter overlaps it weighted by closeness to centre.
+  let t = (1.0 - r2) * R.alphaScale;
+  return vec4<f32>(t, 0.0, 0.0, 0.0);
+}
+`;
+
 const WGSL_BLUR = `
 @group(0) @binding(0) var srcDepth: texture_depth_2d;
 
@@ -897,12 +946,14 @@ fn fs_v(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
 const WGSL_COMPOSITE = `
 struct CompositeParams {
   near: f32, far: f32, fAspect: f32, fVert: f32,
-  resolutionX: f32, resolutionY: f32,
-  lightDirX: f32, lightDirY: f32, lightDirZ: f32, _pad: f32,
+  resolutionX: f32, resolutionY: f32, thicknessScale: f32, _pad0: f32,
+  lightDirX: f32, lightDirY: f32, lightDirZ: f32, _pad1: f32,
+  absorptionR: f32, absorptionG: f32, absorptionB: f32, _pad2: f32,
 };
 
 @group(0) @binding(0) var depthTex: texture_depth_2d;
 @group(0) @binding(1) var<uniform> P: CompositeParams;
+@group(0) @binding(2) var thicknessTex: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -921,11 +972,24 @@ fn viewPosFromDepth(fragXY: vec2<f32>, depth: f32) -> vec3<f32> {
   return vec3<f32>(viewX, viewY, viewZ);
 }
 
+// Procedural three-stop sky gradient (view-space Y). Used by the Fresnel
+// reflection on the water surface so the highlight roll-off looks like
+// the room reflected in real water instead of a constant blue rim.
+fn sampleSky(dir: vec3<f32>) -> vec3<f32> {
+  let zenith  = vec3<f32>(0.55, 0.72, 1.00);
+  let horizon = vec3<f32>(0.45, 0.58, 0.78);
+  let ground  = vec3<f32>(0.10, 0.14, 0.22);
+  let downT = smoothstep(-0.4, 0.0, dir.y);
+  let upT   = smoothstep( 0.0, 0.6, dir.y);
+  return mix(ground, mix(horizon, zenith, upT), downT);
+}
+
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let coord = vec2<i32>(i32(frag.x), i32(frag.y));
   let depth = textureLoad(depthTex, coord, 0);
   if (depth >= 0.99999) { discard; }
+
   let viewPos = viewPosFromDepth(frag.xy, depth);
   let ddx_p = dpdx(viewPos);
   let ddy_p = dpdy(viewPos);
@@ -933,16 +997,38 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let viewDir = -normalize(viewPos);
   let lightDir = normalize(vec3<f32>(P.lightDirX, P.lightDirY, P.lightDirZ));
   let halfDir = normalize(viewDir + lightDir);
+
   let diffuse = max(0.0, dot(n, lightDir));
   let spec = pow(max(0.0, dot(n, halfDir)), 96.0);
   let nv = max(0.0, dot(n, viewDir));
-  let fresnel = pow(1.0 - nv, 2.5);
-  let deep    = vec3<f32>(0.04, 0.16, 0.40);
-  let shallow = vec3<f32>(0.50, 0.82, 1.00);
-  let waterCol = mix(deep, shallow, fresnel * 0.6);
-  let ambient = vec3<f32>(0.10, 0.16, 0.24);
-  let lit = ambient + waterCol * (0.30 + 0.70 * diffuse) + vec3<f32>(0.92, 0.97, 1.0) * spec * 0.55;
-  return vec4<f32>(lit, 1.0);
+  // Sharper Fresnel curve — water has a strong glancing-angle reflection.
+  let fresnel = pow(1.0 - nv, 4.0);
+
+  // Beer's law absorption. Thickness is sampled from the additive thickness
+  // pass (in front of this fragment) and scaled to absorption units.
+  // exp(-coef * thickness) is per-channel: red dies fastest, blue lasts
+  // longest → water naturally tints toward deep blue as thickness grows.
+  let thicknessRaw = textureLoad(thicknessTex, coord, 0).r;
+  let thickness = thicknessRaw * P.thicknessScale;
+  let absorption = vec3<f32>(
+    exp(-P.absorptionR * thickness),
+    exp(-P.absorptionG * thickness),
+    exp(-P.absorptionB * thickness)
+  );
+  // Clear/clean water base colour: nearly white. Beer's law does the tint.
+  let waterTint = vec3<f32>(0.92, 0.97, 1.00) * absorption;
+
+  // Sky reflection sampled by the reflected view ray. In view space the
+  // camera looks down -Z and "up" is +Y; reflectedV.y picks the right
+  // stop of the gradient.
+  let reflectedV = reflect(-viewDir, n);
+  let sky = sampleSky(reflectedV);
+
+  // Composite: diffuse-lit transmitted colour blended toward sky reflection
+  // by Fresnel, plus a tight specular highlight.
+  let lit = waterTint * (0.30 + 0.70 * diffuse);
+  let final = mix(lit, sky, fresnel) + vec3<f32>(0.95, 0.98, 1.0) * spec * 0.55;
+  return vec4<f32>(final, 1.0);
 }
 `;
 
@@ -1063,8 +1149,9 @@ async function initAndRun() {
     size: RENDER_PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  // Composite uniform buffer (48 bytes).
-  const COMPOSITE_PARAMS_SIZE = 48;
+  // Composite uniform buffer. v53: bumped 48 → 64 bytes to fit the
+  // thicknessScale + absorption coefficients added for Beer's-law water.
+  const COMPOSITE_PARAMS_SIZE = 64;
   const compositeParamsBuf = device.createBuffer({
     size: COMPOSITE_PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -1132,6 +1219,34 @@ async function initAndRun() {
     ],
   });
 
+  // v53: thickness pipeline. Same vertex shader shape as depth, fragment
+  // writes a smooth falloff to a one-channel float target with additive
+  // blending so multiple particles' imposters sum into a "thickness" map.
+  const THICKNESS_FORMAT = 'r16float';
+  const thicknessModule = device.createShaderModule({ code: WGSL_THICKNESS });
+  const thicknessPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: thicknessModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: thicknessModule, entryPoint: 'fs_main',
+      targets: [{
+        format: THICKNESS_FORMAT,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const thicknessBindGroup = device.createBindGroup({
+    layout: thicknessPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: posBuf } },
+      { binding: 1, resource: { buffer: renderParamsBuf } },
+    ],
+  });
+
   const blurModule = device.createShaderModule({ code: WGSL_BLUR });
   const blurH = device.createRenderPipeline({
     layout: 'auto',
@@ -1190,8 +1305,8 @@ async function initAndRun() {
     entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
   });
 
-  // Depth textures and ping-pong bind groups for the SSF passes.
-  let depthRaw = null, depthH = null, depthV = null;
+  // Depth + thickness textures and ping-pong bind groups for the SSF passes.
+  let depthRaw = null, depthH = null, depthV = null, thicknessTex = null;
   let compositeBindGroup = null, blurH1 = null, blurV1 = null, blurH2 = null, blurV2 = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
@@ -1200,6 +1315,7 @@ async function initAndRun() {
     if (depthRaw) depthRaw.destroy();
     if (depthH) depthH.destroy();
     if (depthV) depthV.destroy();
+    if (thicknessTex) thicknessTex.destroy();
     const opts = {
       size: { width: w, height: h },
       format: 'depth32float',
@@ -1208,6 +1324,11 @@ async function initAndRun() {
     depthRaw = device.createTexture(opts);
     depthH = device.createTexture(opts);
     depthV = device.createTexture(opts);
+    thicknessTex = device.createTexture({
+      size: { width: w, height: h },
+      format: THICKNESS_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
     blurH1 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthRaw.createView() }] });
     blurV1 = device.createBindGroup({ layout: blurV.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthH.createView() }] });
     blurH2 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthV.createView() }] });
@@ -1217,6 +1338,7 @@ async function initAndRun() {
       entries: [
         { binding: 0, resource: depthV.createView() },
         { binding: 1, resource: { buffer: compositeParamsBuf } },
+        { binding: 2, resource: thicknessTex.createView() },
       ],
     });
     lastW = w; lastH = h;
@@ -1345,6 +1467,11 @@ async function initAndRun() {
     compBuf[0] = 0.1; compBuf[1] = 100;
     compBuf[2] = f / aspect; compBuf[3] = f;
     compBuf[4] = canvas.width; compBuf[5] = canvas.height;
+    // v53: thicknessScale maps the additive-blended raw thickness texture
+    // value into Beer's-law absorption units. Tuned so a "full" column of
+    // particles (a few overlapping imposters deep) drops the red channel
+    // to near zero while leaving blue mostly intact.
+    compBuf[6] = 0.18; compBuf[7] = 0;
     const Lw = [0.35, 0.80, 0.50];
     const Lv = [
       cam.right[0]*Lw[0] + cam.right[1]*Lw[1] + cam.right[2]*Lw[2],
@@ -1354,11 +1481,30 @@ async function initAndRun() {
         Lw[2] * (cam.right[0]*cam.up[1] - cam.right[1]*cam.up[0]))
     ];
     const Llen = Math.hypot(Lv[0], Lv[1], Lv[2]) || 1;
-    compBuf[6] = Lv[0] / Llen; compBuf[7] = Lv[1] / Llen; compBuf[8] = Lv[2] / Llen;
-    compBuf[9] = 0;
+    compBuf[8] = Lv[0] / Llen; compBuf[9] = Lv[1] / Llen; compBuf[10] = Lv[2] / Llen;
+    compBuf[11] = 0;
+    // Beer's law extinction coefficients per channel. Red highest → dies
+    // first in thick water; blue lowest → carries through, giving the
+    // characteristic deep-blue tint.
+    compBuf[12] = 5.0; compBuf[13] = 2.5; compBuf[14] = 0.8;
+    compBuf[15] = 0;
     device.queue.writeBuffer(compositeParamsBuf, 0, compBuf);
 
     const enc2 = device.createCommandEncoder();
+    // Thickness (additive). Each particle adds a soft falloff disc into
+    // the thickness target; total per pixel is the view-ray fluid mass
+    // sampled by the Beer's-law branch of the composite shader.
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: thicknessTex.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(thicknessPipeline); p.setBindGroup(0, thicknessBindGroup);
+      p.draw(6, N); p.end();
+    }
     // Depth.
     {
       const p = enc2.beginRenderPass({

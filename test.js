@@ -937,6 +937,80 @@
         'preset-btn click handler does not call applyPreset(...)');
     });
 
+    test('gpu-mpm v53: CompositeParams WGSL struct matches JS compBuf layout', () => {
+      // v53 adds thicknessScale + absorption coefficients to the composite
+      // uniform. WGSL struct field order must match JS compBuf assignments
+      // (with vec3-style 16-byte packing accounted for) or the shader
+      // reads garbage for thickness / Beer's law coefficients.
+      const src = readMpmScript();
+      const structMatch = src.match(/struct\s+CompositeParams\s*{([\s\S]*?)}/);
+      assert(structMatch, 'CompositeParams WGSL struct not found');
+      const fields = structMatch[1]
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .map(s => s.split(':')[0].trim());
+      const expectedWgsl = [
+        'near', 'far', 'fAspect', 'fVert',
+        'resolutionX', 'resolutionY', 'thicknessScale', '_pad0',
+        'lightDirX', 'lightDirY', 'lightDirZ', '_pad1',
+        'absorptionR', 'absorptionG', 'absorptionB', '_pad2',
+      ];
+      assert(fields.length === expectedWgsl.length,
+        'CompositeParams has ' + fields.length + ' fields, expected ' + expectedWgsl.length);
+      for (let i = 0; i < expectedWgsl.length; i++) {
+        assert(fields[i] === expectedWgsl[i],
+          'CompositeParams field ' + i + ': expected "' + expectedWgsl[i] + '", got "' + fields[i] + '"');
+      }
+      // Now confirm JS writes the same logical 16 slots (every compBuf[N] = ...).
+      const jsAssigns = [];
+      const re = /compBuf\[(\d+)\]\s*=\s*([^;]+);/g;
+      let m;
+      while ((m = re.exec(src))) jsAssigns.push(parseInt(m[1], 10));
+      jsAssigns.sort((a, b) => a - b);
+      for (let i = 0; i < 16; i++) {
+        assert(jsAssigns.indexOf(i) >= 0, 'compBuf[' + i + '] never assigned in JS');
+      }
+      // COMPOSITE_PARAMS_SIZE must equal 64 (16 floats).
+      const sizeMatch = src.match(/COMPOSITE_PARAMS_SIZE\s*=\s*(\d+)/);
+      assert(sizeMatch, 'COMPOSITE_PARAMS_SIZE constant not found');
+      assert(parseInt(sizeMatch[1], 10) === 64,
+        'COMPOSITE_PARAMS_SIZE must be 64 bytes (got ' + sizeMatch[1] + ')');
+    });
+
+    test('gpu-mpm v53: thickness pass shader + pipeline + frame draw wired', () => {
+      const src = readMpmScript();
+      assert(src.indexOf('WGSL_THICKNESS') >= 0, 'WGSL_THICKNESS shader source missing');
+      assert(src.indexOf('thicknessPipeline') >= 0, 'thicknessPipeline not created');
+      assert(src.indexOf('thicknessBindGroup') >= 0, 'thicknessBindGroup not created');
+      assert(src.indexOf('thicknessTex') >= 0, 'thicknessTex texture missing');
+      // Frame loop must draw the thickness pass (one draw call with N instances).
+      // Heuristic: pipeline set + a draw(6, N) following it.
+      const setIdx = src.indexOf('p.setPipeline(thicknessPipeline)');
+      assert(setIdx >= 0, 'thicknessPipeline never bound in a render pass');
+      const after = src.slice(setIdx, setIdx + 200);
+      assert(after.indexOf('p.draw(6, N)') >= 0,
+        'thicknessPipeline render pass does not draw(6, N)');
+    });
+
+    test('gpu-mpm v53: composite shader uses thickness + Beer\'s law + sky reflection', () => {
+      const src = readMpmScript();
+      // Pull the WGSL_COMPOSITE template literal body.
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      assert(compIdx >= 0, 'WGSL_COMPOSITE source not found');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.indexOf('thicknessTex') >= 0,
+        'composite shader does not bind thicknessTex');
+      assert(compositeSrc.indexOf('exp(-P.absorptionR') >= 0 ||
+             compositeSrc.indexOf('exp(-P.absorption') >= 0,
+        'composite shader does not apply Beer law exp(-coef * thickness)');
+      assert(compositeSrc.indexOf('reflect(-viewDir, n)') >= 0,
+        'composite shader does not compute reflected view direction');
+      assert(compositeSrc.indexOf('sampleSky') >= 0,
+        'composite shader does not sample procedural sky');
+    });
+
     test('gpu-mpm v48: wall friction applied in cs_grid, viscosity applied in cs_g2p', () => {
       // The WGSL must actually USE the new uniforms or they are dead code.
       // Slice each function body by index since JS regex has no \Z and

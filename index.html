@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v92</span>
+    <span class="tag">v93</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v92 reshapes foam so it reads as fluffy surface patches instead of white dots: 2.3× larger radius, irregular blob shape with bubble noise, much stronger air drag so foam settles near the surface, lower spawn kick + longer lifetime.</div>
+  <div class="desc">MLS-MPM on the GPU. v93 strips the foam experiment and runs a perf pass: composite normal back to dpdx/dpdy, single-tap refraction (no chromatic), fBm 4 → 2 octaves, drop curvature caustic, depth blur 6 → 4 passes.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
@@ -112,7 +112,7 @@
 <a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
-    <span class="tag">59</span>
+    <span class="tag">58</span>
   </div>
   <div class="desc">Run the full simulation test suite in the browser. CPU sim stability + gpu-mpm regression checks (TDZ, error banner, SimParams / CompositeParams uniform layouts, CFL margin, wall-friction + viscosity, preset menu, thickness pass, WGSL reserved-word scanner).</div>
 </a>

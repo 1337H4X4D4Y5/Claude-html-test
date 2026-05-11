@@ -1154,45 +1154,21 @@
       assert(combineIdx >= 0, 'combinePipeline never used in frame loop');
     });
 
-    test('gpu-mpm v90: foam pipeline (spawn + update + render) wired', () => {
-      const src = readMpmScript();
-      assert(src.indexOf('WGSL_FOAM_COMPUTE') >= 0, 'WGSL_FOAM_COMPUTE shader missing');
-      assert(src.indexOf('WGSL_FOAM_RENDER') >= 0, 'WGSL_FOAM_RENDER shader missing');
-      assert(src.indexOf('cs_foam_spawn') >= 0, 'cs_foam_spawn entry point missing');
-      assert(src.indexOf('cs_foam_update') >= 0, 'cs_foam_update entry point missing');
-      assert(src.indexOf('foamPosBuf') >= 0 && src.indexOf('foamVelBuf') >= 0,
-        'foamPos/foamVel storage buffers not created');
-      assert(src.indexOf('foamHeadBuf') >= 0, 'foamHeadBuf atomic counter missing');
-      assert(src.indexOf('foamSpawnPipeline') >= 0, 'foamSpawnPipeline not created');
-      assert(src.indexOf('foamUpdatePipeline') >= 0, 'foamUpdatePipeline not created');
-      assert(src.indexOf('foamRenderPipeline') >= 0, 'foamRenderPipeline not created');
-      assert(src.indexOf('p.setPipeline(foamRenderPipeline)') >= 0,
-        'foamRenderPipeline never used in frame loop');
-      assert(src.indexOf('foamPass.setPipeline(foamSpawnPipeline)') >= 0,
-        'foamSpawnPipeline never dispatched in compute pass');
-      assert(src.indexOf('foamPass.setPipeline(foamUpdatePipeline)') >= 0,
-        'foamUpdatePipeline never dispatched in compute pass');
-    });
-
-    test('gpu-mpm v82: tile backdrop + caustics wired', () => {
+    test('gpu-mpm v82: tile backdrop + projected caustics wired', () => {
+      // v82 added the white-tile backdrop; v87 added projected light
+      // caustics; v93 dropped the curvature caustic (perf) and reverted
+      // the 5-tap normal so dpdx(nSmooth) is no longer used.
       const src = readMpmScript();
       assert(src.indexOf('WGSL_BACKDROP') >= 0, 'WGSL_BACKDROP shader missing');
       assert(src.indexOf('backdropPipeline') >= 0, 'backdropPipeline not created');
-      // Background pass must draw the backdrop AND lines.
       assert(src.indexOf('p.setPipeline(backdropPipeline)') >= 0,
         'backdropPipeline never dispatched in frame loop');
-      // Composite must compute screen-space caustics from normal curvature.
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
       const compEnd = src.indexOf('`;', compIdx);
       const compositeSrc = src.slice(compIdx, compEnd);
-      // v83: caustics moved from dpdx(n) (fBm-perturbed) to dpdx(nSmooth)
-      // because the noisy normal had huge per-pixel derivatives → caustics
-      // fired everywhere and bloom turned the fluid into vertical streaks.
-      assert(compositeSrc.indexOf('dpdx(nSmooth)') >= 0 || compositeSrc.indexOf('dpdx(n)') >= 0,
-        'composite must compute dpdx of a surface normal for caustics');
-      assert(compositeSrc.indexOf('dpdy(nSmooth)') >= 0 || compositeSrc.indexOf('dpdy(n)') >= 0,
-        'composite must compute dpdy of a surface normal for caustics');
-      assert(compositeSrc.indexOf('Caustic') >= 0 || compositeSrc.indexOf('caustic') >= 0,
+      assert(compositeSrc.indexOf('lightCaustic') >= 0,
+        'composite must call lightCaustic() for projected caustic pattern');
+      assert(compositeSrc.indexOf('caustic') >= 0,
         'composite must produce some kind of caustic term');
     });
 
@@ -1220,26 +1196,28 @@
         'composite must consume P.time for animated ripples');
     });
 
-    test('gpu-mpm v76: composite shader uses 5-tap normal + chromatic refraction', () => {
+    test('gpu-mpm v93: composite normal uses dpdx/dpdy, refraction is single-tap', () => {
+      // v76 introduced 5-tap normal + chromatic refraction; v93 reverted
+      // both for perf (5 depth reads + 3 bg reads → 0 + 1 per pixel).
+      // The wider v80 bilateral depth blur keeps the dpdx/dpdy normal
+      // smooth enough, and the v89 thinClamp masks silhouette artifacts.
       const src = readMpmScript();
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
       const compEnd = src.indexOf('`;', compIdx);
       const compositeSrc = src.slice(compIdx, compEnd);
-      // 5-tap normal: needs L/R/U/D depth samples and select() on which is closer.
-      assert(compositeSrc.indexOf('vec2<i32>(-1, 0)') >= 0 &&
-             compositeSrc.indexOf('vec2<i32>( 1, 0)') >= 0,
-        'composite must sample left+right depth neighbours for 5-tap normal');
-      assert(compositeSrc.indexOf('select(') >= 0,
-        'composite must use select() to pick closer neighbour (avoid silhouette spans)');
-      // Chromatic refraction: three samples of backgroundTex.
+      assert(compositeSrc.indexOf('dpdx(viewPos)') >= 0 &&
+             compositeSrc.indexOf('dpdy(viewPos)') >= 0,
+        'composite normal should be derived from dpdx/dpdy(viewPos)');
+      // Two textureLoad calls expected: one in the no-fluid branch (unwarped
+      // blit) and one in the fluid branch (warped refraction). v76's
+      // chromatic variant had three (one per channel) — that's gone.
       let bgSamples = 0;
       let i = 0;
       while ((i = compositeSrc.indexOf('textureLoad(backgroundTex', i)) >= 0) {
-        bgSamples++;
-        i++;
+        bgSamples++; i++;
       }
-      assert(bgSamples >= 3,
-        'composite should sample backgroundTex 3 times for chromatic refraction; got ' + bgSamples);
+      assert(bgSamples <= 2,
+        'composite should sample backgroundTex at most 2 times (no chromatic refraction); got ' + bgSamples);
     });
 
     test('gpu-mpm v48: wall friction applied in cs_grid, viscosity applied in cs_g2p', () => {

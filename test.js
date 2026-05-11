@@ -673,6 +673,103 @@
     assert(minR > 0.02, 'particles overlap too much: min dist ' + minR.toFixed(4));
   });
 
+  // ---------- gpu-mpm.html regression tests (v47) ----------
+  // These exercise the inline <script> in gpu-mpm.html as text so we can
+  // catch top-level breakage without a WebGPU context. Node-only because
+  // they need fs to read the sibling HTML file.
+
+  function readMpmScript() {
+    let html;
+    if (isNode) {
+      const fs = require('fs');
+      const path = require('path');
+      html = fs.readFileSync(path.resolve(__dirname, 'gpu-mpm.html'), 'utf8');
+    } else {
+      // Synchronous XHR in the browser. Deprecated but lets us keep the test
+      // framework synchronous; the request finishes well under a frame.
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', './gpu-mpm.html?t=' + Date.now(), false);
+      xhr.send(null);
+      if (xhr.status !== 200 && xhr.status !== 0) {
+        throw new Error('XHR fetch of gpu-mpm.html failed with status ' + xhr.status);
+      }
+      html = xhr.responseText;
+    }
+    const m = html.match(/<script>([\s\S]*?)<\/script>/);
+    if (!m) throw new Error('no <script> block in gpu-mpm.html');
+    return m[1];
+  }
+
+  {
+    test('gpu-mpm: const N declared before const _natRho (TDZ regression check)', () => {
+      // v46 declared `const _natRho = N * 1.0 / 4.0` ABOVE `const N = ...`,
+      // which throws ReferenceError under TDZ at script load and leaves
+      // the overlay button inert. Verify the ordering is correct.
+      const src = readMpmScript();
+      const idxN = src.indexOf('const N = readParticleCount()');
+      const idxRho = src.indexOf('const _natRho = N');
+      assert(idxN >= 0, 'const N declaration not found');
+      assert(idxRho >= 0, 'const _natRho declaration not found');
+      assert(idxN < idxRho,
+        'const N must appear before const _natRho (TDZ violation regressed): ' +
+        'idxN=' + idxN + ' idxRho=' + idxRho);
+    });
+
+    test('gpu-mpm: global error banner IIFE is installed', () => {
+      const src = readMpmScript();
+      assert(src.indexOf('installErrorBanner') >= 0, 'installErrorBanner IIFE missing');
+      assert(src.indexOf("addEventListener('error'") >= 0 ||
+             src.indexOf('addEventListener("error"') >= 0,
+        'window error listener missing');
+      assert(src.indexOf('unhandledrejection') >= 0,
+        'unhandledrejection listener missing');
+    });
+
+    test('gpu-mpm: top-level script evaluates against a mock DOM without throwing', () => {
+      // Wrap the inline script up to (but not including) initAndRun in a
+      // Function and execute it with stubbed document/window/etc. This
+      // exercises every top-level statement and IIFE — exactly the path that
+      // v46 broke with TDZ. If a regression reorders declarations the wrong
+      // way again, this test throws and we catch it before shipping.
+      const src = readMpmScript();
+      const cutAt = src.indexOf('async function initAndRun');
+      if (cutAt < 0) throw new Error('initAndRun marker not found — script layout changed');
+      const top = src.slice(0, cutAt);
+
+      const stubEl = {
+        style: {}, classList: { add() {}, remove() {}, toggle() {} },
+        addEventListener() {}, appendChild() {}, setAttribute() {},
+        getAttribute() { return ''; },
+        value: '', textContent: '', className: '', innerHTML: '',
+      };
+      const stubDoc = {
+        getElementById() { return stubEl; },
+        createElement() { return stubEl; },
+        body: stubEl, documentElement: stubEl,
+        addEventListener() {},
+      };
+      const stubWin = {
+        addEventListener() {},
+        location: { search: '', href: 'http://localhost/gpu-mpm.html', pathname: '/gpu-mpm.html' },
+      };
+      const stubScreen = { orientation: { angle: 0 } };
+      const stubNavigator = { userAgent: 'test', gpu: undefined };
+
+      let threw = null;
+      try {
+        // eslint-disable-next-line no-new-func
+        const wrapper = new Function(
+          'document', 'window', 'navigator', 'screen', 'location',
+          '"use strict";\n' + top
+        );
+        wrapper(stubDoc, stubWin, stubNavigator, stubScreen, stubWin.location);
+      } catch (e) {
+        threw = e;
+      }
+      assert(!threw, 'top-level threw: ' + (threw && threw.message));
+    });
+  }
+
   // ---------- Reporting ----------
 
   if (isNode) {

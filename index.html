@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v45</span>
+    <span class="tag">v47</span>
   </div>
-  <div class="desc">MLS-MPM + linear pressure on the GPU. Default 8000 particles (conservative). Slider on the gear icon if you want to push the GPU. Init progress is now reported live on the overlay so failure points are visible.</div>
+  <div class="desc">MLS-MPM + linear pressure on the GPU. Default 8000 particles (conservative). Slider on the gear icon if you want to push the GPU. v47 fixes a TDZ ReferenceError that left the Tap-to-begin button inert in v46.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
@@ -112,9 +112,9 @@
 <a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
-    <span class="tag">37</span>
+    <span class="tag">40</span>
   </div>
-  <div class="desc">Run the full simulation test suite in the browser. Validates the CPU sim's stability under sustained gravity, gyro sweep, splash pokes, and lattice-collapse regression tests.</div>
+  <div class="desc">Run the full simulation test suite in the browser. Validates the CPU sim's stability under sustained gravity, gyro sweep, splash pokes, lattice-collapse, and the gpu-mpm TDZ + error-banner regression checks.</div>
 </a>
 
 <a class="card diag" id="link-webgpu" href="./webgpu-check.html">

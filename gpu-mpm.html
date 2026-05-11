@@ -155,7 +155,48 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button><button id="reset-btn">Reset particles</button></div>
 
 <script>
-const APP_VERSION = 'mpm-v45 (2026-05-11 — safer default N, better error log)';
+// Install a window-level error handler IMMEDIATELY so even errors that
+// would otherwise be silent (script load, listener registration, top-level
+// throws) become visible on the page. Without this, an iOS Safari script
+// error can leave the Tap-to-begin button non-functional with no visible
+// indication of why.
+(function installErrorBanner() {
+  function show(kind, message, source) {
+    let el = document.getElementById('error-banner');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'error-banner';
+      el.style.cssText =
+        'position:fixed;top:0;left:0;right:0;z-index:99999;' +
+        'background:#7a1f1f;color:#fff;font:13px/1.4 ui-monospace,monospace;' +
+        'padding:10px 14px;border-bottom:1px solid #f88;' +
+        'white-space:pre-wrap;word-break:break-word;';
+      (document.body || document.documentElement).appendChild(el);
+    }
+    el.textContent = '[' + kind + '] ' + (message || '') + (source ? '\n@ ' + source : '');
+  }
+  window.addEventListener('error', function (e) {
+    show('JS error', (e.error && e.error.message) || e.message,
+      e.filename + ':' + e.lineno + ':' + e.colno);
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    const r = e.reason;
+    show('Unhandled rejection', (r && r.message) || String(r));
+  });
+})();
+
+const APP_VERSION = 'mpm-v47 (2026-05-11 — TDZ fix: order N before SIM_TUNE)';
+document.getElementById('overlay-version').textContent = APP_VERSION;
+document.getElementById('version').textContent = APP_VERSION;
+
+// Default conservative — 8000 is what we confirmed working at v43. Slider
+// can push it higher if your GPU is happy.
+function readParticleCount() {
+  const m = location.search.match(/[?&]n=(\d+)/);
+  if (!m) return 8000;
+  return Math.max(500, Math.min(40000, parseInt(m[1], 10) || 8000));
+}
+const N = readParticleCount();
 
 // All MPM tunables live in one place. Surfaced in the on-screen debug
 // strip and the copy-debug report so we can iterate from screenshots.
@@ -164,6 +205,9 @@ const APP_VERSION = 'mpm-v45 (2026-05-11 — safer default N, better error log)'
 // compression no matter what particle count is loaded:
 //   rho0 ~ (N * particleMass) / (filled volume = 4 cubic units)
 //   K    ~ rho0 * g * H / compression  ~ rho0 * 50
+// IMPORTANT: this block reads N, so it must run *after* `const N = ...`.
+// In v46 _natRho was declared before N which triggered a TDZ
+// ReferenceError on script load, leaving the Tap-to-begin button inert.
 const _natRho = N * 1.0 / 4.0;
 const SIM_TUNE = {
   pressureK: _natRho * 50,
@@ -174,19 +218,6 @@ const SIM_TUNE = {
   maxAccel: 50.0,
   eos: 'linear',
 };
-document.getElementById('overlay-version').textContent = APP_VERSION;
-document.getElementById('version').textContent = APP_VERSION;
-
-// Default conservative — 8000 is what we confirmed working at v43. Slider
-// can push it higher if your GPU is happy. iPhone memory ceiling for the
-// combined pos+vel+C+grid buffers seems to bite somewhere past ~16k on the
-// v44 build (overlay tap stopped responding for the user at N=26 500).
-function readParticleCount() {
-  const m = location.search.match(/[?&]n=(\d+)/);
-  if (!m) return 8000;
-  return Math.max(500, Math.min(40000, parseInt(m[1], 10) || 8000));
-}
-const N = readParticleCount();
 const BOX_HALF = 1.0;
 const GRID_SIZE = 32;
 const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;

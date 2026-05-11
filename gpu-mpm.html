@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v85 (2026-05-11 — projected light caustics (dancing bright patterns))';
+const APP_VERSION = 'mpm-v86 (2026-05-11 — box side walls + thin-water refraction clamp + softer caustics)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1203,10 +1203,11 @@ fn lightCaustic(p: vec2<f32>, t: f32) -> f32 {
     q1.y + cos(q1.x * 2.9 + t * 0.37) * 0.28
   );
   let d = q2.x + q2.y;
-  // pow(sin, 8) gives sharp bright peaks where sin is near 1, dark
-  // troughs everywhere else — the characteristic caustic look.
+  // v86: pow 8 -> 4 — wider, softer bright peaks instead of pinpoint
+  // sharp spots. Reads more like real caustic flowing patterns and
+  // less like a regular dot grid.
   let s = sin(d * 1.8 + t * 0.2) * 0.5 + 0.5;
-  return pow(s, 8.0);
+  return pow(s, 4.0);
 }
 
 // Procedural three-stop sky gradient (view-space Y). Used by the Fresnel
@@ -1294,18 +1295,21 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     exp(-P.absorptionB * thickness)
   );
 
-  // v76: CHROMATIC refraction. Sample background with slightly different
-  // warp magnitude per channel — wavelength-dependent IOR, blue (short
-  // wavelength) refracts more than red. Subtle prismatic fringe at
-  // grazing surfaces, the hallmark of glass + water.
-  let chroma = 0.07;
+  // v76: CHROMATIC refraction with v86 fixes:
+  //   - chroma reduced 0.07 -> 0.025 (less prismatic colour fringe)
+  //   - warp magnitude scaled by thickness, so thin water against the
+  //     wall (where the surface normal can swing wildly) doesn't yank
+  //     the bg lookup off-screen
+  let chroma = 0.025;
+  let thinClamp = clamp(thicknessRaw * 4.0, 0.0, 1.0);
+  let strength = P.refractStrength * thinClamp;
   let resMax = vec2<i32>(i32(P.resolutionX) - 1, i32(P.resolutionY) - 1);
-  let warpR = vec2<i32>(i32(n.x * P.refractStrength * (1.0 - chroma)),
-                        i32(-n.y * P.refractStrength * (1.0 - chroma)));
-  let warpG = vec2<i32>(i32(n.x * P.refractStrength),
-                        i32(-n.y * P.refractStrength));
-  let warpB = vec2<i32>(i32(n.x * P.refractStrength * (1.0 + chroma)),
-                        i32(-n.y * P.refractStrength * (1.0 + chroma)));
+  let warpR = vec2<i32>(i32(n.x * strength * (1.0 - chroma)),
+                        i32(-n.y * strength * (1.0 - chroma)));
+  let warpG = vec2<i32>(i32(n.x * strength),
+                        i32(-n.y * strength));
+  let warpB = vec2<i32>(i32(n.x * strength * (1.0 + chroma)),
+                        i32(-n.y * strength * (1.0 + chroma)));
   let cR = clamp(coord + warpR, vec2<i32>(0), resMax);
   let cG = clamp(coord + warpG, vec2<i32>(0), resMax);
   let cB = clamp(coord + warpB, vec2<i32>(0), resMax);
@@ -1325,14 +1329,13 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let causticTint = vec3<f32>(1.00, 0.96, 0.84);
   bg = bg + causticTint * (curvatureCaustic * curvatureCaustic) * 0.5;
 
-  // v85: projected light caustics — the dancing bright patterns water
-  // casts onto its floor. Procedural pattern keyed to surface world XZ
-  // (viewPos.xz proxy) and P.time. Applied multiplicatively so the
-  // tile pattern stays visible underneath. Only fires where there's
-  // water in front of the camera (this branch).
+  // v85/v86: projected light caustics. Procedural pattern keyed to
+  // surface world XZ and time; multiplicative onto bg so the tile
+  // pattern stays visible. v86 dropped multiplier 1.4 -> 0.5 and the
+  // pow exponent (in lightCaustic) 8 -> 4, much subtler.
   let causticUV = vec2<f32>(viewPos.x, -viewPos.z) * 6.0;
   let lc = lightCaustic(causticUV, P.time);
-  bg = bg * (1.0 + lc * 1.4);
+  bg = bg * (1.0 + lc * 0.5);
 
   // Body model (v60+): uniform-opacity lerp between absorbed background
   // and lit baseColor, so baseColor keeps its hue at any thickness.
@@ -1499,6 +1502,30 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   // the bloom signal is already blurred so nearest is visually fine.
   let b = textureLoad(bloomTex, coord / 2, 0).rgb;
   return vec4<f32>(c + b * P.intensity, 1.0);
+}
+`;
+
+// v86: translucent glass-wall panels rendered between the tile backdrop
+// and the wireframe edges. Gives the box VISIBLE side walls instead of
+// just a wire outline — addresses the "no vertical walls" complaint.
+// Premultiplied alpha so the panels veil whatever's behind them.
+const WGSL_BOXFACES = `
+struct RenderParams {
+  viewProj: mat4x4<f32>,
+  cameraRight: vec3<f32>, particleSize: f32,
+  cameraUp: vec3<f32>, alphaScale: f32,
+};
+@group(0) @binding(0) var<uniform> R: RenderParams;
+@vertex
+fn vs_main(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
+  return R.viewProj * vec4<f32>(p, 1.0);
+}
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+  // Glass tint: pale grey-blue, low alpha so the tiles + fluid show.
+  let a: f32 = 0.22;
+  let rgb = vec3<f32>(0.72, 0.78, 0.84);
+  return vec4<f32>(rgb * a, a);
 }
 `;
 
@@ -1862,6 +1889,59 @@ async function initAndRun() {
     entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
   });
 
+  // v86: 4 translucent side walls (left, right, back, front). Each is a
+  // quad rendered as 2 triangles, 18 vertices per wall, 24 vertices
+  // total. Bottom face omitted because fluid usually covers it; front
+  // face included so the box reads as a closed glass tank when empty.
+  const cubeFaces = new Float32Array([
+    // Left wall (x = -X)
+    -X,-Y,-Z,  -X, Y,-Z,  -X, Y, Z,
+    -X,-Y,-Z,  -X, Y, Z,  -X,-Y, Z,
+    // Right wall (x = +X)
+     X,-Y,-Z,   X, Y, Z,   X, Y,-Z,
+     X,-Y,-Z,   X,-Y, Z,   X, Y, Z,
+    // Back wall (z = -Z)
+    -X,-Y,-Z,   X, Y,-Z,   X,-Y,-Z,
+    -X,-Y,-Z,  -X, Y,-Z,   X, Y,-Z,
+    // Front wall (z = +Z)
+    -X,-Y, Z,   X,-Y, Z,   X, Y, Z,
+    -X,-Y, Z,   X, Y, Z,  -X, Y, Z,
+  ]);
+  const cubeFaceBuf = device.createBuffer({
+    size: cubeFaces.byteLength,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(cubeFaceBuf, 0, cubeFaces);
+  // v86: box-face pipeline. Premultiplied alpha so the translucent
+  // panels veil the tile backdrop while keeping the fluid visible
+  // through them. Shares the renderParams uniform with the wireframe.
+  const boxfacesModule = device.createShaderModule({ code: WGSL_BOXFACES });
+  const boxfacesPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: {
+      module: boxfacesModule, entryPoint: 'vs_main',
+      buffers: [{
+        arrayStride: 12,
+        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
+      }],
+    },
+    fragment: {
+      module: boxfacesModule, entryPoint: 'fs_main',
+      targets: [{
+        format: format,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const boxfacesBindGroup = device.createBindGroup({
+    layout: boxfacesPipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
+  });
+
   // Depth + thickness + background + bloom textures and ping-pong bind
   // groups for the SSF + post-process passes.
   let depthRaw = null, depthH = null, depthV = null;
@@ -2186,7 +2266,10 @@ async function initAndRun() {
       // v82: full-screen tile pattern.
       p.setPipeline(backdropPipeline);
       p.draw(3, 1);
-      // Wireframe over the tiles.
+      // v86: translucent box side walls (4 quads, 24 verts).
+      p.setPipeline(boxfacesPipeline); p.setBindGroup(0, boxfacesBindGroup);
+      p.setVertexBuffer(0, cubeFaceBuf); p.draw(24, 1);
+      // Wireframe over the walls.
       p.setPipeline(linesPipeline); p.setBindGroup(0, linesBindGroup);
       p.setVertexBuffer(0, cubeEdgeBuf); p.draw(24, 1);
       p.end();

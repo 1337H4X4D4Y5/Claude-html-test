@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v63 (2026-05-11 — user-controllable box depth via settings slider + ?d= URL)';
+const APP_VERSION = 'mpm-v64 (2026-05-11 — water preset re-tuned (less goopy, more splashy))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,8 +350,12 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      pressureKMul: 50, velDamping: 0.998, restitution: 0.20,
-      wallFriction: 0.95, viscosity: 0.03, maxAccel: 50.0,
+      // v64: less goopy. v62 fixed a stuck-particle bug that had been
+      // masking how strong viscosity 0.03 actually felt. Real water is
+      // almost inviscid — drop XSPH C-decay to 0.005, give walls a bit
+      // more slip, raise restitution a touch for proper splashes.
+      pressureKMul: 50, velDamping: 0.9995, restitution: 0.30,
+      wallFriction: 0.97, viscosity: 0.005, maxAccel: 60.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
       // v59: screen-space refraction strength in pixels.

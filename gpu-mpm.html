@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v88 (2026-05-11 — kill vertical shimmer streaks (drop front wall, lower ripple+bloom))';
+const APP_VERSION = 'mpm-v89 (2026-05-11 — mask Fresnel+spec at thin water (kill silhouette icicle streaks))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1308,13 +1308,22 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     exp(-P.absorptionB * thickness)
   );
 
+  // v89: dampen the Fresnel + specular at thin water. v88 cured most
+  // shimmer but the fluid silhouette still produced bright icicle
+  // streaks because the wavy top edge has glancing-angle pixels that
+  // fire Fresnel + spec → bloom V-blur smears them downward. Tying
+  // both to thinClamp (= 0 at zero thickness, 1 at full body)
+  // gracefully fades the highlights at the silhouette.
+  let thinClamp = clamp(thicknessRaw * 4.0, 0.0, 1.0);
+  let fresnelMasked = fresnel * thinClamp;
+  let specMasked    = spec    * thinClamp;
+
   // v76: CHROMATIC refraction with v86 fixes:
   //   - chroma reduced 0.07 -> 0.025 (less prismatic colour fringe)
-  //   - warp magnitude scaled by thickness, so thin water against the
-  //     wall (where the surface normal can swing wildly) doesn't yank
-  //     the bg lookup off-screen
+  //   - warp magnitude scaled by thickness via thinClamp (shared with
+  //     v89 Fresnel/spec mask above) so thin water near walls or at
+  //     the fluid silhouette doesn't yank the bg lookup off-screen.
   let chroma = 0.025;
-  let thinClamp = clamp(thicknessRaw * 4.0, 0.0, 1.0);
   let strength = P.refractStrength * thinClamp;
   let resMax = vec2<i32>(i32(P.resolutionX) - 1, i32(P.resolutionY) - 1);
   let warpR = vec2<i32>(i32(n.x * strength * (1.0 - chroma)),
@@ -1367,9 +1376,10 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let reflectedV = reflect(-viewDir, n);
   let sky = sampleSky(reflectedV);
 
-  // v76: brighter and slightly warmer specular highlight (sun glint),
-  // 0.55 -> 0.95 — makes the wet sparkle pop.
-  let outColor = mix(transmitted, sky, fresnel) + vec3<f32>(1.0, 0.97, 0.92) * spec * 0.95;
+  // v89: use the thinClamp-masked Fresnel and spec so silhouette pixels
+  // (thin water at the wavy top edge) no longer fire bright highlights
+  // that the bloom V-blur smears into downward "icicle" streaks.
+  let outColor = mix(transmitted, sky, fresnelMasked) + vec3<f32>(1.0, 0.97, 0.92) * specMasked * 0.95;
   return vec4<f32>(outColor, 1.0);
 }
 `;

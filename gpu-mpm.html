@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v71 (2026-05-11 — stiffer K kills horizontal density stripes)';
+const APP_VERSION = 'mpm-v72 (2026-05-11 — soften K, wider blur, softer thicknessScale)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,17 +350,15 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      // v71: pressureKMul 30 -> 80. v68's soft K=30 made the fluid 65%
-      // denser at the bottom than the top (linear EOS, K/rho0=30,
-      // gH=19.6 -> rho_b/rho_t = 1.65) — fluid stratifies into discrete
-      // layers visible on screen as horizontal density stripes. K=80
-      // drops max compression to ~25%. CFL margin still 1.22x with
-      // cellSize 0.045. velDamping 0.985 still kills residual motion
-      // — stiffer K doesn't add net energy, only enforces equal
-      // density. maxAccel raised to 150 to match the stiffer pressure
-      // response during settling.
-      pressureKMul: 80, velDamping: 0.985, restitution: 0.0,
-      wallFriction: 0.85, viscosity: 0.01, maxAccel: 150.0,
+      // v72: K=80 was so stiff that particles repelled each other into
+      // regular crystal-like spacing — visible as vertical streaks +
+      // horizontal layers on the surface. K=50 is the middle ground:
+      // 39% max compression (not great but tolerable), much less
+      // crystalline clustering. Pair with reduced thicknessScale in
+      // the composite uniform and a wider depth blur — both kill the
+      // visual amplification of per-cell density variation.
+      pressureKMul: 50, velDamping: 0.985, restitution: 0.0,
+      wallFriction: 0.85, viscosity: 0.012, maxAccel: 80.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
       // v59: screen-space refraction strength in pixels.
@@ -1027,9 +1025,13 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 fn blur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
   let center = textureLoad(srcDepth, coord, 0);
   if (center >= 0.99999) { return 1.0; }
-  let R: i32 = 12;
+  // v72: radius 12 -> 20. At 169k particles each imposter spans ~16 px,
+  // a 12-px blur barely reaches the next imposter centre. 20 px bridges
+  // 2-3 imposters and smooths the per-particle dimples visible as
+  // streaks under refraction. sigma widened to match (~R*1.7).
+  let R: i32 = 20;
   let depthThresh: f32 = 0.025;
-  let sigma2_inv: f32 = 1.0 / 50.0;
+  let sigma2_inv: f32 = 1.0 / 130.0;
   var sum: f32 = center;
   var totalW: f32 = 1.0;
   for (var i: i32 = 1; i <= R; i = i + 1) {
@@ -1653,11 +1655,12 @@ async function initAndRun() {
     compBuf[2] = f / aspect; compBuf[3] = f;
     compBuf[4] = canvas.width; compBuf[5] = canvas.height;
     // v53: thicknessScale maps the additive-blended raw thickness texture
-    // value into Beer's-law absorption units. Tuned so a "full" column of
-    // particles (a few overlapping imposters deep) drops the red channel
-    // to near zero while leaving blue mostly intact.
+    // value into Beer's-law absorption units.
     // v59: compBuf[7] is now refractStrength (per-preset, in pixels).
-    compBuf[6] = 0.18; compBuf[7] = SIM_TUNE.refractStrength;
+    // v72: 0.18 -> 0.10 so per-cell thickness variation doesn't get
+    // amplified into visible colour stripes through the exponential.
+    // Deep regions still tint blue but with less harsh contrast.
+    compBuf[6] = 0.10; compBuf[7] = SIM_TUNE.refractStrength;
     const Lw = [0.35, 0.80, 0.50];
     const Lv = [
       cam.right[0]*Lw[0] + cam.right[1]*Lw[1] + cam.right[2]*Lw[2],

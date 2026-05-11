@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v71</span>
+    <span class="tag">v72</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v71 stiffens water (pressureKMul 30 → 80) to kill horizontal density stripes that came from the previous soft K letting the fluid compress 65% top-to-bottom under gravity. Damping (0.985) keeps it from bouncing.</div>
+  <div class="desc">MLS-MPM on the GPU. v72 attacks visible stripe artefacts on three fronts: K softened to 50 (less crystalline particle clustering), thicknessScale 0.18 → 0.10 (Beer's law amplifies per-cell variation less), depth blur radius 12 → 20 (bridges adjacent imposters at high particle counts).</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

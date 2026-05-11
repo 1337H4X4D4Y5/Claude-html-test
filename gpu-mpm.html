@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v94 (2026-05-11 — water lighter (relaxed adaptive damping + lighter preset))';
+const APP_VERSION = 'mpm-v95 (2026-05-11 — smaller particle spheres (0.022 -> 0.017))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -444,15 +444,12 @@ function applyPreset(key) {
 // _natRho can read BOX_HALF_X without TDZ. v52: 32 → 48 grid, 3.375x more
 // cells (32^3=32768 → 48^3=110592). cs_clearGrid and cs_grid scale with
 // cell count; P2G/G2P stay particle-bound.)
-// v80: 0.016 -> 0.022. v78 went too small — adjacent imposters didn't
-// overlap enough and the depth field kept per-particle dimples that
-// neither the bilateral blur nor v79's fBm noise could fully hide.
-// Wider depth imposter = more overlap = smoother starting depth.
-// The fBm noise (v79) supplies the fine surface detail; this just
-// removes the residual "spheres" structure underneath. Thickness
-// imposter is scaled 1.6x in its own shader (= 0.035 effective),
-// still well above the cellSize so colour blending stays smooth.
-const PARTICLE_RADIUS = 0.022;
+// v80: 0.016 -> 0.022 (anti-dimple). v95: 0.022 -> 0.017 — smaller
+// spheres at user request. v78's 0.016 had dimples but that was with
+// R=20 bilateral; we're now at R=26 + depthThresh 0.05 + half-res bloom
+// which should bridge adjacent imposters at the smaller size. Thickness
+// imposter is scaled 1.6x (= 0.0272 effective).
+const PARTICLE_RADIUS = 0.017;
 // Fixed-point scale for atomicAdd into i32 storage. iOS WebGPU has no
 // atomic<f32>, so each float value is encoded as round(v * SCALE) and
 // decoded after the P2G pass by dividing back.

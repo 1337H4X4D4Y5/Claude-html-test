@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v49</span>
+    <span class="tag">v50</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v49 reverts v48's stiffer pressure (which felt springy, not viscous) back to v47's softer K, keeps the wall friction, and bumps XSPH viscosity 3× for cohesive splashes. Particles shrunk so the surface reads as continuous water.</div>
+  <div class="desc">MLS-MPM on the GPU. v50 default jumps to 24000 particles (still 60 FPS) with radius 0.020 — adjacent particles overlap under the SSF blur instead of leaving gaps. Same softer-K viscous physics from v49. Slider on the gear icon.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

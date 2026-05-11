@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v98</span>
+    <span class="tag">v99</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v98 perf: all MPM substeps now share one command encoder + one submit per frame (was up to 8), and Float32Array scratch buffers for the uniform writes are reused instead of allocated each frame. No visual change.</div>
+  <div class="desc">MLS-MPM on the GPU. v99 adds perf regression tests (lock in v98's single-submit + no-alloc invariants) and frame-time telemetry — debug strip now shows frame ms avg/max so you can directly observe perf changes between versions.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
@@ -112,7 +112,7 @@
 <a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
-    <span class="tag">58</span>
+    <span class="tag">60</span>
   </div>
   <div class="desc">Run the full simulation test suite in the browser. CPU sim stability + gpu-mpm regression checks (TDZ, error banner, SimParams / CompositeParams uniform layouts, CFL margin, wall-friction + viscosity, preset menu, thickness pass, WGSL reserved-word scanner).</div>
 </a>

@@ -1220,6 +1220,56 @@
         'composite should sample backgroundTex at most 2 times (no chromatic refraction); got ' + bgSamples);
     });
 
+    test('gpu-mpm v98 perf: MPM substep loop has zero submits inside', () => {
+      // v98 combined per-substep submits into one. Verify the
+      // substep loop body contains no device.queue.submit calls.
+      const src = readMpmScript();
+      const loopStart = src.indexOf('for (let s = 0; s < subSteps;');
+      assert(loopStart >= 0, 'substep loop not found');
+      // Find the matching closing brace (assume the loop body is the
+      // next brace pair). Simple bracket-counting from after the
+      // open brace.
+      const openBrace = src.indexOf('{', loopStart);
+      let depth = 1, i = openBrace + 1;
+      while (i < src.length && depth > 0) {
+        const c = src[i];
+        if (c === '{') depth++;
+        else if (c === '}') depth--;
+        i++;
+      }
+      const loopBody = src.slice(openBrace, i);
+      assert(loopBody.indexOf('device.queue.submit') < 0,
+        'substep loop body must not contain device.queue.submit ' +
+        '(v98 hoists the submit outside the loop)');
+      // Also assert the substep loop body doesn't begin its own pass
+      // (the v98 design uses ONE pass enclosing all substeps).
+      assert(loopBody.indexOf('beginComputePass') < 0,
+        'substep loop body must not call beginComputePass ' +
+        '(v98 uses a single enclosing pass)');
+    });
+
+    test('gpu-mpm v98 perf: frame() does not allocate Float32Array each call', () => {
+      // v98 hoisted simBuf, renderBuf, compBuf to closure scope. Make
+      // sure no `new Float32Array(...)` appears inside the frame()
+      // function body.
+      const src = readMpmScript();
+      const fnIdx = src.indexOf('function frame()');
+      assert(fnIdx >= 0, 'frame() function not found');
+      const openBrace = src.indexOf('{', fnIdx);
+      let depth = 1, i = openBrace + 1;
+      while (i < src.length && depth > 0) {
+        const c = src[i];
+        if (c === '{') depth++;
+        else if (c === '}') depth--;
+        i++;
+      }
+      const fnBody = src.slice(openBrace, i);
+      const allocCount = (fnBody.match(/new Float32Array\(/g) || []).length;
+      assert(allocCount === 0,
+        'frame() must not allocate Float32Array each call; found ' +
+        allocCount + ' (use hoisted scratch buffers)');
+    });
+
     test('gpu-mpm v48: wall friction applied in cs_grid, viscosity applied in cs_g2p', () => {
       // The WGSL must actually USE the new uniforms or they are dead code.
       // Slice each function body by index since JS regex has no \Z and

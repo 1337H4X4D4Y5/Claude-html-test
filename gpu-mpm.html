@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v98 (2026-05-11 — perf: single-submit substeps + reused JS scratch buffers)';
+const APP_VERSION = 'mpm-v99 (2026-05-11 — perf tests + frame-time telemetry (avg/max ms))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -469,6 +469,11 @@ const state = {
   gravity: { x: 0, y: -9.8, z: 0 },
   target: { x: 0, y: -9.8, z: 0 },
   fps: 0, steps: 0,
+  // v99 perf telemetry. frameMs = last frame's JS-side cost (ms);
+  // frameMsAvg = mean over the last ~0.5s window; frameMsMax = peak
+  // over same window. Both reset every time fps is recomputed.
+  frameMs: 0, frameMsAvg: 0, frameMsMax: 0,
+  frameMsAcc: 0, frameMsCount: 0,
   initError: null, gpuError: null,
   preset: DEFAULT_PRESET, presetLabel: findPreset(DEFAULT_PRESET).label,
 };
@@ -2146,7 +2151,8 @@ async function initAndRun() {
   const compBufScratch   = new Float32Array(COMPOSITE_PARAMS_SIZE / 4);
   function frame() {
     requestAnimationFrame(frame);
-    const now = performance.now() / 1000;
+    const frameStart = performance.now();   // v99 perf telemetry
+    const now = frameStart / 1000;
     let dt = now - lastT;
     lastT = now;
     if (dt > 1 / 20) dt = 1 / 20;
@@ -2436,8 +2442,24 @@ async function initAndRun() {
     }
     device.queue.submit([enc2.finish()]);
 
+    // v99 perf telemetry. Measure wall-clock from the start of this
+    // frame() callback to NOW (after both submits). This is the JS-side
+    // command-encoding cost; GPU work continues async but the submit
+    // ordering ensures the queue is flushed past this measurement.
+    const frameEnd = performance.now();
+    const frameMs = frameEnd - frameStart;
+    state.frameMs = frameMs;
+    if (frameMs > state.frameMsMax) state.frameMsMax = frameMs;
+    state.frameMsAcc += frameMs;
+    state.frameMsCount++;
     frames++; fpsAcc += dt;
-    if (fpsAcc > 0.5) { state.fps = frames / fpsAcc; frames = 0; fpsAcc = 0; }
+    if (fpsAcc > 0.5) {
+      state.fps = frames / fpsAcc;
+      state.frameMsAvg = state.frameMsAcc / state.frameMsCount;
+      // Reset rolling windows once a frame-time average is published.
+      state.frameMsMax = 0; state.frameMsAcc = 0; state.frameMsCount = 0;
+      frames = 0; fpsAcc = 0;
+    }
     updateDebug();
   }
   frame();
@@ -2464,7 +2486,9 @@ function updateDebug() {
   }
   debugTextEl.textContent =
     'preset: ' + (state.presetLabel || state.preset) + '   (tap to collapse)\n' +
-    'fps: ' + state.fps.toFixed(1) + '   particles: ' + N + '   grid: ' + GRID_SIZE + '³   steps: ' + state.steps + '\n' +
+    'fps: ' + state.fps.toFixed(1) +
+      '  frame ms: ' + state.frameMsAvg.toFixed(1) + ' avg / ' + state.frameMsMax.toFixed(1) + ' max\n' +
+    'particles: ' + N + '   grid: ' + GRID_SIZE + '³   steps: ' + state.steps + '\n' +
     'gyro: ' + state.gyroPermission + '   β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '   evt: ' + state.events + '\n' +
     'gravity x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) + '\n' +
     'EOS=' + SIM_TUNE.eos +
@@ -2492,6 +2516,8 @@ copyBtn.addEventListener('click', function () {
     'version: ' + APP_VERSION,
     'preset:  ' + (state.presetLabel || state.preset),
     'fps: ' + state.fps.toFixed(1),
+    'frame ms avg: ' + state.frameMsAvg.toFixed(2),
+    'frame ms max: ' + state.frameMsMax.toFixed(2),
     'particles: ' + N,
     'grid: ' + GRID_SIZE + '^3 = ' + NUM_CELLS + ' cells',
     'cellSize: ' + CELL_SIZE.toFixed(5),

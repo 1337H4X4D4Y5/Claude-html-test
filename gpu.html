@@ -78,6 +78,54 @@
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
+  #settings-btn {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 38px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    width: 34px; height: 34px;
+    border: none; border-radius: 17px;
+    background: rgba(74,163,255,0.18);
+    color: #cfe6ff;
+    font-size: 18px; font-weight: 600;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    z-index: 9;
+  }
+  #settings-panel {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 80px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    left: auto; width: 250px;
+    padding: 14px 16px;
+    border-radius: 12px;
+    background: rgba(20,30,55,0.96);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: #e8f1ff;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    z-index: 11;
+    display: none;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  }
+  #settings-panel.open { display: block; }
+  #settings-panel .label { font-size: 11px; opacity: 0.65; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.8px; }
+  #settings-panel .count { font-size: 17px; font-weight: 600; margin-bottom: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #settings-panel input[type=range] { width: 100%; }
+  #settings-apply {
+    appearance: none; -webkit-appearance: none; border: none;
+    display: block; width: 100%; margin-top: 10px; min-height: 36px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #4aa3ff, #2a7fb8);
+    color: #fff; font-size: 13px; font-weight: 600;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  #settings-cancel {
+    appearance: none; -webkit-appearance: none; border: none;
+    display: block; width: 100%; margin-top: 6px; min-height: 30px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.06);
+    color: #cfe6ff; font-size: 12px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
 </style>
 </head>
 <body>
@@ -91,16 +139,35 @@
 </div>
 <div id="fps"></div>
 <div id="version"></div>
+<button id="settings-btn" title="Settings">⚙</button>
+<div id="settings-panel">
+  <div class="label">Particles</div>
+  <div class="count" id="settings-count">4000</div>
+  <input id="settings-slider" type="range" min="500" max="12000" step="500" value="4000">
+  <button id="settings-apply">Apply (reloads)</button>
+  <button id="settings-cancel">Cancel</button>
+</div>
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'gpu-v30 (2026-05-11 — spatial hash + pairwise SPH)';
+const APP_VERSION = 'gpu-v31 (2026-05-11 — particle slider + softer sprites)';
+
+// Particle count is configurable via the in-page settings panel which
+// reloads with ?n=NNNN. Clamped to a sensible range to avoid OOM or
+// freezing the device.
+function readParticleCount() {
+  const m = location.search.match(/[?&]n=(\d+)/);
+  if (!m) return 4000;
+  return Math.max(200, Math.min(20000, parseInt(m[1], 10) || 4000));
+}
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
-const N = 4000;                  // particle count
+const N = readParticleCount();    // particle count (from ?n= URL param)
 const BOX_HALF = 1.0;             // simulation box half-extent (matches glass cube)
-const PARTICLE_RADIUS = 0.05;
+// Sprite radius scales mildly with particle count so a small swarm doesn't
+// look like a fog and a big swarm doesn't look like a solid block.
+const PARTICLE_RADIUS = Math.max(0.04, Math.min(0.10, 0.13 - N * 0.000004));
 const INTERACT_RADIUS = 0.13;     // SPH neighbour-search radius
 
 const overlay = document.getElementById('overlay');
@@ -373,14 +440,16 @@ fn vs_main(@builtin(vertex_index) vi: u32,
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-  let r = length(in.uv);
-  if (r > 1.0) { discard; }
-  // Soft falloff so overlapping sprites blend into a fluid glow.
-  let glow = pow(1.0 - r, 2.0);
-  let col = mix(vec3<f32>(0.16, 0.43, 0.78), vec3<f32>(0.78, 0.92, 1.0), glow);
-  // Very low per-particle contribution so a stack of many particles in the
-  // additive blend reaches reasonable brightness, not saturated white.
-  return vec4<f32>(col * glow * 0.10, 1.0);
+  let r2 = dot(in.uv, in.uv);
+  if (r2 > 1.0) { discard; }
+  // Gaussian-ish soft falloff. Higher exponent → sharper centre, softer edge.
+  // Overlapping sprites accumulate additively into a continuous blob whose
+  // brightest pixels are where the most particles overlap.
+  let falloff = exp(-r2 * 3.0);
+  let col = mix(vec3<f32>(0.10, 0.32, 0.62), vec3<f32>(0.85, 0.96, 1.0), falloff);
+  // Per-particle contribution kept low so 30+ overlapping sprites stack to
+  // near-white at the densest core without single particles being visible.
+  return vec4<f32>(col * falloff * 0.08, 1.0);
 }
 `;
 
@@ -731,12 +800,36 @@ function fmt(v, w) {
 function updateDebug() {
   debugTextEl.textContent =
     'fps: ' + state.fps.toFixed(1) + '   particles: ' + N + '   steps: ' + state.steps + '\n' +
-    'gyro: ' + state.gyroPermission + '   events: ' + state.events + '   β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '\n' +
-    'gravity   x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) + '\n' +
-    'target    x:' + fmt(state.target.x) + ' y:' + fmt(state.target.y) + ' z:' + fmt(state.target.z) +
+    'sprite r: ' + PARTICLE_RADIUS.toFixed(3) + '   gyro: ' + state.gyroPermission + '   events: ' + state.events + '\n' +
+    'β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '   gravity x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) +
     (state.gpuError ? '\nGPU ERR: ' + state.gpuError : '');
 }
 updateDebug();
+
+// Settings panel: tap the gear, drag the slider, tap Apply -> reload with
+// the new particle count baked into the URL. iOS-friendly (no native
+// pickers, no native modals).
+(function () {
+  const btn = document.getElementById('settings-btn');
+  const panel = document.getElementById('settings-panel');
+  const slider = document.getElementById('settings-slider');
+  const countLabel = document.getElementById('settings-count');
+  const applyBtn = document.getElementById('settings-apply');
+  const cancelBtn = document.getElementById('settings-cancel');
+  slider.value = String(N);
+  countLabel.textContent = N;
+  slider.addEventListener('input', function () { countLabel.textContent = slider.value; });
+  btn.addEventListener('click', function () { panel.classList.toggle('open'); });
+  cancelBtn.addEventListener('click', function () { panel.classList.remove('open'); });
+  applyBtn.addEventListener('click', function () {
+    const v = parseInt(slider.value, 10);
+    if (!v || v === N) { panel.classList.remove('open'); return; }
+    const url = new URL(window.location.href);
+    url.searchParams.set('n', String(v));
+    url.searchParams.set('t', String(Date.now()));   // cache-bust
+    window.location.href = url.toString();
+  });
+})();
 
 copyBtn.addEventListener('click', function () {
   const report = [

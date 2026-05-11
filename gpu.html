@@ -150,7 +150,7 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'gpu-v36 (2026-05-11 — smaller particles)';
+const APP_VERSION = 'gpu-v37 (2026-05-11 — much smaller particles)';
 
 // Particle count is configurable via the in-page settings panel which
 // reloads with ?n=NNNN. Clamped to a range that we know is stable.
@@ -164,10 +164,12 @@ document.getElementById('version').textContent = APP_VERSION;
 
 const N = readParticleCount();    // particle count (from ?n= URL param)
 const BOX_HALF = 1.0;             // simulation box half-extent (matches glass cube)
-// Sprite radius. Centre-to-centre spacing is 2/cbrt(N); we want some
-// overlap so the bilateral blur can fill the gaps, but not so much that
-// the surface feels chunky. Use radius ~0.5 * spacing.
-const PARTICLE_RADIUS = Math.max(0.016, Math.min(0.06, 1.0 / Math.cbrt(N)));
+// Sprite radius. Smaller this version after user feedback that the spheres
+// looked too big. At N=26500 this gives r=0.023 (was 0.044 in v35, 0.034
+// in v36). Still ~0.35 * SPH spacing — enough overlap inside the bulk that
+// the blur can find neighbours, while individual silhouettes are too small
+// to read as 'marbles'.
+const PARTICLE_RADIUS = Math.max(0.014, Math.min(0.045, 0.68 / Math.cbrt(N)));
 const INTERACT_RADIUS = 0.13;     // SPH neighbour-search radius
 // Per-particle additive contribution scales inversely with N so the
 // brightness of an N-particle stack stays roughly constant regardless of
@@ -1081,14 +1083,18 @@ async function initAndRun() {
       p.draw(6, N);
       p.end();
     }
-    // PASS B: two iterations of separable bilateral blur. The second pass
-    // smooths out the saddle 'valleys' that the first pass leaves between
-    // partially-merged particle fronts.
+    // PASS B: three iterations of separable bilateral blur. With smaller
+    // particles, the raw depth has more gaps, so the blur needs more
+    // sweeps to fill them. Three iterations costs 6 fullscreen passes;
+    // iPhone GPU still handles it comfortably.
     //   iter 1:  raw -> H, H -> V
-    //   iter 2:  V  -> H, H -> V   (final result is in depthV)
+    //   iter 2:  V  -> H, H -> V
+    //   iter 3:  V  -> H, H -> V   (final result is in depthV)
     const blurSequence = [
       { pipe: blurH, bind: blurH1Bind, target: depthH },
       { pipe: blurV, bind: blurV1Bind, target: depthV },
+      { pipe: blurH, bind: blurH2Bind, target: depthH },
+      { pipe: blurV, bind: blurV2Bind, target: depthV },
       { pipe: blurH, bind: blurH2Bind, target: depthH },
       { pipe: blurV, bind: blurV2Bind, target: depthV },
     ];

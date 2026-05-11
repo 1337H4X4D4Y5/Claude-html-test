@@ -768,6 +768,101 @@
       }
       assert(!threw, 'top-level threw: ' + (threw && threw.message));
     });
+
+    test('gpu-mpm v48: SimParams WGSL struct order matches simBuf JS layout', () => {
+      // The JS simBuf writes f32s into the uniform buffer in a fixed order.
+      // The WGSL struct must declare the same fields in the same order
+      // (with vec3 packing rules accounted for). Any drift between the two
+      // silently corrupts the simulation — pressure reads wallFriction, etc.
+      const src = readMpmScript();
+      // Pull the WGSL struct.
+      const structMatch = src.match(/struct\s+SimParams\s*{([\s\S]*?)}/);
+      assert(structMatch, 'SimParams WGSL struct not found');
+      const fields = structMatch[1]
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .map(s => s.split(':')[0].trim());
+      // Pull every "simBuf[N] = SIM_TUNE.X" line in order.
+      const jsAssigns = [];
+      const re = /simBuf\[(\d+)\]\s*=\s*([^;]+);/g;
+      let m;
+      while ((m = re.exec(src))) {
+        jsAssigns.push({ idx: parseInt(m[1], 10), expr: m[2].trim() });
+      }
+      jsAssigns.sort((a, b) => a.idx - b.idx);
+      const expectedOrder = [
+        'gravity', 'gravity', 'gravity', 'dt',  // vec3 + dt packs into 16 bytes
+        'boxHalf', 'cellSize', 'invCellSize', 'fixedPoint',
+        'particleMass', 'velDamping', 'restitution', 'pressureK',
+        'restDensity', 'maxAccel', 'wallFriction', 'viscosity',
+      ];
+      assert(jsAssigns.length === expectedOrder.length,
+        'expected ' + expectedOrder.length + ' simBuf assigns, got ' + jsAssigns.length);
+      // Check the WGSL struct order matches (skipping gravity which is vec3).
+      const wgslOrder = fields;
+      const expectedWgsl = [
+        'gravity', 'dt',
+        'boxHalf', 'cellSize', 'invCellSize', 'fixedPoint',
+        'particleMass', 'velDamping', 'restitution', 'pressureK',
+        'restDensity', 'maxAccel', 'wallFriction', 'viscosity',
+      ];
+      assert(wgslOrder.length === expectedWgsl.length,
+        'WGSL struct has ' + wgslOrder.length + ' fields, expected ' + expectedWgsl.length);
+      for (let i = 0; i < expectedWgsl.length; i++) {
+        assert(wgslOrder[i] === expectedWgsl[i],
+          'WGSL field ' + i + ': expected "' + expectedWgsl[i] + '", got "' + wgslOrder[i] + '"');
+      }
+    });
+
+    test('gpu-mpm v48: CFL margin > 1.0 at current SIM_TUNE values', () => {
+      // Pull SIM_TUNE.pressureK and restDensity literals out of the script
+      // and compute the CFL margin. If a future edit raises K past the
+      // stability cliff, this test fires before the user has to see
+      // blasting particles.
+      const src = readMpmScript();
+      const kMatch  = src.match(/pressureK:\s*_natRho\s*\*\s*(\d+(?:\.\d+)?)/);
+      assert(kMatch, 'pressureK literal not found');
+      // restDensity == _natRho. natRho == N / 4. We test at N=8000 (default).
+      const N_DEFAULT = 8000;
+      const natRho = N_DEFAULT / 4;
+      const K = natRho * parseFloat(kMatch[1]);
+      const rho0 = natRho;
+      const cellSize = 2.0 / 32;     // BOX_HALF=1, GRID_SIZE=32
+      const subDt = 1 / 240;
+      const soundC = Math.sqrt(K / rho0);
+      const cflDt = cellSize / soundC;
+      const margin = cflDt / subDt;
+      assert(margin > 1.05,
+        'CFL margin too tight: ' + margin.toFixed(3) +
+        ' (K=' + K + ' c=' + soundC.toFixed(2) +
+        ' cflDt=' + cflDt.toFixed(5) + ' subDt=' + subDt.toFixed(5) + ')');
+    });
+
+    test('gpu-mpm v48: wall friction applied in cs_grid, viscosity applied in cs_g2p', () => {
+      // The WGSL must actually USE the new uniforms or they are dead code.
+      // Slice each function body by index since JS regex has no \Z and
+      // multi-line lookaheads inside template literals are awkward.
+      const src = readMpmScript();
+      function bodyOf(fnName) {
+        const startKey = 'fn ' + fnName;
+        const start = src.indexOf(startKey);
+        if (start < 0) return null;
+        // Find the next `@compute` annotation after this fn (marks next kernel),
+        // or fall back to end of string.
+        let end = src.indexOf('@compute', start + 1);
+        if (end < 0) end = src.length;
+        return src.slice(start, end);
+      }
+      const gridBody = bodyOf('cs_grid');
+      const g2pBody  = bodyOf('cs_g2p');
+      assert(gridBody, 'cs_grid body not found');
+      assert(g2pBody, 'cs_g2p body not found');
+      assert(gridBody.indexOf('P.wallFriction') >= 0,
+        'cs_grid must reference P.wallFriction (tangential friction not applied)');
+      assert(g2pBody.indexOf('P.viscosity') >= 0,
+        'cs_g2p must reference P.viscosity (C-matrix decay not applied)');
+    });
   }
 
   // ---------- Reporting ----------

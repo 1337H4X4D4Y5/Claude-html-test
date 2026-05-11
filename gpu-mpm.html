@@ -185,7 +185,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v47 (2026-05-11 — TDZ fix: order N before SIM_TUNE)';
+const APP_VERSION = 'mpm-v48 (2026-05-11 — stiffer fluid + wall friction + XSPH viscosity)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -204,18 +204,32 @@ const N = readParticleCount();
 // restDensity scales with N so the EOS balances gravity at modest
 // compression no matter what particle count is loaded:
 //   rho0 ~ (N * particleMass) / (filled volume = 4 cubic units)
-//   K    ~ rho0 * g * H / compression  ~ rho0 * 50
+//   K    ~ rho0 * 100 (gives c = 10, CFL margin ~1.5x at dt = 1/240)
 // IMPORTANT: this block reads N, so it must run *after* `const N = ...`.
 // In v46 _natRho was declared before N which triggered a TDZ
 // ReferenceError on script load, leaving the Tap-to-begin button inert.
 const _natRho = N * 1.0 / 4.0;
 const SIM_TUNE = {
-  pressureK: _natRho * 50,
+  // Stiffness (v48): doubled from v47's _natRho*50 — the CFL margin at v47
+  // was 2.12x, plenty of headroom. K=1M gives sound speed c=10, dtCFL=
+  // cellSize/c=0.00625, vs our substep cap 1/240=0.00417 → margin 1.50x.
+  pressureK: _natRho * 100,
   restDensity: _natRho,
   particleMass: 1.0,
   velDamping: 0.998,
   restitution: 0.20,
-  maxAccel: 50.0,
+  // Raised v47 → v48 (50 → 200): with stiffer K the natural pressure accel
+  // is larger; capping too aggressively was wasting the new stiffness.
+  // 200 is still well under the CFL accel ceiling (~3600 with our dt).
+  maxAccel: 200.0,
+  // v48: tangential velocity multiplier in boundary cells. 1.0 = free-slip
+  // (frictionless), 0.0 = no-slip (water sticks to glass). 0.92 per substep
+  // is moderate partial-slip — water gains weight against the walls.
+  wallFriction: 0.92,
+  // v48: APIC C-matrix decay per substep. 0 = inviscid (jitter / fingers
+  // off the surface), higher = more viscous / cohesive (splashes drag
+  // strings of water with them). 0.01 → 'water with a hint of cohesion'.
+  viscosity: 0.01,
   eos: 'linear',
 };
 const BOX_HALF = 1.0;
@@ -362,6 +376,8 @@ struct SimParams {
   pressureK: f32,
   restDensity: f32,
   maxAccel: f32,
+  wallFriction: f32,
+  viscosity: f32,
 };
 
 const N: u32 = ${N}u;
@@ -529,14 +545,28 @@ fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (aMag > P.maxAccel) { accel = accel * (P.maxAccel / aMag); }
   v = v + accel * P.dt;
 
-  // Wall boundary: clamp normal velocity at the outer ring of cells.
+  // Wall boundary: clamp normal velocity at the outer ring of cells, then
+  // damp tangential velocity by wallFriction (partial-slip BC). Free-slip
+  // (friction=1) leaves the fluid sliding frictionlessly along the glass;
+  // no-slip (friction=0) freezes it. Real water against glass is closer to
+  // no-slip — 0.92/substep gives a strong but not instant grab.
   let edge: u32 = 1u;
-  if (ix <= edge && v.x < 0.0) { v.x = 0.0; }
-  if (ix >= GRID_SIZE - 1u - edge && v.x > 0.0) { v.x = 0.0; }
-  if (iy <= edge && v.y < 0.0) { v.y = 0.0; }
-  if (iy >= GRID_SIZE - 1u - edge && v.y > 0.0) { v.y = 0.0; }
-  if (iz <= edge && v.z < 0.0) { v.z = 0.0; }
-  if (iz >= GRID_SIZE - 1u - edge && v.z > 0.0) { v.z = 0.0; }
+  let atXmin = ix <= edge;
+  let atXmax = ix >= GRID_SIZE - 1u - edge;
+  let atYmin = iy <= edge;
+  let atYmax = iy >= GRID_SIZE - 1u - edge;
+  let atZmin = iz <= edge;
+  let atZmax = iz >= GRID_SIZE - 1u - edge;
+  if (atXmin && v.x < 0.0) { v.x = 0.0; }
+  if (atXmax && v.x > 0.0) { v.x = 0.0; }
+  if (atYmin && v.y < 0.0) { v.y = 0.0; }
+  if (atYmax && v.y > 0.0) { v.y = 0.0; }
+  if (atZmin && v.z < 0.0) { v.z = 0.0; }
+  if (atZmax && v.z > 0.0) { v.z = 0.0; }
+  let f = P.wallFriction;
+  if (atXmin || atXmax) { v.y = v.y * f; v.z = v.z * f; }
+  if (atYmin || atYmax) { v.x = v.x * f; v.z = v.z * f; }
+  if (atZmin || atZmax) { v.x = v.x * f; v.y = v.y * f; }
 
   gridVel[ci] = vec4<f32>(v, mass);
 }
@@ -582,6 +612,14 @@ fn cs_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // MLS reconstruction: scale by 4/dx² (inverse of the second moment of
   // the quadratic B-spline). This is the 'MLS' in MLS-MPM.
   newC = newC * (4.0 * P.invCellSize * P.invCellSize);
+
+  // v48: XSPH-style viscosity. Decay the APIC affine matrix each substep.
+  // Inviscid MLS-MPM preserves the velocity gradient through scatter/gather,
+  // which makes the fluid almost lossless — splashes shed long thin
+  // fingers. Damping C by (1 - viscosity) per substep removes the spin
+  // and shear, giving a more cohesive 'water has surface tension' feel
+  // without losing the bulk velocity field.
+  newC = newC * (1.0 - P.viscosity);
 
   // Apply small global damping and advect.
   newV = newV * P.velDamping;
@@ -853,7 +891,7 @@ async function initAndRun() {
   });
 
   // Sim uniform buffer.
-  const SIM_PARAMS_SIZE = 64;   // vec3 + 9 f32 + 2 pad = 12 floats + 4 pad
+  const SIM_PARAMS_SIZE = 64;   // vec3(16) + 12 f32(48) = 64 bytes exactly
   const simParamsBuf = device.createBuffer({
     size: SIM_PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -1106,6 +1144,8 @@ async function initAndRun() {
     simBuf[11] = SIM_TUNE.pressureK;
     simBuf[12] = SIM_TUNE.restDensity;
     simBuf[13] = SIM_TUNE.maxAccel;
+    simBuf[14] = SIM_TUNE.wallFriction;  // v48
+    simBuf[15] = SIM_TUNE.viscosity;     // v48
     device.queue.writeBuffer(simParamsBuf, 0, simBuf);
 
     const cellGroups = Math.ceil(NUM_CELLS / 64);
@@ -1222,6 +1262,8 @@ function updateDebug() {
       '  rest=' + SIM_TUNE.restitution.toFixed(2) +
       '  aMax=' + SIM_TUNE.maxAccel +
       '  cell=' + CELL_SIZE.toFixed(4) + '\n' +
+    'wallFric=' + SIM_TUNE.wallFriction.toFixed(2) +
+      '  visc=' + SIM_TUNE.viscosity.toFixed(3) + '\n' +
     'CFL: c=' + soundC.toFixed(2) + '  dtCFL=' + cflDt.toFixed(4) +
       '  ourDt≤1/240=' + (1/240).toFixed(4) +
       '  margin=' + (cflDt / (1/240)).toFixed(1) + 'x' +
@@ -1258,6 +1300,8 @@ copyBtn.addEventListener('click', function () {
     'velDamping:    ' + SIM_TUNE.velDamping,
     'restitution:   ' + SIM_TUNE.restitution,
     'maxAccel:      ' + SIM_TUNE.maxAccel,
+    'wallFriction:  ' + SIM_TUNE.wallFriction,
+    'viscosity:     ' + SIM_TUNE.viscosity,
     '',
     '--- derived / CFL ---',
     'sound speed c = sqrt(K/ρ₀) = ' + soundC.toFixed(3),

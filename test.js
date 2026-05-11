@@ -1154,6 +1154,26 @@
       assert(combineIdx >= 0, 'combinePipeline never used in frame loop');
     });
 
+    test('gpu-mpm v90: foam pipeline (spawn + update + render) wired', () => {
+      const src = readMpmScript();
+      assert(src.indexOf('WGSL_FOAM_COMPUTE') >= 0, 'WGSL_FOAM_COMPUTE shader missing');
+      assert(src.indexOf('WGSL_FOAM_RENDER') >= 0, 'WGSL_FOAM_RENDER shader missing');
+      assert(src.indexOf('cs_foam_spawn') >= 0, 'cs_foam_spawn entry point missing');
+      assert(src.indexOf('cs_foam_update') >= 0, 'cs_foam_update entry point missing');
+      assert(src.indexOf('foamPosBuf') >= 0 && src.indexOf('foamVelBuf') >= 0,
+        'foamPos/foamVel storage buffers not created');
+      assert(src.indexOf('foamHeadBuf') >= 0, 'foamHeadBuf atomic counter missing');
+      assert(src.indexOf('foamSpawnPipeline') >= 0, 'foamSpawnPipeline not created');
+      assert(src.indexOf('foamUpdatePipeline') >= 0, 'foamUpdatePipeline not created');
+      assert(src.indexOf('foamRenderPipeline') >= 0, 'foamRenderPipeline not created');
+      assert(src.indexOf('p.setPipeline(foamRenderPipeline)') >= 0,
+        'foamRenderPipeline never used in frame loop');
+      assert(src.indexOf('foamPass.setPipeline(foamSpawnPipeline)') >= 0,
+        'foamSpawnPipeline never dispatched in compute pass');
+      assert(src.indexOf('foamPass.setPipeline(foamUpdatePipeline)') >= 0,
+        'foamUpdatePipeline never dispatched in compute pass');
+    });
+
     test('gpu-mpm v82: tile backdrop + caustics wired', () => {
       const src = readMpmScript();
       assert(src.indexOf('WGSL_BACKDROP') >= 0, 'WGSL_BACKDROP shader missing');

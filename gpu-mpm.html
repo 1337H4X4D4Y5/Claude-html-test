@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v89 (2026-05-11 — mask Fresnel+spec at thin water (kill silhouette icicle streaks))';
+const APP_VERSION = 'mpm-v90 (2026-05-11 — foam / spray secondary particles)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -458,6 +458,13 @@ const PARTICLE_RADIUS = 0.022;
 // atomic<f32>, so each float value is encoded as round(v * SCALE) and
 // decoded after the P2G pass by dividing back.
 const FIXED_POINT = 1.0e6;
+
+// v90: foam pool. Separate ring buffer of secondary particles spawned at
+// high-velocity MPM particles, simulated with simple gravity + drag,
+// rendered as bright billboards on top of the fluid composite (before
+// bloom, so the spray glows). 4096 is plenty for the visible spray
+// rate at our typical particle counts and dt.
+const N_FOAM_MAX = 4096;
 
 const overlay = document.getElementById('overlay');
 const overlayMsg = document.getElementById('overlay-msg');
@@ -917,6 +924,91 @@ fn cs_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   pos[i] = vec4<f32>(p, 0.0);
   vel[i] = vec4<f32>(newV, 0.0);
   Cmat[i] = newC;
+}
+`;
+
+// ===========================================================================
+// v90: foam / spray secondary particles.
+//   cs_foam_spawn: per MPM particle, probabilistically inject a foam
+//     particle into a ring buffer when speed > threshold.
+//   cs_foam_update: per foam slot, apply gravity + drag, decrement life,
+//     advect.
+// ===========================================================================
+const WGSL_FOAM_COMPUTE = `
+struct FoamParams {
+  gravity: vec3<f32>,
+  dt: f32,
+  drag: f32,
+  spawnVThresh: f32,
+  spawnProb: f32,
+  maxLife: f32,
+};
+
+@group(0) @binding(0) var<storage, read> srcPos: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> srcVel: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> foamPos: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> foamVel: array<vec4<f32>>;
+@group(0) @binding(4) var<uniform> P: FoamParams;
+@group(0) @binding(5) var<storage, read_write> foamHead: atomic<u32>;
+
+const N: u32 = ${N}u;
+const N_FOAM: u32 = ${N_FOAM_MAX}u;
+
+fn hash11(p: u32) -> f32 {
+  var s = p;
+  s = (s ^ 61u) ^ (s >> 16u);
+  s = s + (s << 3u);
+  s = s ^ (s >> 4u);
+  s = s * 0x27d4eb2du;
+  s = s ^ (s >> 15u);
+  return f32(s & 0xffffffu) / f32(0x1000000u);
+}
+
+@compute @workgroup_size(64)
+fn cs_foam_spawn(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= N) { return; }
+  let pos = srcPos[i].xyz;
+  let vel = srcVel[i].xyz;
+  let speed = length(vel);
+  // Only fast-moving particles spawn foam — splash events, not bulk flow.
+  if (speed < P.spawnVThresh) { return; }
+  // Time-seeded random per-particle so different particles spawn
+  // independently each frame.
+  let frameSeed = bitcast<u32>(P.dt * 1.0e7 + f32(i) * 0.137);
+  let r = hash11(i * 1664525u + frameSeed);
+  if (r > P.spawnProb) { return; }
+  // Slot allocation via atomic ring buffer head. Wraps around N_FOAM so
+  // oldest foam gets overwritten — no need to search for free slots.
+  let slot = atomicAdd(&foamHead, 1u) % N_FOAM;
+  // Initial state: at the parent particle, with slight upward velocity
+  // kick (foam tends to fly upward off a splash crest).
+  let jitter = vec3<f32>(
+    (hash11(i + 17u) - 0.5) * 0.01,
+    hash11(i + 31u) * 0.02,
+    (hash11(i + 53u) - 0.5) * 0.01
+  );
+  let upKick = vec3<f32>(0.0, 1.2, 0.0) * hash11(i + 97u);
+  foamPos[slot] = vec4<f32>(pos + jitter, P.maxLife);
+  foamVel[slot] = vec4<f32>(vel + upKick, 1.0);
+}
+
+@compute @workgroup_size(64)
+fn cs_foam_update(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= N_FOAM) { return; }
+  let life = foamPos[i].w;
+  if (life <= 0.0) { return; }
+  var pos = foamPos[i].xyz;
+  var vel = foamVel[i].xyz;
+  // Gravity (real, foam is in air not coupled to fluid grid)
+  vel = vel + P.gravity * P.dt;
+  // Air drag — exponential decay per substep
+  vel = vel * pow(P.drag, P.dt * 60.0);
+  pos = pos + vel * P.dt;
+  let newLife = life - P.dt;
+  foamPos[i] = vec4<f32>(pos, newLife);
+  foamVel[i] = vec4<f32>(vel, foamVel[i].w);
 }
 `;
 
@@ -1576,6 +1668,70 @@ fn fs_main() -> @location(0) vec4<f32> {
 }
 `;
 
+// v90: foam render shader. Per-foam-particle billboard, premultiplied-
+// alpha so it adds bright spray to the composite. Alpha fades over
+// life so old foam dissolves smoothly. Bloomed alongside the rest of
+// the composite (foam pass writes BEFORE bloom bright-extract reads).
+const WGSL_FOAM_RENDER = `
+struct RenderParams {
+  viewProj: mat4x4<f32>,
+  cameraRight: vec3<f32>, particleSize: f32,
+  cameraUp: vec3<f32>, alphaScale: f32,
+};
+
+struct FoamRenderParams {
+  maxLife: f32,
+  radius: f32,
+  _pad0: f32,
+  _pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> foamPos: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> foamVel: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> R: RenderParams;
+@group(0) @binding(3) var<uniform> F: FoamRenderParams;
+
+struct VOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) alpha: f32,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0)
+  );
+  let q = quad[vi];
+  let center = foamPos[ii].xyz;
+  let life = foamPos[ii].w;
+  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * F.radius;
+  var out: VOut;
+  out.position = R.viewProj * vec4<f32>(wp, 1.0);
+  out.uv = q;
+  // Dead foam (life <= 0): collapse the quad off-screen so it's not drawn.
+  if (life <= 0.0) {
+    out.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+    out.alpha = 0.0;
+  } else {
+    out.alpha = clamp(life / F.maxLife, 0.0, 1.0);
+  }
+  return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.uv, in.uv);
+  if (r2 > 1.0) { discard; }
+  // Smooth disc, premultiplied. Slight warm-white tint matches the
+  // sky-glint colour so foam reads as bright spray rather than colourless.
+  let a = in.alpha * (1.0 - r2);
+  let rgb = vec3<f32>(1.0, 0.99, 0.95);
+  return vec4<f32>(rgb * a, a);
+}
+`;
+
 async function initAndRun() {
   const canvas = document.getElementById('gpu-canvas');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1739,6 +1895,82 @@ async function initAndRun() {
       { binding: 3, resource: { buffer: gridVelBuf } },
       { binding: 4, resource: { buffer: simParamsBuf } },
       { binding: 5, resource: { buffer: cMatBuf } },
+    ],
+  });
+
+  // v90: foam particle pool. posLife = (x, y, z, life), velScale = (vx, vy, vz, _).
+  // foamHead is an atomic uint that the spawn shader atomicAdd's to allocate
+  // ring-buffer slots; old foam overwritten naturally as new spawns hit
+  // the same slot mod N_FOAM_MAX.
+  const foamPosBuf = device.createBuffer({
+    size: N_FOAM_MAX * 16,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const foamVelBuf = device.createBuffer({
+    size: N_FOAM_MAX * 16,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const foamHeadBuf = device.createBuffer({
+    size: 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const foamParamsBuf = device.createBuffer({
+    size: 32,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const FOAM_RENDER_PARAMS_SIZE = 16;
+  const foamRenderParamsBuf = device.createBuffer({
+    size: FOAM_RENDER_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  // Initialise foam pool to all-dead (life=0) and head=0.
+  {
+    const zero = new Float32Array(N_FOAM_MAX * 4);
+    device.queue.writeBuffer(foamPosBuf, 0, zero);
+    device.queue.writeBuffer(foamVelBuf, 0, zero);
+    device.queue.writeBuffer(foamHeadBuf, 0, new Uint32Array([0]));
+  }
+  // Foam render params are constants for now: max life + visual radius.
+  {
+    const buf = new Float32Array(FOAM_RENDER_PARAMS_SIZE / 4);
+    buf[0] = 0.55;   // maxLife (seconds)
+    buf[1] = 0.012;  // radius (scene units) — smaller than fluid particles
+    buf[2] = 0;
+    buf[3] = 0;
+    device.queue.writeBuffer(foamRenderParamsBuf, 0, buf);
+  }
+  // Foam compute pipelines (spawn + update share a bind-group layout).
+  const foamComputeModule = device.createShaderModule({ code: WGSL_FOAM_COMPUTE });
+  const foamComputeLayout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+    ],
+  });
+  const foamComputePipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: [foamComputeLayout],
+  });
+  const foamSpawnPipeline = device.createComputePipeline({
+    layout: foamComputePipelineLayout,
+    compute: { module: foamComputeModule, entryPoint: 'cs_foam_spawn' },
+  });
+  const foamUpdatePipeline = device.createComputePipeline({
+    layout: foamComputePipelineLayout,
+    compute: { module: foamComputeModule, entryPoint: 'cs_foam_update' },
+  });
+  const foamComputeBindGroup = device.createBindGroup({
+    layout: foamComputeLayout,
+    entries: [
+      { binding: 0, resource: { buffer: posBuf } },
+      { binding: 1, resource: { buffer: velBuf } },
+      { binding: 2, resource: { buffer: foamPosBuf } },
+      { binding: 3, resource: { buffer: foamVelBuf } },
+      { binding: 4, resource: { buffer: foamParamsBuf } },
+      { binding: 5, resource: { buffer: foamHeadBuf } },
     ],
   });
 
@@ -1915,6 +2147,36 @@ async function initAndRun() {
   const linesBindGroup = device.createBindGroup({
     layout: linesPipeline.getBindGroupLayout(0),
     entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
+  });
+
+  // v90: foam render pipeline. Premultiplied alpha so the spray adds to
+  // compositeTex rather than replacing it. Targets the SAME compositeTex
+  // that the fluid composite writes; runs AFTER it, BEFORE bloom, so
+  // bright foam blooms into halos.
+  const foamRenderModule = device.createShaderModule({ code: WGSL_FOAM_RENDER });
+  const foamRenderPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: foamRenderModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: foamRenderModule, entryPoint: 'fs_main',
+      targets: [{
+        format: format,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const foamRenderBindGroup = device.createBindGroup({
+    layout: foamRenderPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: foamPosBuf } },
+      { binding: 1, resource: { buffer: foamVelBuf } },
+      { binding: 2, resource: { buffer: renderParamsBuf } },
+      { binding: 3, resource: { buffer: foamRenderParamsBuf } },
+    ],
   });
 
   // v86/v88: translucent side walls. v86 added all 4 vertical faces;
@@ -2218,6 +2480,32 @@ async function initAndRun() {
       state.steps++;
     }
 
+    // v90: foam spawn + update, once per frame after the MPM substeps.
+    // dt here is the frame dt, not the substep dt — foam is decoupled
+    // from the simulation timestep.
+    {
+      const fpBuf = new Float32Array(8);
+      fpBuf[0] = state.gravity.x;
+      fpBuf[1] = state.gravity.y;
+      fpBuf[2] = state.gravity.z;
+      fpBuf[3] = dt;       // frame dt
+      fpBuf[4] = 0.985;    // drag (per substep equivalent)
+      fpBuf[5] = 2.0;      // spawnVThresh — only fast particles spawn foam
+      fpBuf[6] = 0.012;    // spawnProb per frame per qualifying particle
+      fpBuf[7] = 0.55;     // maxLife (seconds)
+      device.queue.writeBuffer(foamParamsBuf, 0, fpBuf);
+
+      const foamEnc = device.createCommandEncoder();
+      const foamPass = foamEnc.beginComputePass();
+      foamPass.setBindGroup(0, foamComputeBindGroup);
+      foamPass.setPipeline(foamSpawnPipeline);
+      foamPass.dispatchWorkgroups(particleGroups);
+      foamPass.setPipeline(foamUpdatePipeline);
+      foamPass.dispatchWorkgroups(Math.ceil(N_FOAM_MAX / 64));
+      foamPass.end();
+      device.queue.submit([foamEnc.finish()]);
+    }
+
     // Render.
     const aspect = canvas.width / canvas.height;
     const cam = buildViewProj(aspect);
@@ -2387,6 +2675,20 @@ async function initAndRun() {
       });
       p.setPipeline(compositePipeline); p.setBindGroup(0, compositeBindGroup);
       p.draw(3, 1);
+      p.end();
+    }
+    // v90: foam pass — additively draws bright spray sprites on top of
+    // the fluid composite. Runs BEFORE bloom so bright foam particles
+    // pick up halos. loadOp:'load' preserves the fluid composite.
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: compositeTex.createView(),
+          loadOp: 'load', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(foamRenderPipeline); p.setBindGroup(0, foamRenderBindGroup);
+      p.draw(6, N_FOAM_MAX);
       p.end();
     }
     // v81 bloom pipeline:

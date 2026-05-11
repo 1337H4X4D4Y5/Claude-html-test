@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v91 (2026-05-11 — foam bouncing in box + gyro-aware spawn)';
+const APP_VERSION = 'mpm-v92 (2026-05-11 — foam as fluffy surface patches (bigger + softer + draggier))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -997,7 +997,9 @@ fn cs_foam_spawn(@builtin(global_invocation_id) gid: vec3<u32>) {
   );
   // v91: upward kick along -gravity direction (the real "up" relative
   // to current gyro orientation), not absolute world +Y.
-  let kickMag = 0.8 + 1.4 * hash11(i + 97u);
+  // v92: kickMag halved — foam shouldn't fly far. It accumulates near
+  // the surface as fluffy patches rather than zooming around the box.
+  let kickMag = 0.3 + 0.5 * hash11(i + 97u);
   let kick = -gDir * kickMag;
   foamPos[slot] = vec4<f32>(pos + jitter, P.maxLife);
   foamVel[slot] = vec4<f32>(vel + kick, 1.0);
@@ -1743,12 +1745,23 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-  let r2 = dot(in.uv, in.uv);
-  if (r2 > 1.0) { discard; }
-  // Smooth disc, premultiplied. Slight warm-white tint matches the
-  // sky-glint colour so foam reads as bright spray rather than colourless.
-  let a = in.alpha * (1.0 - r2);
-  let rgb = vec3<f32>(1.0, 0.99, 0.95);
+  // v92: irregular fuzzy blob, not a hard disc — reads as foam clusters
+  // instead of "white dots". Polar wobble gives non-circular silhouette,
+  // and per-pixel sinusoidal noise gives bubble-texture inside.
+  let r = length(in.uv);
+  let theta = atan2(in.uv.y, in.uv.x);
+  let wobble = 1.0 + sin(theta * 4.0 + in.uv.x * 2.3) * 0.18
+                    + cos(theta * 7.0 - in.uv.y * 1.7) * 0.10;
+  let rEff = r / wobble;
+  if (rEff > 1.0) { discard; }
+  // Soft parabolic falloff toward edges, modulated by a small interior
+  // noise that breaks the smooth gradient into bubble-like texture.
+  let core = 1.0 - rEff * rEff;
+  let bubble = 1.0 + sin(in.uv.x * 11.0 + in.uv.y * 9.5) * 0.15
+                  + cos(in.uv.x * 7.5 - in.uv.y * 13.0) * 0.10;
+  let a = in.alpha * core * bubble;
+  // Slight cool tint — reads as foam-over-water rather than glaring white.
+  let rgb = vec3<f32>(0.94, 0.97, 1.0);
   return vec4<f32>(rgb * a, a);
 }
 `;
@@ -1953,10 +1966,13 @@ async function initAndRun() {
     device.queue.writeBuffer(foamHeadBuf, 0, new Uint32Array([0]));
   }
   // Foam render params are constants for now: max life + visual radius.
+  // v92: radius 0.012 -> 0.028 (foam reads as soft fluffy blobs, not
+  // hard dots); maxLife 0.55 -> 1.0 (with stronger drag they hover
+  // longer near the surface like real foam).
   {
     const buf = new Float32Array(FOAM_RENDER_PARAMS_SIZE / 4);
-    buf[0] = 0.55;   // maxLife (seconds)
-    buf[1] = 0.012;  // radius (scene units) — smaller than fluid particles
+    buf[0] = 1.0;     // maxLife (seconds)
+    buf[1] = 0.028;   // radius
     buf[2] = 0;
     buf[3] = 0;
     device.queue.writeBuffer(foamRenderParamsBuf, 0, buf);
@@ -2502,21 +2518,20 @@ async function initAndRun() {
       state.steps++;
     }
 
-    // v90/v91: foam spawn + update, once per frame after the MPM substeps.
-    // dt here is the frame dt, not the substep dt — foam is decoupled
-    // from the simulation timestep. v91 adds box bounds so foam bounces
-    // off the walls instead of flying out of the container.
+    // v90/v91/v92: foam spawn + update. dt is frame dt (foam is decoupled
+    // from MPM substep). v91 bounded foam to box; v92 makes foam settle
+    // on the surface instead of flying around: heavier drag, lower spawn
+    // kick, longer max life so foam accumulates as fluffy patches.
     {
       const fpBuf = new Float32Array(12);
       fpBuf[0] = state.gravity.x;
       fpBuf[1] = state.gravity.y;
       fpBuf[2] = state.gravity.z;
       fpBuf[3] = dt;
-      fpBuf[4] = 0.985;     // drag
+      fpBuf[4] = 0.88;      // drag — much stronger; foam settles fast
       fpBuf[5] = 1.2;       // spawnVThresh
-      fpBuf[6] = 0.05;      // spawnProb (higher than v90 because the
-                            //   against-gravity filter rejects many)
-      fpBuf[7] = 0.55;      // maxLife
+      fpBuf[6] = 0.06;      // spawnProb
+      fpBuf[7] = 1.0;       // maxLife
       fpBuf[8] = BOX_HALF_X;
       fpBuf[9] = BOX_HALF_Y;
       fpBuf[10] = BOX_HALF_Z;

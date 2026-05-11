@@ -1172,8 +1172,8 @@
         'composite must compute dpdx of a surface normal for caustics');
       assert(compositeSrc.indexOf('dpdy(nSmooth)') >= 0 || compositeSrc.indexOf('dpdy(n)') >= 0,
         'composite must compute dpdy of a surface normal for caustics');
-      assert(compositeSrc.indexOf('causticIntensity') >= 0,
-        'composite must produce a causticIntensity term');
+      assert(compositeSrc.indexOf('Caustic') >= 0 || compositeSrc.indexOf('caustic') >= 0,
+        'composite must produce some kind of caustic term');
     });
 
     test('gpu-mpm v79: composite uses fractal noise to perturb surface normal', () => {

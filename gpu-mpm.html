@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v84 (2026-05-11 — perf: half-res bloom + leaner depth/thickness blur)';
+const APP_VERSION = 'mpm-v85 (2026-05-11 — projected light caustics (dancing bright patterns))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1186,6 +1186,29 @@ fn fbm2(p: vec2<f32>, t: f32) -> f32 {
   return v;
 }
 
+// v85: projected light caustics — the classic "dancing bright patterns
+// on the pool floor" that water focuses through its surface curvature.
+// We don't trace rays; we just paint a caustic-shaped procedural pattern
+// onto the backdrop. The warp-then-narrow-sin trick gives the sharp
+// converging-bright look real caustics have. Animated by P.time so the
+// pattern flows continuously.
+fn lightCaustic(p: vec2<f32>, t: f32) -> f32 {
+  // Two iterations of UV warping with sinusoids — Inigo-Quilez-style.
+  let q1 = vec2<f32>(
+    p.x + sin(p.y * 1.5 + t * 0.43) * 0.45,
+    p.y + cos(p.x * 1.3 + t * 0.51) * 0.45
+  );
+  let q2 = vec2<f32>(
+    q1.x + sin(q1.y * 2.6 + t * 0.31) * 0.28,
+    q1.y + cos(q1.x * 2.9 + t * 0.37) * 0.28
+  );
+  let d = q2.x + q2.y;
+  // pow(sin, 8) gives sharp bright peaks where sin is near 1, dark
+  // troughs everywhere else — the characteristic caustic look.
+  let s = sin(d * 1.8 + t * 0.2) * 0.5 + 0.5;
+  return pow(s, 8.0);
+}
+
 // Procedural three-stop sky gradient (view-space Y). Used by the Fresnel
 // reflection on the water surface so the highlight roll-off looks like
 // the room reflected in real water instead of a constant blue rim.
@@ -1292,18 +1315,24 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     textureLoad(backgroundTex, cB, 0).b
   );
 
-  // v83: screen-space caustics. Use dpdx/dpdy of nSmooth (the SSF
-  // surface normal, pre-fBm-perturb). The fBm noise has huge per-pixel
-  // derivatives, so v82 computed curvature ~maxed everywhere → caustics
-  // fired on every pixel → bloom turned the whole fluid into vertical
-  // streaks. The TRUE surface curvature (broad swells, wall slopes)
-  // lives in nSmooth and is what physically focuses light.
+  // v83: curvature-based caustics — bright spots where the SSF normal
+  // changes fastest (broad surface curves focusing light). Uses nSmooth
+  // to avoid the fBm-noise per-pixel firing that streaked v82.
   let dnx = dpdx(nSmooth);
   let dny = dpdy(nSmooth);
   let curvature = length(dnx) + length(dny);
-  let causticIntensity = clamp(curvature * 8.0, 0.0, 1.5);
+  let curvatureCaustic = clamp(curvature * 8.0, 0.0, 1.5);
   let causticTint = vec3<f32>(1.00, 0.96, 0.84);
-  bg = bg + causticTint * (causticIntensity * causticIntensity) * 0.5;
+  bg = bg + causticTint * (curvatureCaustic * curvatureCaustic) * 0.5;
+
+  // v85: projected light caustics — the dancing bright patterns water
+  // casts onto its floor. Procedural pattern keyed to surface world XZ
+  // (viewPos.xz proxy) and P.time. Applied multiplicatively so the
+  // tile pattern stays visible underneath. Only fires where there's
+  // water in front of the camera (this branch).
+  let causticUV = vec2<f32>(viewPos.x, -viewPos.z) * 6.0;
+  let lc = lightCaustic(causticUV, P.time);
+  bg = bg * (1.0 + lc * 1.4);
 
   // Body model (v60+): uniform-opacity lerp between absorbed background
   // and lit baseColor, so baseColor keeps its hue at any thickness.

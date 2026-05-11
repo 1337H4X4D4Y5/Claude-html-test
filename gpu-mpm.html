@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v64 (2026-05-11 — water preset re-tuned (less goopy, more splashy))';
+const APP_VERSION = 'mpm-v65 (2026-05-11 — water less bouncy (restitution 0.30 -> 0.08))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,11 +350,11 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      // v64: less goopy. v62 fixed a stuck-particle bug that had been
-      // masking how strong viscosity 0.03 actually felt. Real water is
-      // almost inviscid — drop XSPH C-decay to 0.005, give walls a bit
-      // more slip, raise restitution a touch for proper splashes.
-      pressureKMul: 50, velDamping: 0.9995, restitution: 0.30,
+      // v64: low viscosity (not goopy) + slippy walls + slightly less
+      // global damping. v65: pulled restitution back from 0.30 to 0.08 —
+      // real water against glass barely bounces, it just splashes via
+      // velocity transfer through the surface, not by elastic rebound.
+      pressureKMul: 50, velDamping: 0.999, restitution: 0.08,
       wallFriction: 0.97, viscosity: 0.005, maxAccel: 60.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,

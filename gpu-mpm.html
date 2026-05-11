@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v68 (2026-05-11 — water velDamping 0.985 (much faster settle))';
+const APP_VERSION = 'mpm-v69 (2026-05-11 — kill APIC C-matrix faster so water actually rests)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,13 +350,15 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      // v68: aggressive velDamping. v67's 0.993 -> 18% energy retained
-      // per second was too little, water never reached rest. 0.985 ->
-      // 2.6% retained per second (energy halves in ~0.46s) settles
-      // within ~3 seconds of holding the phone still. Keep viscosity
-      // and friction modest so flow still looks like water in motion.
+      // v69: water still never stopped. velDamping was 2.6%/sec but the
+      // APIC C-matrix (affine velocity gradient per particle) was decaying
+      // at only 30%/sec via viscosity 0.005 — so even with particle
+      // velocity zeroed by damping, P2G kept injecting `C * dpos`
+      // momentum into the grid and the fluid vibrated around rest.
+      // Bump viscosity to 0.02 (C decays to ~1%/sec) and maxAccel to 60
+      // so the pressure response isn't clamped during settling spikes.
       pressureKMul: 30, velDamping: 0.985, restitution: 0.0,
-      wallFriction: 0.85, viscosity: 0.005, maxAccel: 35.0,
+      wallFriction: 0.85, viscosity: 0.02, maxAccel: 60.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
       // v59: screen-space refraction strength in pixels.

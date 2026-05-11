@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v90 (2026-05-11 — foam / spray secondary particles)';
+const APP_VERSION = 'mpm-v91 (2026-05-11 — foam bouncing in box + gyro-aware spawn)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -942,6 +942,10 @@ struct FoamParams {
   spawnVThresh: f32,
   spawnProb: f32,
   maxLife: f32,
+  boxHalfX: f32,
+  boxHalfY: f32,
+  boxHalfZ: f32,
+  _pad: f32,
 };
 
 @group(0) @binding(0) var<storage, read> srcPos: array<vec4<f32>>;
@@ -971,26 +975,32 @@ fn cs_foam_spawn(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pos = srcPos[i].xyz;
   let vel = srcVel[i].xyz;
   let speed = length(vel);
-  // Only fast-moving particles spawn foam — splash events, not bulk flow.
   if (speed < P.spawnVThresh) { return; }
+  // v91: only spawn foam when particle has velocity component AGAINST
+  // gravity (i.e. it's a splash, not bulk settled flow). The static fluid
+  // mass mostly moves WITH gravity, so this filters out the boring
+  // particles and concentrates foam at impact crests.
+  let gMag = length(P.gravity);
+  let gDir = P.gravity / max(gMag, 0.001);
+  let upComponent = dot(vel, -gDir);
+  if (upComponent < 0.5) { return; }
   // Time-seeded random per-particle so different particles spawn
   // independently each frame.
   let frameSeed = bitcast<u32>(P.dt * 1.0e7 + f32(i) * 0.137);
   let r = hash11(i * 1664525u + frameSeed);
   if (r > P.spawnProb) { return; }
-  // Slot allocation via atomic ring buffer head. Wraps around N_FOAM so
-  // oldest foam gets overwritten — no need to search for free slots.
   let slot = atomicAdd(&foamHead, 1u) % N_FOAM;
-  // Initial state: at the parent particle, with slight upward velocity
-  // kick (foam tends to fly upward off a splash crest).
   let jitter = vec3<f32>(
-    (hash11(i + 17u) - 0.5) * 0.01,
-    hash11(i + 31u) * 0.02,
-    (hash11(i + 53u) - 0.5) * 0.01
+    (hash11(i + 17u) - 0.5) * 0.015,
+    (hash11(i + 31u) - 0.5) * 0.015,
+    (hash11(i + 53u) - 0.5) * 0.015
   );
-  let upKick = vec3<f32>(0.0, 1.2, 0.0) * hash11(i + 97u);
+  // v91: upward kick along -gravity direction (the real "up" relative
+  // to current gyro orientation), not absolute world +Y.
+  let kickMag = 0.8 + 1.4 * hash11(i + 97u);
+  let kick = -gDir * kickMag;
   foamPos[slot] = vec4<f32>(pos + jitter, P.maxLife);
-  foamVel[slot] = vec4<f32>(vel + upKick, 1.0);
+  foamVel[slot] = vec4<f32>(vel + kick, 1.0);
 }
 
 @compute @workgroup_size(64)
@@ -1001,11 +1011,22 @@ fn cs_foam_update(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (life <= 0.0) { return; }
   var pos = foamPos[i].xyz;
   var vel = foamVel[i].xyz;
-  // Gravity (real, foam is in air not coupled to fluid grid)
+  // Air-like physics: gravity + drag.
   vel = vel + P.gravity * P.dt;
-  // Air drag — exponential decay per substep
   vel = vel * pow(P.drag, P.dt * 60.0);
   pos = pos + vel * P.dt;
+  // v91: bounce off the box walls with restitution. Without this, foam
+  // particles fly out of the container and never come back.
+  let bX = P.boxHalfX - 0.005;
+  let bY = P.boxHalfY - 0.005;
+  let bZ = P.boxHalfZ - 0.005;
+  let rest = 0.35;
+  if (pos.x < -bX) { pos.x = -bX; vel.x = -vel.x * rest; }
+  if (pos.x >  bX) { pos.x =  bX; vel.x = -vel.x * rest; }
+  if (pos.y < -bY) { pos.y = -bY; vel.y = -vel.y * rest; }
+  if (pos.y >  bY) { pos.y =  bY; vel.y = -vel.y * rest; }
+  if (pos.z < -bZ) { pos.z = -bZ; vel.z = -vel.z * rest; }
+  if (pos.z >  bZ) { pos.z =  bZ; vel.z = -vel.z * rest; }
   let newLife = life - P.dt;
   foamPos[i] = vec4<f32>(pos, newLife);
   foamVel[i] = vec4<f32>(vel, foamVel[i].w);
@@ -1914,8 +1935,9 @@ async function initAndRun() {
     size: 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
+  // v91: 32 -> 48 bytes (added boxHalfX/Y/Z for foam wall-bounce + pad).
   const foamParamsBuf = device.createBuffer({
-    size: 32,
+    size: 48,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const FOAM_RENDER_PARAMS_SIZE = 16;
@@ -2480,19 +2502,25 @@ async function initAndRun() {
       state.steps++;
     }
 
-    // v90: foam spawn + update, once per frame after the MPM substeps.
+    // v90/v91: foam spawn + update, once per frame after the MPM substeps.
     // dt here is the frame dt, not the substep dt — foam is decoupled
-    // from the simulation timestep.
+    // from the simulation timestep. v91 adds box bounds so foam bounces
+    // off the walls instead of flying out of the container.
     {
-      const fpBuf = new Float32Array(8);
+      const fpBuf = new Float32Array(12);
       fpBuf[0] = state.gravity.x;
       fpBuf[1] = state.gravity.y;
       fpBuf[2] = state.gravity.z;
-      fpBuf[3] = dt;       // frame dt
-      fpBuf[4] = 0.985;    // drag (per substep equivalent)
-      fpBuf[5] = 2.0;      // spawnVThresh — only fast particles spawn foam
-      fpBuf[6] = 0.012;    // spawnProb per frame per qualifying particle
-      fpBuf[7] = 0.55;     // maxLife (seconds)
+      fpBuf[3] = dt;
+      fpBuf[4] = 0.985;     // drag
+      fpBuf[5] = 1.2;       // spawnVThresh
+      fpBuf[6] = 0.05;      // spawnProb (higher than v90 because the
+                            //   against-gravity filter rejects many)
+      fpBuf[7] = 0.55;      // maxLife
+      fpBuf[8] = BOX_HALF_X;
+      fpBuf[9] = BOX_HALF_Y;
+      fpBuf[10] = BOX_HALF_Z;
+      fpBuf[11] = 0;
       device.queue.writeBuffer(foamParamsBuf, 0, fpBuf);
 
       const foamEnc = device.createCommandEncoder();

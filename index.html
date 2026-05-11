@@ -146,8 +146,8 @@
   #reset-btn:active { transform: scale(0.98); }
 </style>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="sim.js?v=25"></script>
-<script src="test.js?v=25"></script>
+<script src="sim.js?v=26"></script>
+<script src="test.js?v=26"></script>
 </head>
 <body>
 <div id="permission-overlay">
@@ -167,7 +167,7 @@
 
   // ---------- Version ----------
   // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v25 (2026-05-10 — spatial grid, more particles)';
+  const APP_VERSION = 'v26 (2026-05-10 — fluid-focused debug + soft blobs)';
   document.getElementById('version').textContent = APP_VERSION;
   document.getElementById('overlay-version').textContent = APP_VERSION;
 
@@ -295,42 +295,63 @@
   // that fall under gravity, collide with the cube walls, and repel each
   // other. This actually feels like fluid in 3D — particles pile up at the
   // lowest face, slosh when you tilt, bounce off walls.
-  const FLUID_N = 500;
-  // Particles render as spheres with this radius. The fluid's boxHalf must be
-  // halfBox - PARTICLE_RADIUS so the sphere SURFACE (not the center) stops at
-  // the wall — otherwise spheres clip visibly through the glass.
-  const PARTICLE_RADIUS = 0.055;
+  const FLUID_N = 600;
   const fluid = new Fluid(FLUID_N, {
-    boxHalf: halfBox - PARTICLE_RADIUS - 0.005,
-    interactRadius: 0.13,         // ~2.4x particle radius — neighbors overlap
-    pressureK: 14.0,              // stronger repulsion so they spread laterally
-    viscosity: 0.35,              // moderate cohesion
-    restitution: 0.20,            // soft bounces (less rattling)
-    velDamping: 0.990,
+    boxHalf: halfBox - 0.06,
+    interactRadius: 0.13,
+    pressureK: 60.0,
+    viscosity: 0.6,
+    posCorrection: 0.9,
+    posIterations: 4,
+    restitution: 0.15,
+    velDamping: 0.992,
     maxSpeed: 9.0
   });
   fluid.seed(7);
-  const fluidGeom = new THREE.SphereGeometry(PARTICLE_RADIUS, 7, 6);
-  const fluidMat = new THREE.MeshPhongMaterial({
-    color: 0x4aa3ff,
-    emissive: 0x0a2540,
-    transparent: true,
-    opacity: 0.85,
-    shininess: 100,
-    specular: 0xffffff
-  });
-  const fluidMesh = new THREE.InstancedMesh(fluidGeom, fluidMat, FLUID_N);
-  fluidMesh.renderOrder = 2;
-  scene.add(fluidMesh);
 
-  // Scratch matrix reused each frame to push particle positions into the mesh.
-  const _fluidMtx = new THREE.Matrix4();
+  // Soft additive sprites: each particle renders as a fuzzy blue blob.
+  // Overlapping particles blend into a continuous fluid glow rather than
+  // looking like discrete marbles.
+  function makeFluidSprite() {
+    const size = 128;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const ctx = c.getContext('2d');
+    const grd = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+    grd.addColorStop(0.0, 'rgba(200,230,255,0.85)');
+    grd.addColorStop(0.35, 'rgba(90,170,255,0.55)');
+    grd.addColorStop(0.75, 'rgba(40,110,200,0.18)');
+    grd.addColorStop(1.0, 'rgba(20,60,150,0)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(c);
+    if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    return tex;
+  }
+  const fluidGeom = new THREE.BufferGeometry();
+  const fluidPositions = new Float32Array(FLUID_N * 3);
+  fluidGeom.setAttribute('position', new THREE.BufferAttribute(fluidPositions, 3));
+  const fluidMat = new THREE.PointsMaterial({
+    size: 0.22,
+    map: makeFluidSprite(),
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    color: 0xffffff,
+    sizeAttenuation: true
+  });
+  const fluidPoints = new THREE.Points(fluidGeom, fluidMat);
+  fluidPoints.renderOrder = 2;
+  scene.add(fluidPoints);
+
   function updateFluidRender() {
     for (let i = 0; i < FLUID_N; i++) {
-      _fluidMtx.makeTranslation(fluid.x[i], fluid.y[i], fluid.z[i]);
-      fluidMesh.setMatrixAt(i, _fluidMtx);
+      fluidPositions[i * 3 + 0] = fluid.x[i];
+      fluidPositions[i * 3 + 1] = fluid.y[i];
+      fluidPositions[i * 3 + 2] = fluid.z[i];
     }
-    fluidMesh.instanceMatrix.needsUpdate = true;
+    fluidGeom.attributes.position.needsUpdate = true;
   }
   // A nominal HeightField is kept around so the legacy debug fields in the
   // copy-debug report don't break — it isn't simulated or rendered.
@@ -584,32 +605,10 @@
   }
 
   function buildFullReport() {
-    // Sim health snapshot.
-    let maxH = 0, sumSq = 0, nans = 0, edgeMaxAbsDiff = 0;
-    const h = field.h;
-    for (let k = 0; k < h.length; k++) {
-      if (!isFinite(h[k])) nans++;
-      else {
-        const a = Math.abs(h[k]);
-        if (a > maxH) maxH = a;
-        sumSq += h[k] * h[k];
-      }
-    }
-    // Largest height jump between any two adjacent cells (high-freq indicator).
-    const N = field.n;
-    let maxAdjDiff = 0;
-    for (let j = 1; j < N - 1; j++) {
-      for (let i = 1; i < N - 2; i++) {
-        const k = j * N + i;
-        const d1 = Math.abs(h[k] - h[k + 1]);
-        if (d1 > maxAdjDiff) maxAdjDiff = d1;
-        const d2 = Math.abs(h[k] - h[k + N]);
-        if (d2 > maxAdjDiff) maxAdjDiff = d2;
-      }
-    }
-    // Particle count alive.
-    let alive = 0;
-    for (let p = 0; p < particles.length; p++) if (particles[p].alive) alive++;
+    const sp = fluid.spread();
+    const nn = fluid.nnStats();
+    const com = fluid.centerOfMass();
+    const ke = fluid.totalKE();
     return [
       '=== Water Box debug report ===',
       'version:    ' + APP_VERSION,
@@ -629,55 +628,30 @@
         ((screen.orientation && typeof screen.orientation.angle === 'number')
           ? screen.orientation.angle
           : 'n/a'),
-      'window.orientation: ' +
-        (typeof window.orientation === 'number' ? window.orientation : 'n/a'),
       '',
       '-- gravity --',
       'gravity x:  ' + gravity.x.toFixed(3),
       'gravity y:  ' + gravity.y.toFixed(3),
       'gravity z:  ' + gravity.z.toFixed(3),
-      'target  x:  ' + gravityTarget.x.toFixed(3),
-      'target  y:  ' + gravityTarget.y.toFixed(3),
-      'target  z:  ' + gravityTarget.z.toFixed(3),
       '',
-      '-- sim health --',
-      'grid:           ' + N + 'x' + N,
-      'max |h|:        ' + maxH.toFixed(4) + '  (clamp at ' + field.hmax + ')',
-      'sum h^2:        ' + sumSq.toFixed(4),
-      'NaN cells:      ' + nans,
-      'max adj diff:   ' + maxAdjDiff.toFixed(4) + '  (high-freq indicator)',
-      'alive splashes: ' + alive + ' / ' + particles.length,
-      '',
-      '-- on-device sanity (fresh sim, 200 steps, gravity straight down) --',
-      'expected (Node): peak~0.115, final~0, finalAdj~0',
-      'observed:        peak ' + _selfTest.peak.toFixed(4) +
-        ', final ' + _selfTest.final.toFixed(4) +
-        ', finalAdj ' + _selfTest.finalAdj.toFixed(4),
-      'live initial max|h|: ' + _liveInitialMaxH.toFixed(4) + '  (expected ~0.12)',
-      '',
-      '-- live timeline (sampled every ' + TIMELINE_INTERVAL + 's, last ' + (TIMELINE_LEN * TIMELINE_INTERVAL) + 's) --',
-      'steps run total: ' + stepsRun,
-      timeline.length === 0 ? '(no samples yet)' :
-        timeline.map(function (s) {
-          return '  t=' + s.t.toFixed(1).padStart(5, ' ') +
-                 's  max|h|=' + s.maxH.toFixed(4) +
-                 '  maxAdj=' + s.maxAdj.toFixed(4);
-        }).join('\n'),
-      '',
-      '-- per-step max|h| trace (last ' + STEP_TRACE_LEN + ' steps, freezes on explosion) --',
-      stepTrace.length === 0 ? '(no steps yet)' :
-        '[' + stepTrace.map(function (v) { return v.toFixed(4); }).join(', ') + ']',
-      '',
-      '-- explosion snapshot (first frame max|h| crossed 0.3) --',
-      explosion === null ? '(no explosion detected yet — sim is calm)' : [
-        'when:        t=' + explosion.t.toFixed(3) + 's  step #' + explosion.stepsRun,
-        'max|h|:      ' + explosion.maxH.toFixed(4),
-        'big jumps:   ' + explosion.bigJumps + ' / ' + explosion.totalPairs +
-          ' pairs differ by >0.3 (checkerboard fingerprint)',
-        'row j=N/2 h:  [' + explosion.rowH.join(', ') + ']',
-        'row j=N/2 hp: [' + explosion.rowHp.join(', ') + ']',
-        'col i=N/2 h:  [' + explosion.colH.join(', ') + ']'
-      ].join('\n'),
+      '-- fluid (' + fluid.n + ' particles) --',
+      'spread (std): x=' + sp.stdX.toFixed(3) +
+                  '  y=' + sp.stdY.toFixed(3) +
+                  '  z=' + sp.stdZ.toFixed(3) +
+                  '   ← low value on any axis = pile collapsed in that direction',
+      'center of mass:   x=' + com.x.toFixed(3) +
+                       '  y=' + com.y.toFixed(3) +
+                       '  z=' + com.z.toFixed(3) +
+                       '   ← should follow gravity direction',
+      'nearest-neighbor: mean=' + nn.mean.toFixed(3) +
+                       '  std=' + nn.std.toFixed(3) +
+                       '  cv=' + nn.cv.toFixed(3) +
+                       '   ← cv < 0.05 means crystalline lattice',
+      'kinetic energy:   ' + ke.toFixed(2) +
+                       '   ← high = vibrating; low = settled',
+      'integrity:        ' + (fluid.allInBox() ? 'all in box' : 'ESCAPED') +
+                       '   ' + (fluid.hasNaN() ? 'HAS NaN' : 'no NaN'),
+      'steps run total:  ' + stepsRun,
       '',
       '-- unit tests (run on load) --',
       (function () {
@@ -700,14 +674,7 @@
     ].join('\n');
   }
   document.getElementById('reset-btn').addEventListener('click', function () {
-    // Re-seed the live field from a clean state.
-    field.h.fill(0);
-    field.hPrev.fill(0);
-    if (field._scratch) field._scratch.fill(0);
-    field.pokeGaussian(GRID_N >> 1, GRID_N >> 1, 0.12, 3.5);
-    field.pokeGaussian((GRID_N >> 1) - 10, (GRID_N >> 1) + 8, 0.07, 3.0);
-    field.pokeGaussian((GRID_N >> 1) + 12, (GRID_N >> 1) - 6, 0.07, 3.0);
-    field.startAtRest();
+    fluid.seed(Math.floor(Math.random() * 1e6) + 1);
     timeline.length = 0;
     timelineTimer = 0;
     stepsRun = 0;

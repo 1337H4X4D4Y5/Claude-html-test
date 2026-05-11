@@ -11,7 +11,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
 
   // Bump on every change so the loaded build is verifiable.
-  const SIM_VERSION = 'sim-25';
+  const SIM_VERSION = 'sim-26';
 
   // Map DeviceOrientationEvent (beta, gamma in degrees) plus screen rotation
   // angle (degrees) to a scene-frame gravity vector. Output magnitude equals
@@ -222,11 +222,17 @@
     this.n             = n;
     this.boxHalf       = opts.boxHalf       != null ? opts.boxHalf       : 0.92;
     this.interactRadius = opts.interactRadius != null ? opts.interactRadius : 0.14;
-    this.pressureK     = opts.pressureK     != null ? opts.pressureK     : 9.0;
-    this.viscosity     = opts.viscosity     != null ? opts.viscosity     : 0.45;
-    this.restitution   = opts.restitution   != null ? opts.restitution   : 0.30;
+    this.pressureK     = opts.pressureK     != null ? opts.pressureK     : 60.0;
+    this.viscosity     = opts.viscosity     != null ? opts.viscosity     : 0.6;
+    // Position-correction strength when two particles overlap. 0 = none,
+    // 1 = fully separate to interactRadius in one iteration. Use 0.5 so a
+    // pair of overlapping particles converges to the right spacing over a
+    // couple of frames without overshooting.
+    this.posCorrection = opts.posCorrection != null ? opts.posCorrection : 0.9;
+    this.posIterations = opts.posIterations != null ? opts.posIterations : 4;
+    this.restitution   = opts.restitution   != null ? opts.restitution   : 0.10;
     this.velDamping    = opts.velDamping    != null ? opts.velDamping    : 0.992;
-    this.maxSpeed      = opts.maxSpeed      != null ? opts.maxSpeed      : 8.0;
+    this.maxSpeed      = opts.maxSpeed      != null ? opts.maxSpeed      : 9.0;
     this.x  = new Float32Array(n);
     this.y  = new Float32Array(n);
     this.z  = new Float32Array(n);
@@ -295,6 +301,7 @@
     const boxHalf = this.boxHalf;
     const kPress = this.pressureK;
     const visc = this.viscosity;
+    const posCorrect = this.posCorrection;
     const rest = this.restitution;
     const damp = this.velDamping;
     const maxSpd2 = this.maxSpeed * this.maxSpeed;
@@ -343,10 +350,12 @@
                 if (r2 < radius2 && r2 > 1e-8) {
                   const r = Math.sqrt(r2);
                   const t = (radius - r) / radius;
-                  const force = kPress * t * t * dt;
                   const nxn = dx / r, nyn = dy / r, nzn = dz / r;
+                  // Gentle spring repulsion (provides some "spring" to the fluid).
+                  const force = kPress * t * t * dt;
                   vx[i] -= nxn * force; vy[i] -= nyn * force; vz[i] -= nzn * force;
                   vx[j] += nxn * force; vy[j] += nyn * force; vz[j] += nzn * force;
+                  // Viscosity: blend a fraction of velocity differences.
                   const dvx = vx[j] - vx[i];
                   const dvy = vy[j] - vy[i];
                   const dvz = vz[j] - vz[i];
@@ -371,11 +380,65 @@
       }
     }
 
-    // 4) Integrate + collide with cube walls.
+    // 4) Integrate position.
     for (let i = 0; i < n; i++) {
       x[i] += vx[i] * dt;
       y[i] += vy[i] * dt;
       z[i] += vz[i] * dt;
+    }
+
+    // 5) Position projection: physically separate any pairs that overlap
+    // (r < interactRadius). This is the stable Position-Based Fluids style
+    // constraint — particles literally cannot occupy the same space. Without
+    // this the spring oscillates indefinitely under gravity load and the pile
+    // never settles. Two iterations is enough to resolve most overlaps.
+    if (posCorrect > 0) {
+      this._buildGrid();
+      for (let iter = 0; iter < this.posIterations; iter++) {
+        for (let i = 0; i < n; i++) {
+          const xi = x[i], yi = y[i], zi = z[i];
+          let cxi = ((xi - origin) * inv) | 0;
+          let cyi = ((yi - origin) * inv) | 0;
+          let czi = ((zi - origin) * inv) | 0;
+          if (cxi < 0) cxi = 0; else if (cxi >= side) cxi = side - 1;
+          if (cyi < 0) cyi = 0; else if (cyi >= side) cyi = side - 1;
+          if (czi < 0) czi = 0; else if (czi >= side) czi = side - 1;
+          const cx0 = cxi > 0 ? cxi - 1 : 0;
+          const cx1 = cxi < side - 1 ? cxi + 1 : side - 1;
+          const cy0 = cyi > 0 ? cyi - 1 : 0;
+          const cy1 = cyi < side - 1 ? cyi + 1 : side - 1;
+          const cz0 = czi > 0 ? czi - 1 : 0;
+          const cz1 = czi < side - 1 ? czi + 1 : side - 1;
+          for (let cz = cz0; cz <= cz1; cz++) {
+            for (let cy = cy0; cy <= cy1; cy++) {
+              for (let cx = cx0; cx <= cx1; cx++) {
+                let j = grid[cx + side * (cy + side * cz)];
+                while (j !== -1) {
+                  if (j > i) {
+                    const dx2 = x[j] - x[i];
+                    const dy2 = y[j] - y[i];
+                    const dz2 = z[j] - z[i];
+                    const r22 = dx2*dx2 + dy2*dy2 + dz2*dz2;
+                    if (r22 < radius2 && r22 > 1e-8) {
+                      const r = Math.sqrt(r22);
+                      const overlap = radius - r;
+                      const half = overlap * posCorrect * 0.5;
+                      const nxn = dx2 / r, nyn = dy2 / r, nzn = dz2 / r;
+                      x[i] -= nxn * half; y[i] -= nyn * half; z[i] -= nzn * half;
+                      x[j] += nxn * half; y[j] += nyn * half; z[j] += nzn * half;
+                    }
+                  }
+                  j = next[j];
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 6) Cube wall collisions and global velocity damping.
+    for (let i = 0; i < n; i++) {
       if (x[i] < -boxHalf) { x[i] = -boxHalf; vx[i] = -vx[i] * rest; }
       else if (x[i] > boxHalf) { x[i] = boxHalf; vx[i] = -vx[i] * rest; }
       if (y[i] < -boxHalf) { y[i] = -boxHalf; vy[i] = -vy[i] * rest; }
@@ -403,6 +466,53 @@
     }
     return false;
   };
+  // Per-axis position standard deviation. Lets tests/debug surface a pile
+  // that collapsed into a sheet or line: any axis with stdDev << others means
+  // the cloud is squashed in that direction.
+  Fluid.prototype.spread = function () {
+    const n = this.n;
+    let mx = 0, my = 0, mz = 0;
+    for (let i = 0; i < n; i++) { mx += this.x[i]; my += this.y[i]; mz += this.z[i]; }
+    mx /= n; my /= n; mz /= n;
+    let sx = 0, sy = 0, sz = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = this.x[i] - mx, dy = this.y[i] - my, dz = this.z[i] - mz;
+      sx += dx * dx; sy += dy * dy; sz += dz * dz;
+    }
+    return {
+      stdX: Math.sqrt(sx / n),
+      stdY: Math.sqrt(sy / n),
+      stdZ: Math.sqrt(sz / n)
+    };
+  };
+
+  // Variance of nearest-neighbor distances. A rigid crystalline lattice has
+  // nearly-uniform NN distances (variance approaches 0). Real fluid has
+  // varying NN distances.
+  Fluid.prototype.nnStats = function () {
+    const n = this.n;
+    const nn = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let best = Infinity;
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        const dx = this.x[j] - this.x[i];
+        const dy = this.y[j] - this.y[i];
+        const dz = this.z[j] - this.z[i];
+        const r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < best) best = r2;
+      }
+      nn[i] = Math.sqrt(best);
+    }
+    let s = 0;
+    for (let i = 0; i < n; i++) s += nn[i];
+    const mean = s / n;
+    let v = 0;
+    for (let i = 0; i < n; i++) { const d = nn[i] - mean; v += d * d; }
+    const std = Math.sqrt(v / n);
+    return { mean: mean, std: std, cv: std / Math.max(1e-9, mean) };
+  };
+
   Fluid.prototype.allInBox = function () {
     const eps = 1e-3;
     const h = this.boxHalf + eps;

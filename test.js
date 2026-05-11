@@ -816,20 +816,31 @@
       }
     });
 
+    function parseGridSize(src) {
+      const m = src.match(/const\s+GRID_SIZE\s*=\s*(\d+)/);
+      assert(m, 'GRID_SIZE constant not found');
+      return parseInt(m[1], 10);
+    }
+    function parseDefaultN(src) {
+      const m = src.match(/if\s*\(!m\)\s*return\s+(\d+);/);
+      assert(m, 'default N literal not found in readParticleCount');
+      return parseInt(m[1], 10);
+    }
+
     test('gpu-mpm v48: CFL margin > 1.0 at current SIM_TUNE values', () => {
       // Pull SIM_TUNE.pressureK and restDensity literals out of the script
       // and compute the CFL margin. If a future edit raises K past the
       // stability cliff, this test fires before the user has to see
-      // blasting particles.
+      // blasting particles. Grid size + default N are parsed from source
+      // so changing them won't silently invalidate the test.
       const src = readMpmScript();
       const kMatch  = src.match(/pressureK:\s*_natRho\s*\*\s*(\d+(?:\.\d+)?)/);
       assert(kMatch, 'pressureK literal not found');
-      // restDensity == _natRho. natRho == N / 4. We test at N=8000 (default).
-      const N_DEFAULT = 8000;
+      const N_DEFAULT = parseDefaultN(src);
       const natRho = N_DEFAULT / 4;
       const K = natRho * parseFloat(kMatch[1]);
       const rho0 = natRho;
-      const cellSize = 2.0 / 32;     // BOX_HALF=1, GRID_SIZE=32
+      const cellSize = 2.0 / parseGridSize(src);
       const subDt = 1 / 240;
       const soundC = Math.sqrt(K / rho0);
       const cflDt = cellSize / soundC;
@@ -874,11 +885,11 @@
       // pressureK multipliers (over _natRho) for each preset, as authored
       // in gpu-mpm.html. If any preset exceeds the CFL ceiling at the
       // default substep dt the fluid blows up — test catches that before
-      // shipping. At N=24000 (current default), natRho = 6000.
+      // shipping. Grid size + default N are parsed from source.
       const src = readMpmScript();
-      const N_DEFAULT = 24000;
+      const N_DEFAULT = parseDefaultN(src);
       const natRho = N_DEFAULT / 4;
-      const cellSize = 2.0 / 32;
+      const cellSize = 2.0 / parseGridSize(src);
       const subDt = 1 / 240;
       // Pull every "pressureK: _natRho * NUMBER" line from FLUID_PRESETS.
       const re = /pressureK:\s*_natRho\s*\*\s*(\d+(?:\.\d+)?)/g;

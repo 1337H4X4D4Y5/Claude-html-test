@@ -255,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v51 (2026-05-11 — fluid presets (water/honey/syrup/mercury) + collapsible debug)';
+const APP_VERSION = 'mpm-v52 (2026-05-11 — grid 32^3 -> 48^3 (sharper surface, less numerical viscosity))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,7 +350,12 @@ function applyPreset(key) {
   }
 }
 const BOX_HALF = 1.0;
-const GRID_SIZE = 32;
+// v52: 32 → 48. 3.375x more cells (32^3=32768 → 48^3=110592). cs_clearGrid
+// and cs_grid scale with cell count; P2G/G2P stay particle-bound. CellSize
+// shrinks 0.0625 → 0.04167, tightening CFL margin (water 2.12x → 1.41x,
+// mercury 1.68x → 1.12x — still > 1.05). Pays off as sharper surface
+// features and less numerical viscosity from grid averaging.
+const GRID_SIZE = 48;
 const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;
 const CELL_SIZE = (2 * BOX_HALF) / GRID_SIZE;
 // v50: 0.014 → 0.020. At v49's N=8000 and r=0.014, average inter-particle

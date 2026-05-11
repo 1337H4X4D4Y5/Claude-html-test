@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v83 (2026-05-11 — fix vertical streaks (caustics use nSmooth, darker wireframe))';
+const APP_VERSION = 'mpm-v84 (2026-05-11 — perf: half-res bloom + leaner depth/thickness blur)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1392,9 +1392,17 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // P.threshold contribute, and the contribution rises quadratically with
 // the excess so very-bright highlights bloom much harder than mildly
 // bright ones (matches real-world bloom from camera optics).
+// v84: bright extract reads 2x2 source pixels and averages, since the
+// target texture is half-res. Each half-res pixel summarises 4 full-res
+// pixels — cheap, mildly anti-aliased downsample.
 @fragment
 fn fs_bright(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-  let c = textureLoad(src, vec2<i32>(i32(frag.x), i32(frag.y)), 0).rgb;
+  let coord = vec2<i32>(i32(frag.x) * 2, i32(frag.y) * 2);
+  let c00 = textureLoad(src, coord, 0).rgb;
+  let c10 = textureLoad(src, coord + vec2<i32>(1, 0), 0).rgb;
+  let c01 = textureLoad(src, coord + vec2<i32>(0, 1), 0).rgb;
+  let c11 = textureLoad(src, coord + vec2<i32>(1, 1), 0).rgb;
+  let c = (c00 + c10 + c01 + c11) * 0.25;
   let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
   let excess = max(0.0, lum - P.threshold);
   let weight = excess * excess / (lum + 0.001);
@@ -1458,7 +1466,9 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let coord = vec2<i32>(i32(frag.x), i32(frag.y));
   let c = textureLoad(compositeTex, coord, 0).rgb;
-  let b = textureLoad(bloomTex, coord, 0).rgb;
+  // v84: bloom is half-resolution. Read with nearest upsample (coord/2);
+  // the bloom signal is already blurred so nearest is visually fine.
+  let b = textureLoad(bloomTex, coord / 2, 0).rgb;
   return vec4<f32>(c + b * P.intensity, 1.0);
 }
 `;
@@ -1872,16 +1882,26 @@ async function initAndRun() {
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
     // v81: bloom pipeline targets. compositeTex holds the un-bloomed
-    // fluid composite; bloomBright/BlurredTex are intermediate buffers
-    // for the bright-extract -> blur sequence.
-    const canvasFmtOpts = {
+    // fluid composite at full canvas resolution.
+    // v84: bloomBright/BlurredTex are HALF resolution — bloom blur is
+    // wide, and running it at quarter the pixels saves ~75% of bloom
+    // cost with no perceptible quality loss (the bloom signal is
+    // already gaussian-smooth).
+    const fullOpts = {
       size: { width: w, height: h },
       format: format,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     };
-    compositeTex   = device.createTexture(canvasFmtOpts);
-    bloomBrightTex = device.createTexture(canvasFmtOpts);
-    bloomBlurredTex= device.createTexture(canvasFmtOpts);
+    const halfW = Math.max(1, Math.floor(w / 2));
+    const halfH = Math.max(1, Math.floor(h / 2));
+    const halfOpts = {
+      size: { width: halfW, height: halfH },
+      format: format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    };
+    compositeTex    = device.createTexture(fullOpts);
+    bloomBrightTex  = device.createTexture(halfOpts);
+    bloomBlurredTex = device.createTexture(halfOpts);
     blurH1 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthRaw.createView() }] });
     blurV1 = device.createBindGroup({ layout: blurV.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthH.createView() }] });
     blurH2 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthV.createView() }] });
@@ -2157,10 +2177,12 @@ async function initAndRun() {
       p.draw(6, N); p.end();
     }
     // v73: blur the thickness texture. Horizontal then vertical, both
-    // gaussian (R=14, sigma~7.7 px) — kills the per-cell density bumps
-    // that Beer's law was amplifying into a visible dimple grid.
-    // v78: second H+V round to better smooth the now-wider thickness
-    // imposters (1.6x particleSize).
+    // gaussian — kills the per-cell density bumps that Beer's law was
+    // amplifying into a visible dimple grid.
+    // v78 added a 2nd H+V round to match a wider thickness imposter.
+    // v84 drops back to 1 round (R=20, sigma~11) — the wider radius
+    // (v80) already does the smoothing the second round was redundantly
+    // doing, ~50% cheaper thickness blur.
     {
       const p = enc2.beginRenderPass({
         colorAttachments: [{
@@ -2183,29 +2205,6 @@ async function initAndRun() {
       p.setPipeline(thicknessBlurV); p.setBindGroup(0, thickBlurVBind);
       p.draw(3, 1); p.end();
     }
-    // 2nd round: thicknessV -> thicknessH -> thicknessV.
-    {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [{
-          view: thicknessH.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear', storeOp: 'store',
-        }],
-      });
-      p.setPipeline(thicknessBlurH); p.setBindGroup(0, thickBlurHBind2);
-      p.draw(3, 1); p.end();
-    }
-    {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [{
-          view: thicknessV.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear', storeOp: 'store',
-        }],
-      });
-      p.setPipeline(thicknessBlurV); p.setBindGroup(0, thickBlurVBind);
-      p.draw(3, 1); p.end();
-    }
     // Depth.
     {
       const p = enc2.beginRenderPass({
@@ -2215,14 +2214,12 @@ async function initAndRun() {
       p.setPipeline(depthPipeline); p.setBindGroup(0, depthBindGroup);
       p.draw(6, N); p.end();
     }
-    // v78: 2 H+V rounds -> 3. v80: 3 -> 4 (final round added so the
-    // wider bilateral has more iterations to fully erase per-particle
-    // dimples while keeping the silhouette intact).
+    // v78: 2 H+V rounds -> 3 (smoother surface). v80: 3 -> 4 (vs dimples).
+    // v84: back to 3 H+V — v80's wider radius makes the 4th round
+    // redundant. ~25% cheaper depth-blur, no visible quality loss.
     const blurSeq = [
       { pipe: blurH, bind: blurH1, target: depthH },
       { pipe: blurV, bind: blurV1, target: depthV },
-      { pipe: blurH, bind: blurH2, target: depthH },
-      { pipe: blurV, bind: blurV2, target: depthV },
       { pipe: blurH, bind: blurH2, target: depthH },
       { pipe: blurV, bind: blurV2, target: depthV },
       { pipe: blurH, bind: blurH2, target: depthH },

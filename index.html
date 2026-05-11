@@ -5,787 +5,119 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#000000">
-<title>Water Box</title>
+<meta name="theme-color" content="#050913">
+<title>Water Box — home</title>
 <style>
+  :root { color-scheme: dark; }
   html, body {
     margin: 0; padding: 0;
-    width: 100%; height: 100%;
-    overflow: hidden;
-    background: #050913;
+    min-height: 100%; min-height: 100vh;
+    background: radial-gradient(ellipse at top, #142340 0%, #050913 60%);
     color: #e8f1ff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
     -webkit-user-select: none; user-select: none;
-    -webkit-touch-callout: none;
-    overscroll-behavior: none;
-    touch-action: none;
   }
-  canvas { display: block; width: 100vw; height: 100vh; }
-  #permission-overlay {
-    position: fixed; inset: 0;
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    gap: 22px;
-    background: radial-gradient(circle at 50% 40%, rgba(20,40,80,0.92), rgba(0,0,0,0.95));
-    z-index: 10;
+  body {
     padding:
-      env(safe-area-inset-top, 0)
-      env(safe-area-inset-right, 0)
-      env(safe-area-inset-bottom, 0)
-      env(safe-area-inset-left, 0);
-    text-align: center;
+      calc(env(safe-area-inset-top, 0) + 28px)
+      calc(env(safe-area-inset-right, 0) + 18px)
+      calc(env(safe-area-inset-bottom, 0) + 28px)
+      calc(env(safe-area-inset-left, 0) + 18px);
+    box-sizing: border-box;
+    display: flex; flex-direction: column;
+    align-items: stretch; max-width: 560px; margin: 0 auto;
+    gap: 16px;
   }
-  #permission-overlay h1 {
-    margin: 0; font-size: 26px; font-weight: 600; letter-spacing: 0.5px;
+  h1 {
+    margin: 0 0 6px;
+    font-size: 28px; font-weight: 700; letter-spacing: 0.3px;
   }
-  #permission-overlay p {
-    margin: 0 24px; font-size: 15px; opacity: 0.8; max-width: 320px; line-height: 1.4;
+  .sub {
+    margin: 0 0 14px;
+    font-size: 14px; opacity: 0.72; line-height: 1.45;
   }
-  #permission-btn {
-    appearance: none; -webkit-appearance: none;
-    border: none;
-    min-width: 240px; min-height: 56px;
-    padding: 0 28px;
-    border-radius: 28px;
-    background: linear-gradient(135deg, #4aa3ff, #2a7fb8);
-    color: #fff;
-    font-size: 17px; font-weight: 600;
-    letter-spacing: 0.3px;
-    cursor: pointer;
-    box-shadow: 0 8px 24px rgba(74,163,255,0.35);
-    -webkit-tap-highlight-color: transparent;
-  }
-  #permission-btn:active { transform: scale(0.98); }
-  #hint { font-size: 12px; opacity: 0.55; margin-top: 8px; }
-  #overlay-tests {
-    margin-top: 12px;
-    padding: 6px 14px;
-    border-radius: 14px;
-    font-size: 13px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: rgba(80,200,120,0.22);
-    color: #b6f0d4;
-    max-width: 320px;
-  }
-  #overlay-tests.fail { background: rgba(220,80,80,0.30); color: #ffc0c0; }
-  #overlay-tests.pending { background: rgba(160,160,180,0.18); color: #c8c8d4; }
-  #overlay-tests .fails {
-    margin-top: 6px;
-    font-size: 11px;
-    text-align: left;
-    line-height: 1.35;
-    word-break: break-word;
-  }
-  #fps {
-    position: fixed; top: env(safe-area-inset-top, 8px); left: 8px;
-    font-size: 11px; opacity: 0.5; pointer-events: none;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  #version {
-    position: fixed;
-    top: env(safe-area-inset-top, 8px);
-    right: calc(env(safe-area-inset-right, 8px) + 8px);
-    padding: 4px 9px;
-    border-radius: 10px;
-    background: rgba(74,163,255,0.18);
-    color: #cfe6ff;
-    font-size: 11px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    pointer-events: none;
-    z-index: 20;
-  }
-  #overlay-version {
-    margin-top: 4px;
-    font-size: 12px;
-    opacity: 0.55;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  #debug {
-    position: fixed;
-    bottom: calc(env(safe-area-inset-bottom, 8px) + 8px);
-    left: 8px;
-    right: 8px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    background: rgba(0,0,0,0.55);
-    color: #cfe6ff;
-    font-size: 11px;
-    line-height: 1.5;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    z-index: 20;
-    white-space: pre;
-  }
-  #debug-text { pointer-events: none; }
-  #copy-btn {
-    appearance: none; -webkit-appearance: none;
+  a.card {
     display: block;
-    margin-top: 8px;
-    width: 100%;
-    min-height: 40px;
-    border: none;
-    border-radius: 8px;
-    background: rgba(74,163,255,0.30);
-    color: #fff;
-    font-size: 14px;
-    font-weight: 600;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
+    padding: 16px 18px;
+    border-radius: 14px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #e8f1ff;
+    text-decoration: none;
+    transition: transform 0.06s ease, background 0.15s ease;
   }
-  #copy-btn:active { transform: scale(0.98); background: rgba(74,163,255,0.45); }
-  #copy-btn.copied { background: rgba(80,200,120,0.45); }
-  #reset-btn {
-    appearance: none; -webkit-appearance: none;
-    display: block; margin-top: 6px; width: 100%; min-height: 36px;
-    border: none; border-radius: 8px;
-    background: rgba(220,140,80,0.30); color: #fff;
-    font-size: 13px; font-weight: 600;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  a.card:active { transform: scale(0.985); background: rgba(255,255,255,0.09); }
+  a.card.primary { background: linear-gradient(135deg, rgba(74,163,255,0.25), rgba(42,127,184,0.18)); border-color: rgba(74,163,255,0.5); }
+  a.card.gpu { background: linear-gradient(135deg, rgba(160,90,255,0.22), rgba(70,40,150,0.18)); border-color: rgba(160,90,255,0.5); }
+  a.card.diag { background: rgba(255,255,255,0.03); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .name { font-size: 17px; font-weight: 600; }
+  .tag {
+    font-size: 11px; padding: 3px 8px; border-radius: 999px;
+    background: rgba(255,255,255,0.12); color: #cfe6ff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  #reset-btn:active { transform: scale(0.98); }
+  .desc { margin-top: 6px; font-size: 13px; opacity: 0.78; line-height: 1.45; }
+  .section-title {
+    margin: 12px 0 -4px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1.4px;
+    opacity: 0.55; font-weight: 600;
+  }
+  footer {
+    margin-top: 20px;
+    font-size: 11px; opacity: 0.45;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-align: center; line-height: 1.6;
+  }
+  footer a { color: inherit; text-decoration: none; opacity: 0.8; }
 </style>
-<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="sim.js?v=26"></script>
-<script src="test.js?v=26"></script>
 </head>
 <body>
-<div id="permission-overlay">
-  <h1>Water Box</h1>
-  <p>Tilt your phone to slosh the water inside the glass. On iPhone, tap below to allow motion access.</p>
-  <button id="permission-btn">Tap to begin</button>
-  <div id="overlay-tests" class="pending">Unit tests: running…</div>
-  <div id="hint">Desktop: drag the canvas to tilt</div>
-  <div id="overlay-version"></div>
-</div>
-<div id="fps"></div>
-<div id="version"></div>
-<div id="debug"><div id="debug-text">gyro: waiting…</div><button id="copy-btn">Copy debug info</button><button id="reset-btn">Reset simulation</button></div>
-<script>
-(function () {
-  'use strict';
 
-  // ---------- Version ----------
-  // Bump this on every commit so you can verify the page rebuilt.
-  const APP_VERSION = 'v26 (2026-05-10 — fluid-focused debug + soft blobs)';
-  document.getElementById('version').textContent = APP_VERSION;
-  document.getElementById('overlay-version').textContent = APP_VERSION;
+<h1>Water Box</h1>
+<p class="sub">Gyroscope-driven 3D fluid simulation experiments. Tilt your phone to drag the fluid around.</p>
 
-  // Surface unit-test results on the permission overlay so we know the
-  // shipped build is sound before tapping in.
-  (function showTestResults() {
-    const el = document.getElementById('overlay-tests');
-    const results = window.__TEST_RESULTS__ || [];
-    if (!results.length) {
-      el.textContent = 'Unit tests: not loaded';
-      el.className = 'fail';
-      return;
-    }
-    let pass = 0, fail = 0;
-    const failNames = [];
-    for (const r of results) {
-      if (r.pass) pass++;
-      else { fail++; failNames.push(r.name); }
-    }
-    if (fail === 0) {
-      el.textContent = 'Unit tests: ' + pass + ' passed ✓';
-      el.className = '';
-    } else {
-      el.innerHTML =
-        '<div>Unit tests: ' + pass + ' passed, ' + fail + ' failed ✗</div>' +
-        '<div class="fails">' + failNames.map(function (n) { return '• ' + n; }).join('<br>') + '</div>';
-      el.className = 'fail';
-    }
-  })();
+<div class="section-title">Simulations</div>
 
-  // ---------- Constants ----------
-  const GRID_N = 64;
-  const BOX_SIZE = 2.0;
-  const WATER_REST_Y = -0.35;
-  const MAX_PARTICLES = 300;
-  // CFL stability for 2D wave equation: WAVE_C * dt / dx <= 1/sqrt(2) ~ 0.707.
-  // With dx = 2/63, dt = 1/120 (substep cap below), critical is c <= 1.78.
-  // We use c = 0.6 for very generous margin so any browser timing weirdness
-  // can't push us into the unstable regime.
-  const WAVE_C = 0.6;
-  // Velocity drag (1/s). Damps motion without biasing the equilibrium.
-  // Set above half-critical so transient overshoot stays modest under any
-  // gyro orientation (verified by the gyro-sweep unit test).
-  const VEL_DAMPING = 3.5;
-  // Tiny amplitude floor for numerical hygiene only.
-  const AMP_DAMPING = 0.9999;
-  // Spring stiffness pulling surface toward the gravity-tilted equilibrium plane.
-  // Higher = surface follows the phone more rigidly. Units roughly 1/s^2.
-  const TILT_STIFFNESS = 10.0;
-  // Below this vertical-gravity magnitude (phone near-vertical) the equilibrium
-  // tilt blows up; clamp to keep the sim bounded.
-  const MIN_VERTICAL_G = 3.0;
-  // Hard cap on how steep the equilibrium plane can be (in scene units across
-  // half the box). Prevents extreme tilts from driving heights past the box.
-  const MAX_EQ_AMP = 0.30;
-  const SPAWN_THRESHOLD = 1.8;
-  const SPAWN_PROBABILITY = 0.15;
-  const PARTICLE_LIFE = 1.5;
-  const GRAVITY_MAG = 9.8;
-  const PIXEL_RATIO_CAP = 2;
-  const DT_CLAMP_MIN = 1 / 240;
-  const DT_CLAMP_MAX = 1 / 30;
-  // Substep cap: each physics step uses at most this dt. Smaller value gives
-  // the wave equation more CFL margin; we use 1/120 so even a 30fps frame
-  // produces only sub-1/60-safe substeps.
-  const FIXED_DT = 1 / 120;
+<a class="card primary" href="./cpu.html">
+  <div class="row">
+    <span class="name">CPU fluid (SPH)</span>
+    <span class="tag">v26</span>
+  </div>
+  <div class="desc">600-particle SPH with position projection, runs in JavaScript on the CPU. Soft additive blue sprites. Tap-to-begin permission flow, full debug overlay, 37 unit tests.</div>
+</a>
 
-  const DEG2RAD = Math.PI / 180;
+<a class="card gpu" href="./gpu.html">
+  <div class="row">
+    <span class="name">GPU fluid (WebGPU)</span>
+    <span class="tag">v28</span>
+  </div>
+  <div class="desc">WebGPU compute-shader build. 4000 particles, gravity + wall collisions, no inter-particle pressure yet. Next versions add SPH on the GPU for more realistic fluid behaviour.</div>
+</a>
 
-  // ---------- Three.js setup ----------
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x050913);
-  scene.fog = new THREE.Fog(0x050913, 6, 14);
+<div class="section-title">Diagnostics</div>
 
-  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
-  camera.position.set(0, 1.6, 4.0);
-  camera.lookAt(0, 0, 0);
+<a class="card diag" href="./test.html">
+  <div class="row">
+    <span class="name">Unit tests</span>
+    <span class="tag">37</span>
+  </div>
+  <div class="desc">Run the full simulation test suite in the browser. Validates the CPU sim's stability under sustained gravity, gyro sweep, splash pokes, and lattice-collapse regression tests.</div>
+</a>
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, PIXEL_RATIO_CAP));
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
-  document.body.appendChild(renderer.domElement);
+<a class="card diag" href="./webgpu-check.html">
+  <div class="row">
+    <span class="name">WebGPU support check</span>
+    <span class="tag">diag</span>
+  </div>
+  <div class="desc">Verifies that your device's Safari can run WebGPU compute shaders end-to-end. Useful if the GPU build above misbehaves.</div>
+</a>
 
-  // ---------- Lights ----------
-  scene.add(new THREE.AmbientLight(0x8090b0, 0.55));
-  const keyLight = new THREE.DirectionalLight(0xffffff, 1.0);
-  keyLight.position.set(3, 5, 2);
-  scene.add(keyLight);
-  const fillLight = new THREE.HemisphereLight(0x88aaff, 0x202030, 0.45);
-  scene.add(fillLight);
+<footer>
+  <a href="https://github.com/1337H4X4D4Y5/Claude-html-test">github</a>
+  · iOS 18+ Safari · Apple GPU · WebGPU + WebGL2
+</footer>
 
-  // ---------- Glass box ----------
-  const halfBox = BOX_SIZE / 2;
-  const boxGeom = new THREE.BoxGeometry(BOX_SIZE, BOX_SIZE, BOX_SIZE);
-  const boxMat = new THREE.MeshPhongMaterial({
-    color: 0x88ccff,
-    transparent: true,
-    opacity: 0.05,
-    shininess: 120,
-    specular: 0xffffff,
-    side: THREE.BackSide,
-    depthWrite: false
-  });
-  const boxMesh = new THREE.Mesh(boxGeom, boxMat);
-  boxMesh.renderOrder = 0;
-  scene.add(boxMesh);
-
-  const edgeGeom = new THREE.EdgesGeometry(boxGeom);
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0xa8d8ff, transparent: true, opacity: 0.85 });
-  const edgeLines = new THREE.LineSegments(edgeGeom, edgeMat);
-  edgeLines.renderOrder = 3;
-  scene.add(edgeLines);
-
-  // Floor inside box (helps depth perception)
-  const floorGeom = new THREE.PlaneGeometry(BOX_SIZE, BOX_SIZE);
-  const floorMat = new THREE.MeshPhongMaterial({ color: 0x102030, side: THREE.DoubleSide, shininess: 30 });
-  const floorMesh = new THREE.Mesh(floorGeom, floorMat);
-  floorMesh.rotation.x = -Math.PI / 2;
-  floorMesh.position.y = -halfBox + 0.001;
-  scene.add(floorMesh);
-
-  // ---------- Particle fluid ----------
-  // v24: drop the height field surface entirely. Render a swarm of particles
-  // that fall under gravity, collide with the cube walls, and repel each
-  // other. This actually feels like fluid in 3D — particles pile up at the
-  // lowest face, slosh when you tilt, bounce off walls.
-  const FLUID_N = 600;
-  const fluid = new Fluid(FLUID_N, {
-    boxHalf: halfBox - 0.06,
-    interactRadius: 0.13,
-    pressureK: 60.0,
-    viscosity: 0.6,
-    posCorrection: 0.9,
-    posIterations: 4,
-    restitution: 0.15,
-    velDamping: 0.992,
-    maxSpeed: 9.0
-  });
-  fluid.seed(7);
-
-  // Soft additive sprites: each particle renders as a fuzzy blue blob.
-  // Overlapping particles blend into a continuous fluid glow rather than
-  // looking like discrete marbles.
-  function makeFluidSprite() {
-    const size = 128;
-    const c = document.createElement('canvas');
-    c.width = c.height = size;
-    const ctx = c.getContext('2d');
-    const grd = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
-    grd.addColorStop(0.0, 'rgba(200,230,255,0.85)');
-    grd.addColorStop(0.35, 'rgba(90,170,255,0.55)');
-    grd.addColorStop(0.75, 'rgba(40,110,200,0.18)');
-    grd.addColorStop(1.0, 'rgba(20,60,150,0)');
-    ctx.fillStyle = grd;
-    ctx.fillRect(0, 0, size, size);
-    const tex = new THREE.CanvasTexture(c);
-    if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace;
-    tex.needsUpdate = true;
-    return tex;
-  }
-  const fluidGeom = new THREE.BufferGeometry();
-  const fluidPositions = new Float32Array(FLUID_N * 3);
-  fluidGeom.setAttribute('position', new THREE.BufferAttribute(fluidPositions, 3));
-  const fluidMat = new THREE.PointsMaterial({
-    size: 0.22,
-    map: makeFluidSprite(),
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    color: 0xffffff,
-    sizeAttenuation: true
-  });
-  const fluidPoints = new THREE.Points(fluidGeom, fluidMat);
-  fluidPoints.renderOrder = 2;
-  scene.add(fluidPoints);
-
-  function updateFluidRender() {
-    for (let i = 0; i < FLUID_N; i++) {
-      fluidPositions[i * 3 + 0] = fluid.x[i];
-      fluidPositions[i * 3 + 1] = fluid.y[i];
-      fluidPositions[i * 3 + 2] = fluid.z[i];
-    }
-    fluidGeom.attributes.position.needsUpdate = true;
-  }
-  // A nominal HeightField is kept around so the legacy debug fields in the
-  // copy-debug report don't break — it isn't simulated or rendered.
-  const field = new HeightField(8);
-
-  // Legacy helpers removed in v24 — no plane to convert grid coords to world.
-
-  // v24: legacy 'splash' system removed. The fluid particles ARE the water now.
-  // Stubs kept to avoid touching all the debug-report code that references them.
-  const particles = [];   // empty array — 'alive splashes: 0 / 0' in debug
-
-  // ---------- Gravity (gyroscope + fallback) ----------
-  const gravity = new THREE.Vector3(0, -GRAVITY_MAG, 0);
-  const gravityTarget = new THREE.Vector3(0, -GRAVITY_MAG, 0);
-
-  // Diagnostics: surfaced in the on-screen debug panel.
-  const gyro = {
-    permission: 'unknown',  // 'unknown' | 'granted' | 'denied' | 'no-api' | 'error'
-    eventCount: 0,
-    lastBeta: 0,
-    lastGamma: 0,
-    lastEventTime: 0
-  };
-
-  function updateGravityFromOrientation(beta, gamma) {
-    // Use the shared, unit-tested mapping from sim.js.
-    const orient = (screen.orientation && typeof screen.orientation.angle === 'number')
-      ? screen.orientation.angle
-      : (typeof window.orientation === 'number' ? window.orientation : 0);
-    const g = mapOrientationToGravity(beta, gamma, orient, GRAVITY_MAG);
-    gravityTarget.set(g.x, g.y, g.z);
-  }
-
-  function onDeviceOrientation(e) {
-    gyro.eventCount++;
-    gyro.lastBeta = e.beta || 0;
-    gyro.lastGamma = e.gamma || 0;
-    gyro.lastEventTime = performance.now();
-    updateGravityFromOrientation(e.beta, e.gamma);
-  }
-
-  // ---------- iOS permission flow ----------
-  const overlay = document.getElementById('permission-overlay');
-  const permissionBtn = document.getElementById('permission-btn');
-
-  function attachOrientationListener() {
-    window.addEventListener('deviceorientation', onDeviceOrientation, true);
-  }
-
-  function hideOverlay() {
-    overlay.style.display = 'none';
-  }
-
-  permissionBtn.addEventListener('click', function () {
-    if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      DeviceOrientationEvent.requestPermission().then(function (state) {
-        gyro.permission = state;
-        if (state === 'granted') attachOrientationListener();
-        hideOverlay();
-      }).catch(function (err) {
-        gyro.permission = 'error: ' + (err && err.message ? err.message : 'unknown');
-        hideOverlay();
-      });
-    } else {
-      gyro.permission = (typeof DeviceOrientationEvent === 'undefined') ? 'no-api' : 'granted';
-      attachOrientationListener();
-      hideOverlay();
-    }
-  });
-
-  // ---------- Pointer-drag fallback for desktop testing ----------
-  let dragging = false, dragStartX = 0, dragStartY = 0;
-  renderer.domElement.addEventListener('pointerdown', function (e) {
-    dragging = true; dragStartX = e.clientX; dragStartY = e.clientY;
-  });
-  renderer.domElement.addEventListener('pointermove', function (e) {
-    if (!dragging) return;
-    const dx = (e.clientX - dragStartX) / window.innerWidth;
-    const dy = (e.clientY - dragStartY) / window.innerHeight;
-    const tx = Math.max(-1, Math.min(1, dx * 2));
-    const tz = Math.max(-1, Math.min(1, dy * 2));
-    gravityTarget.set(tx, -1.0, tz).normalize().multiplyScalar(GRAVITY_MAG);
-  });
-  function endDrag() {
-    if (!dragging) return;
-    dragging = false;
-    gravityTarget.set(0, -1, 0).multiplyScalar(GRAVITY_MAG);
-  }
-  renderer.domElement.addEventListener('pointerup', endDrag);
-  renderer.domElement.addEventListener('pointercancel', endDrag);
-
-  // ---------- Pointer-drag fallback DISABLED in v11 ----------
-  // No input is attached to the canvas. gravityTarget stays at (0, -G, 0).
-  const canvas = renderer.domElement;
-  // Prevent default touch behaviors on canvas (extra safety on iOS).
-  canvas.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
-
-  // ---------- Resize / orientation change ----------
-  function onResize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, PIXEL_RATIO_CAP));
-    renderer.setSize(w, h);
-  }
-  window.addEventListener('resize', onResize);
-  window.addEventListener('orientationchange', onResize);
-  if (screen.orientation && screen.orientation.addEventListener) {
-    screen.orientation.addEventListener('change', onResize);
-  }
-
-  // ---------- FPS + gyro debug overlays ----------
-  const fpsEl = document.getElementById('fps');
-  const debugTextEl = document.getElementById('debug-text');
-  const copyBtn = document.getElementById('copy-btn');
-  let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
-  let debugTimer = 0;
-  let lastFps = 0;
-  function formatNum(v, w) {
-    const s = (v >= 0 ? ' ' : '') + v.toFixed(2);
-    return s.padStart(w || 6, ' ');
-  }
-  function buildDebugText() {
-    const age = gyro.lastEventTime
-      ? ((performance.now() - gyro.lastEventTime) / 1000).toFixed(1) + 's ago'
-      : 'never';
-    return (
-      'gyro: ' + gyro.permission +
-      '  events: ' + gyro.eventCount +
-      '  last: ' + age + '\n' +
-      'β: ' + formatNum(gyro.lastBeta) +
-      '  γ: ' + formatNum(gyro.lastGamma) + '\n' +
-      'gravity   x:' + formatNum(gravity.x) +
-      ' y:' + formatNum(gravity.y) +
-      ' z:' + formatNum(gravity.z) + '\n' +
-      'target    x:' + formatNum(gravityTarget.x) +
-      ' y:' + formatNum(gravityTarget.y) +
-      ' z:' + formatNum(gravityTarget.z)
-    );
-  }
-  function updateDebug() {
-    debugTextEl.textContent = buildDebugText();
-  }
-  // ---------- On-device sanity check ----------
-  // Run a fresh sim with the EXACT same setup as the live one and report
-  // peak max|h| over 200 steps. In Node this peaks at ~0.115 then decays.
-  // If the iPhone reports something wildly different, the bug is below
-  // sim.js (JS engine, Float32Array semantics, etc).
-  const _selfTest = (function () {
-    const f2 = new HeightField(GRID_N, {
-      boxSize: BOX_SIZE,
-      waveC: WAVE_C,
-      velDamping: VEL_DAMPING,
-      ampDamping: AMP_DAMPING,
-      tiltStiffness: TILT_STIFFNESS,
-      minVerticalG: MIN_VERTICAL_G,
-      maxEqAmp: MAX_EQ_AMP
-    });
-    f2.pokeGaussian(GRID_N >> 1, GRID_N >> 1, 0.12, 3.5);
-    f2.pokeGaussian((GRID_N >> 1) - 10, (GRID_N >> 1) + 8, 0.07, 3.0);
-    f2.pokeGaussian((GRID_N >> 1) + 12, (GRID_N >> 1) - 6, 0.07, 3.0);
-    f2.startAtRest();
-    let peak = 0;
-    for (let s = 0; s < 200; s++) {
-      f2.step(1 / 60, 0, -9.8, 0);
-      const m = f2.maxAbsHeight();
-      if (m > peak) peak = m;
-    }
-    let final = f2.maxAbsHeight();
-    let finalAdj = 0;
-    for (let j = 1; j < f2.n - 1; j++) {
-      for (let i = 1; i < f2.n - 2; i++) {
-        const k = j * f2.n + i;
-        const d = Math.abs(f2.h[k] - f2.h[k + 1]);
-        if (d > finalAdj) finalAdj = d;
-      }
-    }
-    return { peak: peak, final: final, finalAdj: finalAdj };
-  })();
-
-  // Snapshot the live field's initial seed amplitude for comparison.
-  const _liveInitialMaxH = field.maxAbsHeight();
-
-  // Time-series of max|h| sampled every 0.5s. Lets us see exactly when the
-  // simulation transitions from calm to explosive on the device.
-  const TIMELINE_INTERVAL = 0.5;
-  const TIMELINE_LEN = 30; // last 15 seconds
-  const timeline = [];
-  let timelineTimer = 0;
-  const startWallTime = performance.now();
-  let stepsRun = 0;
-  // Per-step max|h| trace: stops growing once explosion is captured so we
-  // preserve the lead-up.
-  const STEP_TRACE_LEN = 100;
-  const stepTrace = [];
-  let stepTraceFrozen = false;
-  // Capture a snapshot the FIRST time max|h| crosses the explosion threshold.
-  let lastFrameMaxH = 0;
-  let explosion = null;
-  function captureExplosionSnapshot() {
-    const N = field.n;
-    const h = field.h;
-    const hp = field.hPrev;
-    const halfN = (N - 1) / 2;
-    // Sample row j = N/2 across i (every 4th cell), and column i = N/2 across j.
-    const rowH = [], rowHp = [];
-    for (let i = 0; i < N; i += 4) {
-      rowH.push(h[(N >> 1) * N + i]);
-      rowHp.push(hp[(N >> 1) * N + i]);
-    }
-    const colH = [];
-    for (let j = 0; j < N; j += 4) colH.push(h[j * N + (N >> 1)]);
-    // Adjacent-cell histogram: count how many adjacent pairs are >0.3 apart.
-    let bigJumps = 0, totalPairs = 0;
-    for (let j = 0; j < N; j++) {
-      for (let i = 0; i < N - 1; i++) {
-        totalPairs++;
-        if (Math.abs(h[j * N + i] - h[j * N + i + 1]) > 0.3) bigJumps++;
-      }
-    }
-    return {
-      t: ((performance.now() - startWallTime) / 1000),
-      stepsRun: stepsRun,
-      maxH: field.maxAbsHeight(),
-      rowH: rowH.map(function (v) { return v.toFixed(3); }),
-      rowHp: rowHp.map(function (v) { return v.toFixed(3); }),
-      colH: colH.map(function (v) { return v.toFixed(3); }),
-      bigJumps: bigJumps,
-      totalPairs: totalPairs
-    };
-  }
-  function pushTimeline() {
-    let madj = 0;
-    const N = field.n;
-    const h = field.h;
-    for (let j = 1; j < N - 1; j++) {
-      for (let i = 1; i < N - 2; i++) {
-        const k = j * N + i;
-        const d = Math.abs(h[k] - h[k + 1]);
-        if (d > madj) madj = d;
-      }
-    }
-    timeline.push({
-      t: ((performance.now() - startWallTime) / 1000),
-      maxH: field.maxAbsHeight(),
-      maxAdj: madj
-    });
-    while (timeline.length > TIMELINE_LEN) timeline.shift();
-  }
-
-  function buildFullReport() {
-    const sp = fluid.spread();
-    const nn = fluid.nnStats();
-    const com = fluid.centerOfMass();
-    const ke = fluid.totalKE();
-    return [
-      '=== Water Box debug report ===',
-      'version:    ' + APP_VERSION,
-      'sim:        ' + (typeof SIM_VERSION !== 'undefined' ? SIM_VERSION : 'UNKNOWN (stale sim.js cached!)'),
-      'time:       ' + new Date().toISOString(),
-      'fps:        ' + lastFps.toFixed(1),
-      '',
-      '-- gyro --',
-      'permission: ' + gyro.permission,
-      'events:     ' + gyro.eventCount,
-      'last evt:   ' + (gyro.lastEventTime
-        ? ((performance.now() - gyro.lastEventTime) / 1000).toFixed(2) + 's ago'
-        : 'never'),
-      'beta:       ' + gyro.lastBeta.toFixed(3),
-      'gamma:      ' + gyro.lastGamma.toFixed(3),
-      'screen.orientation.angle: ' +
-        ((screen.orientation && typeof screen.orientation.angle === 'number')
-          ? screen.orientation.angle
-          : 'n/a'),
-      '',
-      '-- gravity --',
-      'gravity x:  ' + gravity.x.toFixed(3),
-      'gravity y:  ' + gravity.y.toFixed(3),
-      'gravity z:  ' + gravity.z.toFixed(3),
-      '',
-      '-- fluid (' + fluid.n + ' particles) --',
-      'spread (std): x=' + sp.stdX.toFixed(3) +
-                  '  y=' + sp.stdY.toFixed(3) +
-                  '  z=' + sp.stdZ.toFixed(3) +
-                  '   ← low value on any axis = pile collapsed in that direction',
-      'center of mass:   x=' + com.x.toFixed(3) +
-                       '  y=' + com.y.toFixed(3) +
-                       '  z=' + com.z.toFixed(3) +
-                       '   ← should follow gravity direction',
-      'nearest-neighbor: mean=' + nn.mean.toFixed(3) +
-                       '  std=' + nn.std.toFixed(3) +
-                       '  cv=' + nn.cv.toFixed(3) +
-                       '   ← cv < 0.05 means crystalline lattice',
-      'kinetic energy:   ' + ke.toFixed(2) +
-                       '   ← high = vibrating; low = settled',
-      'integrity:        ' + (fluid.allInBox() ? 'all in box' : 'ESCAPED') +
-                       '   ' + (fluid.hasNaN() ? 'HAS NaN' : 'no NaN'),
-      'steps run total:  ' + stepsRun,
-      '',
-      '-- unit tests (run on load) --',
-      (function () {
-        const r = window.__TEST_RESULTS__ || [];
-        if (!r.length) return 'tests not loaded';
-        let p = 0, f = 0;
-        const fails = [];
-        for (const t of r) {
-          if (t.pass) p++;
-          else { f++; fails.push('  FAIL ' + t.name + ' — ' + t.msg); }
-        }
-        return p + ' passed, ' + f + ' failed' + (fails.length ? '\n' + fails.join('\n') : '');
-      })(),
-      '',
-      '-- environment --',
-      'window:        ' + window.innerWidth + 'x' + window.innerHeight,
-      'devicePixelRatio: ' + (window.devicePixelRatio || 1),
-      'WebGL:         ' + (renderer.capabilities && renderer.capabilities.isWebGL2 ? 'WebGL2' : 'WebGL1'),
-      'userAgent:     ' + navigator.userAgent
-    ].join('\n');
-  }
-  document.getElementById('reset-btn').addEventListener('click', function () {
-    fluid.seed(Math.floor(Math.random() * 1e6) + 1);
-    timeline.length = 0;
-    timelineTimer = 0;
-    stepsRun = 0;
-    lastFrameMaxH = 0;
-    explosion = null;
-    stepTrace.length = 0;
-    stepTraceFrozen = false;
-  });
-
-  copyBtn.addEventListener('click', function () {
-    const text = buildFullReport();
-    function showCopied() {
-      copyBtn.textContent = 'Copied! ✓';
-      copyBtn.classList.add('copied');
-      setTimeout(function () {
-        copyBtn.textContent = 'Copy debug info';
-        copyBtn.classList.remove('copied');
-      }, 1500);
-    }
-    function fallback() {
-      // Legacy fallback: a textarea + execCommand. Still works in iOS Safari
-      // when navigator.clipboard isn't available or fails.
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.top = '0';
-      ta.style.left = '0';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      let ok = false;
-      try { ok = document.execCommand('copy'); } catch (_) {}
-      document.body.removeChild(ta);
-      if (ok) showCopied();
-      else {
-        copyBtn.textContent = 'Copy failed — long-press text';
-        setTimeout(function () {
-          copyBtn.textContent = 'Copy debug info';
-        }, 2000);
-      }
-    }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(showCopied, fallback);
-    } else {
-      fallback();
-    }
-  });
-
-  // ---------- Main loop ----------
-  let lastT = performance.now() / 1000;
-  function loop() {
-    requestAnimationFrame(loop);
-
-    const nowT = performance.now() / 1000;
-    let dt = nowT - lastT;
-    lastT = nowT;
-
-    if (document.hidden) return;
-    if (dt > DT_CLAMP_MAX) dt = DT_CLAMP_MAX;
-    if (dt < DT_CLAMP_MIN) dt = DT_CLAMP_MIN;
-
-    // Smoothly approach gravity target.
-    gravity.lerp(gravityTarget, 0.15);
-
-    // v24: step the particle fluid. Each substep runs the SPH-style
-    // pressure + viscosity + gravity + wall-collision pass.
-    let acc = dt;
-    let safety = 8;
-    while (acc > 0 && safety-- > 0) {
-      const step = Math.min(FIXED_DT, acc);
-      fluid.step(step, gravity.x, gravity.y, gravity.z);
-      stepsRun++;
-      // Per-step trace: max|h| right after each physics step.
-      if (!stepTraceFrozen) {
-        const m = field.maxAbsHeight();
-        stepTrace.push(m);
-        while (stepTrace.length > STEP_TRACE_LEN) stepTrace.shift();
-        if (m >= 0.3) stepTraceFrozen = true;
-      }
-      acc -= step;
-    }
-
-    updateFluidRender();
-    renderer.render(scene, camera);
-
-    // FPS readout.
-    fpsAccum += dt; fpsFrames++; fpsTimer += dt;
-    if (fpsTimer > 0.5) {
-      lastFps = fpsFrames / fpsAccum;
-      fpsEl.textContent = lastFps.toFixed(0) + ' fps';
-      fpsAccum = 0; fpsFrames = 0; fpsTimer = 0;
-    }
-
-    // Debug panel ~5 Hz to keep it readable.
-    debugTimer += dt;
-    if (debugTimer > 0.2) { updateDebug(); debugTimer = 0; }
-
-    // Timeline sampler.
-    timelineTimer += dt;
-    if (timelineTimer > TIMELINE_INTERVAL) { pushTimeline(); timelineTimer = 0; }
-
-    // Explosion detector: snapshot the FIRST frame max|h| crosses 0.3.
-    const curMaxH = field.maxAbsHeight();
-    if (!explosion && lastFrameMaxH < 0.3 && curMaxH >= 0.3) {
-      explosion = captureExplosionSnapshot();
-    }
-    lastFrameMaxH = curMaxH;
-  }
-  loop();
-})();
-</script>
 </body>
 </html>

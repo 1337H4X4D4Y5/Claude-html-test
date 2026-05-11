@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v69</span>
+    <span class="tag">v70</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v69 fixes "water never stops" by killing the APIC C-matrix faster (viscosity 0.005 → 0.02). Damping particle velocity alone wasn't enough; the affine gradient kept re-injecting momentum every frame.</div>
+  <div class="desc">MLS-MPM on the GPU. v70 dials viscosity back to 0.01 — v69's 0.02 was killing the APIC affine gradient fast enough to leave PIC-style grid plateaus on the surface. The new value lets water settle in a few seconds without exposing the underlying grid.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

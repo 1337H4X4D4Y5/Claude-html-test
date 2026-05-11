@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v69 (2026-05-11 — kill APIC C-matrix faster so water actually rests)';
+const APP_VERSION = 'mpm-v70 (2026-05-11 — viscosity 0.02 -> 0.01 (remove grid-pattern artefacts))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,15 +350,16 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      // v69: water still never stopped. velDamping was 2.6%/sec but the
-      // APIC C-matrix (affine velocity gradient per particle) was decaying
-      // at only 30%/sec via viscosity 0.005 — so even with particle
-      // velocity zeroed by damping, P2G kept injecting `C * dpos`
-      // momentum into the grid and the fluid vibrated around rest.
-      // Bump viscosity to 0.02 (C decays to ~1%/sec) and maxAccel to 60
-      // so the pressure response isn't clamped during settling spikes.
+      // v70: viscosity dialled back from 0.02 to 0.01. v69's 0.02 killed
+      // the APIC C-matrix fast enough that the solver was effectively
+      // running as PIC inside settled regions, which creates grid-
+      // aligned momentum plateaus visible as a checker pattern on the
+      // surface. 0.01 keeps enough affine spread to avoid grid artifacts
+      // while still killing C in ~3 seconds (per-sec 0.99^240 ≈ 9%
+      // retained). Pair with velDamping 0.985 and the fluid still
+      // reaches near-rest within a few seconds.
       pressureKMul: 30, velDamping: 0.985, restitution: 0.0,
-      wallFriction: 0.85, viscosity: 0.02, maxAccel: 60.0,
+      wallFriction: 0.85, viscosity: 0.01, maxAccel: 50.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
       // v59: screen-space refraction strength in pixels.

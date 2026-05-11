@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v99 (2026-05-11 — perf tests + frame-time telemetry (avg/max ms))';
+const APP_VERSION = 'mpm-v100 (2026-05-11 — DPR cap 2 -> 1.5 (44% fewer render pixels))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1570,7 +1570,12 @@ fn fs_main() -> @location(0) vec4<f32> {
 
 async function initAndRun() {
   const canvas = document.getElementById('gpu-canvas');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  // v100 perf: DPR cap 2 -> 1.5. On iPhone (DPR=3 native) we previously
+  // rendered at 2x logical resolution; 1.5x is still well above the
+  // retina threshold but cuts every render pass's pixel count by ~44%.
+  // Bilateral depth blur, thickness blur, composite, bloom all scale
+  // linearly with pixel count — biggest single GPU win available.
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   canvas.width = Math.floor(canvas.clientWidth * dpr);
   canvas.height = Math.floor(canvas.clientHeight * dpr);
   window.addEventListener('resize', function () {

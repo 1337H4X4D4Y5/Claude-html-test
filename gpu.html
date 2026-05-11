@@ -143,32 +143,36 @@
 <div id="settings-panel">
   <div class="label">Particles</div>
   <div class="count" id="settings-count">4000</div>
-  <input id="settings-slider" type="range" min="500" max="12000" step="500" value="4000">
+  <input id="settings-slider" type="range" min="500" max="60000" step="500" value="6000">
   <button id="settings-apply">Apply (reloads)</button>
   <button id="settings-cancel">Cancel</button>
 </div>
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'gpu-v31 (2026-05-11 — particle slider + softer sprites)';
+const APP_VERSION = 'gpu-v32 (2026-05-11 — smaller particles, more of them)';
 
 // Particle count is configurable via the in-page settings panel which
-// reloads with ?n=NNNN. Clamped to a sensible range to avoid OOM or
-// freezing the device.
+// reloads with ?n=NNNN. Clamped to a range that we know is stable.
 function readParticleCount() {
   const m = location.search.match(/[?&]n=(\d+)/);
-  if (!m) return 4000;
-  return Math.max(200, Math.min(20000, parseInt(m[1], 10) || 4000));
+  if (!m) return 6000;
+  return Math.max(200, Math.min(60000, parseInt(m[1], 10) || 6000));
 }
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
 const N = readParticleCount();    // particle count (from ?n= URL param)
 const BOX_HALF = 1.0;             // simulation box half-extent (matches glass cube)
-// Sprite radius scales mildly with particle count so a small swarm doesn't
-// look like a fog and a big swarm doesn't look like a solid block.
-const PARTICLE_RADIUS = Math.max(0.04, Math.min(0.10, 0.13 - N * 0.000004));
+// Sprite radius shrinks like 1/cbrt(N) so 'volume' per particle stays roughly
+// constant: with 8x more particles each one is half the radius. Tuned so
+// N=4000 gives ~0.05 (the v30 size) and very high N stays visible at >=0.018.
+const PARTICLE_RADIUS = Math.max(0.018, Math.min(0.10, 0.79 / Math.cbrt(N)));
 const INTERACT_RADIUS = 0.13;     // SPH neighbour-search radius
+// Per-particle additive contribution scales inversely with N so the
+// brightness of an N-particle stack stays roughly constant regardless of
+// how many particles are loaded. Clamped so very-small N still shows up.
+const ALPHA_SCALE = Math.max(0.006, Math.min(0.12, 240.0 / N));
 
 const overlay = document.getElementById('overlay');
 const overlayMsg = document.getElementById('overlay-msg');
@@ -410,7 +414,7 @@ struct RenderParams {
   cameraRight: vec3<f32>,           // bytes 64..75
   particleSize: f32,                // byte  76..79 (packs into vec3's slack)
   cameraUp: vec3<f32>,              // bytes 80..91
-  _pad: f32,                        // bytes 92..95
+  alphaScale: f32,                  // bytes 92..95
 };
 
 @group(0) @binding(0) var<storage, read> pos: array<vec4<f32>>;
@@ -443,13 +447,12 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
   let r2 = dot(in.uv, in.uv);
   if (r2 > 1.0) { discard; }
   // Gaussian-ish soft falloff. Higher exponent → sharper centre, softer edge.
-  // Overlapping sprites accumulate additively into a continuous blob whose
-  // brightest pixels are where the most particles overlap.
-  let falloff = exp(-r2 * 3.0);
-  let col = mix(vec3<f32>(0.10, 0.32, 0.62), vec3<f32>(0.85, 0.96, 1.0), falloff);
-  // Per-particle contribution kept low so 30+ overlapping sprites stack to
-  // near-white at the densest core without single particles being visible.
-  return vec4<f32>(col * falloff * 0.08, 1.0);
+  let falloff = exp(-r2 * 3.5);
+  let col = mix(vec3<f32>(0.08, 0.28, 0.60), vec3<f32>(0.85, 0.96, 1.0), falloff);
+  // alphaScale is set per-frame from JS, scaled inversely with N so a stack
+  // of overlapping sprites stays at sane brightness regardless of how many
+  // particles are loaded.
+  return vec4<f32>(col * falloff * R.alphaScale, 1.0);
 }
 `;
 
@@ -760,7 +763,7 @@ async function initAndRun() {
     renderBuf[20] = cam.up[0];                                  // 20..22 cameraUp
     renderBuf[21] = cam.up[1];
     renderBuf[22] = cam.up[2];
-    renderBuf[23] = 0;                                          // 23    _pad
+    renderBuf[23] = ALPHA_SCALE;                                // 23    alphaScale
     device.queue.writeBuffer(renderParamsBuf, 0, renderBuf);
 
     // Render pass.
@@ -800,7 +803,8 @@ function fmt(v, w) {
 function updateDebug() {
   debugTextEl.textContent =
     'fps: ' + state.fps.toFixed(1) + '   particles: ' + N + '   steps: ' + state.steps + '\n' +
-    'sprite r: ' + PARTICLE_RADIUS.toFixed(3) + '   gyro: ' + state.gyroPermission + '   events: ' + state.events + '\n' +
+    'sprite r: ' + PARTICLE_RADIUS.toFixed(3) + '   alphaScale: ' + ALPHA_SCALE.toFixed(3) + '\n' +
+    'gyro: ' + state.gyroPermission + '   events: ' + state.events + '\n' +
     'β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '   gravity x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) +
     (state.gpuError ? '\nGPU ERR: ' + state.gpuError : '');
 }

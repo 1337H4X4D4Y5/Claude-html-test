@@ -1025,6 +1025,19 @@
       }
     });
 
+    test('gpu-mpm v55: alphaScale (renderBuf[23]) is non-zero so thickness pass writes signal', () => {
+      // v53/v54 shipped with renderBuf[23] = 0, which made the thickness
+      // pass write zeros to the thickness texture. Beer's law then gave
+      // absorption == 1 everywhere → fluid rendered as near-white +
+      // bright sky reflection (silver). Make sure the slot is non-zero.
+      const src = readMpmScript();
+      const m = src.match(/renderBuf\[23\]\s*=\s*([0-9.]+)/);
+      assert(m, 'renderBuf[23] assignment not found');
+      const v = parseFloat(m[1]);
+      assert(v > 0,
+        'renderBuf[23] (alphaScale, used by thickness pass) must be > 0, got ' + v);
+    });
+
     test('gpu-mpm v53: composite shader uses thickness + Beer\'s law + sky reflection', () => {
       const src = readMpmScript();
       // Pull the WGSL_COMPOSITE template literal body.

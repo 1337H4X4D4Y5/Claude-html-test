@@ -255,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v54 (2026-05-11 — fix WGSL reserved-word `final` in composite shader)';
+const APP_VERSION = 'mpm-v55 (2026-05-11 — fix thickness alphaScale=0 bug (was silver), deeper water tint)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1015,8 +1015,10 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     exp(-P.absorptionG * thickness),
     exp(-P.absorptionB * thickness)
   );
-  // Clear/clean water base colour: nearly white. Beer's law does the tint.
-  let waterTint = vec3<f32>(0.92, 0.97, 1.00) * absorption;
+  // Water base colour: light cyan. Even at zero thickness this reads as
+  // water rather than white paint, while Beer's law still deepens it
+  // toward dark blue as thickness grows.
+  let waterTint = vec3<f32>(0.45, 0.78, 0.92) * absorption;
 
   // Sky reflection sampled by the reflected view ray. In view space the
   // camera looks down -Z and "up" is +Y; reflectedV.y picks the right
@@ -1458,7 +1460,14 @@ async function initAndRun() {
     renderBuf[16] = cam.right[0]; renderBuf[17] = cam.right[1]; renderBuf[18] = cam.right[2];
     renderBuf[19] = PARTICLE_RADIUS;
     renderBuf[20] = cam.up[0]; renderBuf[21] = cam.up[1]; renderBuf[22] = cam.up[2];
-    renderBuf[23] = 0;
+    // v55: per-particle thickness contribution. v53/v54 left this at 0,
+    // which made the thickness pass write all-zeros → Beer's law gave no
+    // absorption → fluid rendered nearly white + bright sky reflection =
+    // silver. With ~10 particles overlapping a deep pixel and this value
+    // at 0.10, the additive thickness sums to ~1.0 at the centre, which
+    // (combined with thicknessScale 0.18 in the composite) drops red
+    // ~60% via Beer's law — a clear blue tint where the fluid is thick.
+    renderBuf[23] = 0.10;
     device.queue.writeBuffer(renderParamsBuf, 0, renderBuf);
 
     ensureDepthTex();

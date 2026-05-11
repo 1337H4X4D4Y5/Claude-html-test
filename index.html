@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v70</span>
+    <span class="tag">v71</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v70 dials viscosity back to 0.01 — v69's 0.02 was killing the APIC affine gradient fast enough to leave PIC-style grid plateaus on the surface. The new value lets water settle in a few seconds without exposing the underlying grid.</div>
+  <div class="desc">MLS-MPM on the GPU. v71 stiffens water (pressureKMul 30 → 80) to kill horizontal density stripes that came from the previous soft K letting the fluid compress 65% top-to-bottom under gravity. Damping (0.985) keeps it from bouncing.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v96 (2026-05-11 — wider depth bilateral kills wall-side dimples)';
+const APP_VERSION = 'mpm-v97 (2026-05-11 — caustics gated by actual surface curvature)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1329,22 +1329,26 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let bgCoord = clamp(coord + warp, vec2<i32>(0), resMax);
   var bg = textureLoad(backgroundTex, bgCoord, 0).rgb;
 
-  // v93 perf: dropped v83 curvature-based caustic (dpdx+dpdy of nSmooth,
-  // length math, square). The v87 projected light caustics (below) are
-  // the visually dominant caustic anyway; the curvature term was a
-  // subtle multiplier on top, not worth the per-pixel math.
+  // v97: caustics now driven BY the surface, not just procedural texture.
+  // Compute local curvature from dpdx/dpdy of nSmooth — high curvature
+  // means the surface is bending light strongly, low means flat (no
+  // caustics on calm water). Multiply the procedural pattern by this
+  // curvatureAmp so the lightCaustic shape only shows up where the
+  // actual water surface is focusing rays.
 
-  // v87: projected light caustics — additively brightens the floor at
-  // the caustic curves. Additive (not multiplicative) matches how real
-  // caustic light works: sunlight focused through the surface deposits
-  // extra photons on the floor at curve peaks; trough regions still get
-  // ambient floor light. With lc in [0,1] and tint magnitude ~0.45 the
-  // peak adds half-white on top of bg, which saturates over the tile
-  // (0.9) → visibly bright lines without obliterating the tile pattern.
+  // Curvature → "is light focusing here?" gate
+  let dnx = dpdx(nSmooth);
+  let dny = dpdy(nSmooth);
+  let curvature = length(dnx) + length(dny);
+  let curvatureAmp = clamp(curvature * 12.0, 0.0, 1.0);
+
+  // Procedural pattern → "what shape does the caustic take?"
   let causticUV = vec2<f32>(viewPos.x, -viewPos.z) * 6.0;
   let lc = lightCaustic(causticUV, P.time);
-  let causticColor = vec3<f32>(0.50, 0.46, 0.36);
-  bg = bg + lc * causticColor;
+  let causticColor = vec3<f32>(0.55, 0.50, 0.38);
+  // v97: gate the caustic by actual surface curvature — flat water gets
+  // no caustic, wavy water gets the full pattern at curvature peaks.
+  bg = bg + lc * curvatureAmp * causticColor;
 
   // Body model (v60+): uniform-opacity lerp between absorbed background
   // and lit baseColor, so baseColor keeps its hue at any thickness.

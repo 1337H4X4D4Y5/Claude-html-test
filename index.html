@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v96</span>
+    <span class="tag">v97</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v96 widens the depth bilateral kernel (R 26→32, depthThresh 0.05→0.07) to bridge particle columns packed against the front side walls — kills wall-adjacent dimples that v95's smaller imposters exposed.</div>
+  <div class="desc">MLS-MPM on the GPU. v97 ties caustics to the actual water surface — the procedural light-curve pattern is now multiplied by local surface curvature, so caustics only appear where the water is bending light (waves, splashes), not on calm flat regions.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

@@ -108,7 +108,7 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'mpm-v40 (2026-05-11 — MLS-MPM: quadratic + affine C)';
+const APP_VERSION = 'mpm-v41 (2026-05-11 — MLS-MPM + Tait pressure)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -263,6 +263,26 @@ fn outerProd(a: vec3<f32>, b: vec3<f32>) -> mat3x3<f32> {
   return mat3x3<f32>(a * b.x, a * b.y, a * b.z);
 }
 
+// Tait-style equation-of-state pressure at a grid cell.
+// P = K * ((rho/rho0)^gamma - 1), clamped to >= 0 so only compression
+// creates pressure (no negative pressure tension).
+fn samplePressure(ix: i32, iy: i32, iz: i32) -> f32 {
+  if (ix < 0 || ix >= i32(GRID_SIZE)) { return 0.0; }
+  if (iy < 0 || iy >= i32(GRID_SIZE)) { return 0.0; }
+  if (iz < 0 || iz >= i32(GRID_SIZE)) { return 0.0; }
+  let c = cellIndex(u32(ix), u32(iy), u32(iz));
+  let m = f32(atomicLoad(&grid[c * 4u + 0u])) / P.fixedPoint;
+  let cv = P.cellSize * P.cellSize * P.cellSize;
+  let r = m / cv;
+  if (r <= P.restDensity) { return 0.0; }
+  let ratio = r / P.restDensity;
+  // ratio^7 via successive squares (cheaper than pow + works on small GPUs).
+  let r2 = ratio * ratio;
+  let r4 = r2 * r2;
+  let r7 = r4 * r2 * ratio;
+  return P.pressureK * (r7 - 1.0);
+}
+
 @compute @workgroup_size(64)
 fn cs_clearGrid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
@@ -340,16 +360,35 @@ fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     f32(atomicLoad(&grid[b + 2u])) * invS,
     f32(atomicLoad(&grid[b + 3u])) * invS
   ) / mass;
-  // Gravity. (Explicit Tait-EOS pressure deferred to v41 — MLS-MPM's
-  // affine velocity gradient alone provides enough fluid behaviour to
-  // tell whether the upgrade from PIC was effective.)
-  v = v + P.gravity * P.dt;
-
-  // Wall boundary.
+  // Cell coordinates for neighbour lookups.
   let iz = ci / (GRID_SIZE * GRID_SIZE);
   let rem = ci - iz * GRID_SIZE * GRID_SIZE;
   let iy = rem / GRID_SIZE;
   let ix = rem - iy * GRID_SIZE;
+
+  // Gravity (body force).
+  v = v + P.gravity * P.dt;
+
+  // Pressure gradient force. Sample the Tait pressure at this cell's 6
+  // axis-aligned neighbours, build the central-difference gradient,
+  // accelerate by -gradP/rho. This is what gives the fluid its
+  // incompressibility — overcompressed regions push velocity outward.
+  let pXp = samplePressure(i32(ix) + 1, i32(iy), i32(iz));
+  let pXm = samplePressure(i32(ix) - 1, i32(iy), i32(iz));
+  let pYp = samplePressure(i32(ix), i32(iy) + 1, i32(iz));
+  let pYm = samplePressure(i32(ix), i32(iy) - 1, i32(iz));
+  let pZp = samplePressure(i32(ix), i32(iy), i32(iz) + 1);
+  let pZm = samplePressure(i32(ix), i32(iy), i32(iz) - 1);
+  let gradP = vec3<f32>(
+    (pXp - pXm) * 0.5 * P.invCellSize,
+    (pYp - pYm) * 0.5 * P.invCellSize,
+    (pZp - pZm) * 0.5 * P.invCellSize
+  );
+  let cellVolume = P.cellSize * P.cellSize * P.cellSize;
+  let rho = mass / cellVolume;
+  v = v - (gradP / rho) * P.dt;
+
+  // Wall boundary: clamp normal velocity at the outer ring of cells.
   let edge: u32 = 1u;
   if (ix <= edge && v.x < 0.0) { v.x = 0.0; }
   if (ix >= GRID_SIZE - 1u - edge && v.x > 0.0) { v.x = 0.0; }
@@ -898,10 +937,12 @@ async function initAndRun() {
     simBuf[6] = 1.0 / CELL_SIZE;
     simBuf[7] = FIXED_POINT;
     simBuf[8] = 1.0;              // particleMass (cancels out)
-    simBuf[9] = 0.9995;           // velDamping (gentler; MLS-MPM is less dissipative)
-    simBuf[10] = 0.30;            // wall restitution
-    simBuf[11] = 50.0;            // pressureK (EOS stiffness for water)
-    simBuf[12] = 4.0;             // restDensity (target mass per cell-volume)
+    simBuf[9] = 0.9995;           // velDamping
+    simBuf[10] = 0.20;            // wall restitution
+    // 8000 particles spread across half the 2x2x2 box average density ~1000.
+    // EOS pressure resists compression beyond that.
+    simBuf[11] = 600.0;           // pressureK (Tait stiffness for water)
+    simBuf[12] = 1000.0;          // restDensity (target mass per unit volume)
     device.queue.writeBuffer(simParamsBuf, 0, simBuf);
 
     const cellGroups = Math.ceil(NUM_CELLS / 64);

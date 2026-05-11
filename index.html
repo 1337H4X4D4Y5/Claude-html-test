@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v40</span>
+    <span class="tag">v41</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU: quadratic B-spline (27-cell scatter), per-particle affine velocity gradient (APIC C matrix), 8000 particles + 32³ grid, atomic fixed-point P2G. Less dissipative than PIC, recovers more of fluid's swirl/slosh behaviour.</div>
+  <div class="desc">MLS-MPM + Tait equation-of-state pressure on the GPU. Quadratic B-spline, affine C matrix, 27-cell scatter, central-difference pressure gradient force at every grid cell. Particles resist compression — actual fluid behaviour rather than a heap.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

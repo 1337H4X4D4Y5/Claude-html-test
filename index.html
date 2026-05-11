@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v79</span>
+    <span class="tag">v80</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v79 adds fractal-noise ripples to the surface — 4-octave fBm gradient perturbs the smooth SSF normal in tangent space, animated by elapsed time. Gives sub-grid detail (ripples, wavelets) without restructuring the simulation.</div>
+  <div class="desc">MLS-MPM on the GPU. v80 erases residual per-particle dimples: wider depth imposters, bilateral threshold up 2× so it averages farther inside the fluid body, 1 extra H+V round of depth blur, 40% wider thickness blur. The v79 fractal ripples supply the visible micro-detail now that the underlying surface is glass-smooth.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

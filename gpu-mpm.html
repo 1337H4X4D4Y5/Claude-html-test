@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v79 (2026-05-11 — animated fBm ripples on surface (fake fine-grain detail))';
+const APP_VERSION = 'mpm-v80 (2026-05-11 — kill residual dimples (wider imposter + bigger blur))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -445,11 +445,15 @@ function applyPreset(key) {
 // _natRho can read BOX_HALF_X without TDZ. v52: 32 → 48 grid, 3.375x more
 // cells (32^3=32768 → 48^3=110592). cs_clearGrid and cs_grid scale with
 // cell count; P2G/G2P stay particle-bound.)
-// v78: 0.020 -> 0.016. Smaller depth imposters = finer surface detail
-// (less "blobby" silhouette). The thickness pass uses a 1.6x scaled
-// imposter to compensate, so color blending between adjacent particles
-// remains smooth even with the smaller depth radius.
-const PARTICLE_RADIUS = 0.016;
+// v80: 0.016 -> 0.022. v78 went too small — adjacent imposters didn't
+// overlap enough and the depth field kept per-particle dimples that
+// neither the bilateral blur nor v79's fBm noise could fully hide.
+// Wider depth imposter = more overlap = smoother starting depth.
+// The fBm noise (v79) supplies the fine surface detail; this just
+// removes the residual "spheres" structure underneath. Thickness
+// imposter is scaled 1.6x in its own shader (= 0.035 effective),
+// still well above the cellSize so colour blending stays smooth.
+const PARTICLE_RADIUS = 0.022;
 // Fixed-point scale for atomicAdd into i32 storage. iOS WebGPU has no
 // atomic<f32>, so each float value is encoded as round(v * SCALE) and
 // decoded after the P2G pass by dividing back.
@@ -1034,13 +1038,14 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 fn blur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
   let center = textureLoad(srcDepth, coord, 0);
   if (center >= 0.99999) { return 1.0; }
-  // v72: radius 12 -> 20. At 169k particles each imposter spans ~16 px,
-  // a 12-px blur barely reaches the next imposter centre. 20 px bridges
-  // 2-3 imposters and smooths the per-particle dimples visible as
-  // streaks under refraction. sigma widened to match (~R*1.7).
-  let R: i32 = 20;
-  let depthThresh: f32 = 0.025;
-  let sigma2_inv: f32 = 1.0 / 130.0;
+  // v80: radius 20 -> 26, depthThresh 0.025 -> 0.05, sigma widened.
+  // Larger threshold lets the bilateral average across a wider depth
+  // range INSIDE the fluid (where neighbour depths differ by particle-
+  // scale bumps), while the >= 0.99999 short-circuit above still keeps
+  // the silhouette crisp against the background plane.
+  let R: i32 = 26;
+  let depthThresh: f32 = 0.05;
+  let sigma2_inv: f32 = 1.0 / 220.0;
   var sum: f32 = center;
   var totalW: f32 = 1.0;
   for (var i: i32 = 1; i <= R; i = i + 1) {
@@ -1086,8 +1091,11 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 }
 
 fn tblur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
-  let R: i32 = 14;
-  let sigma2_inv: f32 = 1.0 / 60.0;
+  // v80: R 14 -> 20, sigma widened. Thickness gets more aggressive
+  // smoothing to match the wider depth blur — both passes now wash out
+  // per-cell density variation at similar scale.
+  let R: i32 = 20;
+  let sigma2_inv: f32 = 1.0 / 130.0;
   var sum: f32 = textureLoad(src, coord, 0).r;
   var totalW: f32 = 1.0;
   for (var i: i32 = 1; i <= R; i = i + 1) {
@@ -1948,13 +1956,14 @@ async function initAndRun() {
       p.setPipeline(depthPipeline); p.setBindGroup(0, depthBindGroup);
       p.draw(6, N); p.end();
     }
-    // v78: 2 H+V rounds -> 3 H+V rounds. Smoother surface at finer
-    // imposter resolution. The 3rd round reuses blurH2/blurV2 bind groups
-    // because the ping-pong source for the 3rd H is depthV (same as
-    // blurH2's source) and the 3rd V's source is depthH (same as blurV2's).
+    // v78: 2 H+V rounds -> 3. v80: 3 -> 4 (final round added so the
+    // wider bilateral has more iterations to fully erase per-particle
+    // dimples while keeping the silhouette intact).
     const blurSeq = [
       { pipe: blurH, bind: blurH1, target: depthH },
       { pipe: blurV, bind: blurV1, target: depthV },
+      { pipe: blurH, bind: blurH2, target: depthH },
+      { pipe: blurV, bind: blurV2, target: depthV },
       { pipe: blurH, bind: blurH2, target: depthH },
       { pipe: blurV, bind: blurV2, target: depthV },
       { pipe: blurH, bind: blurH2, target: depthH },

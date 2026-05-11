@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v74 (2026-05-11 — water more fluid (less damping, slippier walls))';
+const APP_VERSION = 'mpm-v75 (2026-05-11 — water settles AND flows (high friction-free wall, mid damping))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,14 +350,13 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      // v74: user wants "more fluid". v72's heavy damping was honey-
-      // territory and made water look sluggish. Loosen damping + walls
-      // so flow is lively. K still moderate to avoid the crystalline
-      // clustering, and viscosity dropped a touch since the v73
-      // thickness blur now hides the grid artifacts that previously
-      // required higher viscosity.
-      pressureKMul: 55, velDamping: 0.990, restitution: 0.0,
-      wallFriction: 0.94, viscosity: 0.008, maxAccel: 100.0,
+      // v75: both state variables (particle velocity AND C-matrix) need
+      // enough damping to settle. v74 had velDamping high but viscosity
+      // too low — C kept re-injecting momentum every substep so the
+      // surface never reached flat. Bump both, but keep wallFriction
+      // high (slippy walls) so flow still LOOKS fluid in motion.
+      pressureKMul: 50, velDamping: 0.987, restitution: 0.0,
+      wallFriction: 0.94, viscosity: 0.014, maxAccel: 80.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
       // v59: screen-space refraction strength in pixels.

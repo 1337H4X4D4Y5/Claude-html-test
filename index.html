@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v74</span>
+    <span class="tag">v75</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v74 loosens water's damping and wall friction so motion looks lively — settling stayed under control thanks to the v71+ stiffer K and v73 thickness blur.</div>
+  <div class="desc">MLS-MPM on the GPU. v75 balances "settles" vs "looks fluid": more viscosity (kills C-matrix), moderate velDamping, but kept slippy walls (wallFriction 0.94) so flow still looks lively even though the fluid itself decays motion fast.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

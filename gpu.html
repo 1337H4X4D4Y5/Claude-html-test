@@ -47,10 +47,28 @@
   }
   #overlay-msg.fail { opacity: 1; color: #ffb6b6; }
   #fps {
-    position: fixed; top: env(safe-area-inset-top, 8px); left: 8px;
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 38px);
+    left: 8px;
     font-size: 11px; opacity: 0.6; pointer-events: none;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
+  #home-btn {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 2px);
+    left: calc(env(safe-area-inset-left, 8px) + 2px);
+    padding: 6px 12px;
+    border-radius: 14px;
+    background: rgba(255,255,255,0.10);
+    color: #cfe6ff;
+    text-decoration: none;
+    font-size: 12px; font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    z-index: 9;
+    border: 1px solid rgba(255,255,255,0.12);
+    -webkit-tap-highlight-color: transparent;
+  }
+  #home-btn:active { background: rgba(255,255,255,0.18); }
   #version {
     position: fixed; top: env(safe-area-inset-top, 8px);
     right: calc(env(safe-area-inset-right, 8px) + 8px);
@@ -130,6 +148,7 @@
 </head>
 <body>
 <canvas id="gpu-canvas"></canvas>
+<a id="home-btn" href="./">← Home</a>
 <div id="overlay">
   <h1>Water Box (GPU)</h1>
   <p>Particle fluid simulated on the GPU via WebGPU compute shaders. Tilt the phone to drag gravity around.</p>
@@ -1202,6 +1221,13 @@ function updateDebug() {
     (state.gpuError ? '\nGPU ERR: ' + state.gpuError : '');
 }
 updateDebug();
+
+// Home button: force-bust the hub's cache on click so the latest hub
+// content is always served when navigating back.
+document.getElementById('home-btn').addEventListener('click', function (e) {
+  e.preventDefault();
+  window.location.href = './?t=' + Date.now();
+});
 
 // Settings panel: tap the gear, drag the slider, tap Apply -> reload with
 // the new particle count baked into the URL. iOS-friendly (no native

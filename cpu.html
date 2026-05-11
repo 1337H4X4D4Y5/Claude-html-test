@@ -80,10 +80,28 @@
     word-break: break-word;
   }
   #fps {
-    position: fixed; top: env(safe-area-inset-top, 8px); left: 8px;
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 38px);
+    left: 8px;
     font-size: 11px; opacity: 0.5; pointer-events: none;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
+  #home-btn {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 2px);
+    left: calc(env(safe-area-inset-left, 8px) + 2px);
+    padding: 6px 12px;
+    border-radius: 14px;
+    background: rgba(255,255,255,0.10);
+    color: #cfe6ff;
+    text-decoration: none;
+    font-size: 12px; font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    z-index: 9;
+    border: 1px solid rgba(255,255,255,0.12);
+    -webkit-tap-highlight-color: transparent;
+  }
+  #home-btn:active { background: rgba(255,255,255,0.18); }
   #version {
     position: fixed;
     top: env(safe-area-inset-top, 8px);
@@ -161,6 +179,7 @@
   <div id="hint">Desktop: drag the canvas to tilt</div>
   <div id="overlay-version"></div>
 </div>
+<a id="home-btn" href="./" onclick="event.preventDefault();window.location.href='./?t='+Date.now();">← Home</a>
 <div id="fps"></div>
 <div id="version"></div>
 <div id="debug"><div id="debug-text">gyro: waiting…</div><button id="copy-btn">Copy debug info</button><button id="reset-btn">Reset simulation</button></div>

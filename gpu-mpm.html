@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>Water Box (MPM)</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; min-height: 100vh;
+    background: radial-gradient(ellipse at top, #1a1840 0%, #050913 60%);
+    color: #e8f1ff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    padding:
+      calc(env(safe-area-inset-top, 0) + 64px)
+      calc(env(safe-area-inset-right, 0) + 18px)
+      calc(env(safe-area-inset-bottom, 0) + 28px)
+      calc(env(safe-area-inset-left, 0) + 18px);
+    box-sizing: border-box;
+    max-width: 600px; margin: 0 auto;
+  }
+  #home-btn {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 8px);
+    left: calc(env(safe-area-inset-left, 8px) + 8px);
+    padding: 8px 14px;
+    border-radius: 16px;
+    background: rgba(255,255,255,0.10);
+    color: #cfe6ff;
+    text-decoration: none;
+    font-size: 13px; font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    z-index: 9;
+    border: 1px solid rgba(255,255,255,0.12);
+  }
+  #home-btn:active { background: rgba(255,255,255,0.16); }
+  h1 { margin: 0 0 8px; font-size: 26px; font-weight: 700; }
+  .sub { margin: 0 0 18px; opacity: 0.75; font-size: 14px; line-height: 1.45; }
+  .badge {
+    display: inline-block; margin-bottom: 14px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(160,90,255,0.22);
+    color: #cfb6ff;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  section {
+    margin: 14px 0;
+    padding: 14px 16px;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  section h2 { margin: 0 0 8px; font-size: 14px; opacity: 0.85; }
+  section p { margin: 0; font-size: 13px; line-height: 1.55; opacity: 0.85; }
+  code {
+    background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  }
+  ul { padding-left: 22px; margin: 8px 0 0; }
+  li { margin: 4px 0; font-size: 13px; }
+  a.ref { color: #b6e0ff; text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<a id="home-btn" href="./">← Home</a>
+
+<span class="badge">v39 — work in progress</span>
+<h1>Water Box (MPM)</h1>
+<p class="sub">Moving Least Squares Material Point Method fluid, on the GPU via WebGPU compute shaders. Currently a placeholder — the kernels are being built up over several versions.</p>
+
+<section>
+  <h2>What MPM is</h2>
+  <p>Particles carry mass + velocity + an affine velocity gradient (3×3 matrix). Each frame, particles scatter their state onto a 3D background grid (P2G), the grid is updated with gravity + boundary conditions, then particles gather new velocities back from the grid (G2P). The grid handles inter-particle pressure implicitly, so there's no spring-pressure crystal lattice — particles can pack to any density and the surface reads as fluid.</p>
+</section>
+
+<section>
+  <h2>Implementation plan</h2>
+  <ul>
+    <li>Compute shaders: clear grid → P2G (atomic-i32 fixed-point for floats) → grid update → G2P → advect.</li>
+    <li>Grid resolution starts at 32³ ≈ 33k cells; particle count target 30k–60k.</li>
+    <li>Rendering reuses the SSF depth → bilateral blur → composite pipeline from the SPH page.</li>
+    <li>Gyroscope-driven gravity vector wired into the grid-update kernel.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Reference</h2>
+  <p>Following <a class="ref" href="https://nialltl.neocities.org/articles/mpm_guide" target="_blank">nialltl's MPM guide</a> for the math and <a class="ref" href="https://github.com/matsuoka-601/WebGPU-Ocean" target="_blank">matsuoka-601's WebGPU-Ocean</a> for the WebGPU-specific patterns (atomicAdd fixed-point, P2G scatter, MLS gradient reconstruction).</p>
+</section>
+
+<section>
+  <h2>Compare</h2>
+  <p>The current <a class="ref" href="./gpu.html">SPH build</a> uses Position-Based Fluids style projection in the compute shader (no spring pressure, so no preferred lattice). Useful baseline while MPM is being built — same gyro input, same SSF rendering, just a different inner physics.</p>
+</section>
+
+<script>
+document.getElementById('home-btn').addEventListener('click', function (e) {
+  e.preventDefault();
+  window.location.href = './?t=' + Date.now();
+});
+</script>
+</body>
+</html>

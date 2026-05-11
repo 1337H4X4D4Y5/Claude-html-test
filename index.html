@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v67</span>
+    <span class="tag">v68</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v67 makes water actually settle — softer pressure law + more per-step damping kill the residual sloshing that pumped energy around the box indefinitely.</div>
+  <div class="desc">MLS-MPM on the GPU. v68 cranks water's velDamping to 0.985 (~2.6% energy retained per second) so it actually settles to flat within a few seconds of holding the phone still. Viscosity stays low so flow still looks like water in motion.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

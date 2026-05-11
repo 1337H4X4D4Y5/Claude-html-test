@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v95 (2026-05-11 — smaller particle spheres (0.022 -> 0.017))';
+const APP_VERSION = 'mpm-v96 (2026-05-11 — wider depth bilateral kills wall-side dimples)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1042,14 +1042,16 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 fn blur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
   let center = textureLoad(srcDepth, coord, 0);
   if (center >= 0.99999) { return 1.0; }
-  // v80: radius 20 -> 26, depthThresh 0.025 -> 0.05, sigma widened.
-  // Larger threshold lets the bilateral average across a wider depth
-  // range INSIDE the fluid (where neighbour depths differ by particle-
-  // scale bumps), while the >= 0.99999 short-circuit above still keeps
-  // the silhouette crisp against the background plane.
-  let R: i32 = 26;
-  let depthThresh: f32 = 0.05;
-  let sigma2_inv: f32 = 1.0 / 220.0;
+  // v80: R 20 -> 26 + depthThresh 0.025 -> 0.05 (anti-dimple).
+  // v96: R 26 -> 32 + depthThresh 0.05 -> 0.07 — wall-adjacent particle
+  // columns showed residual per-particle bumps because the bilateral
+  // didn't reach far enough INTO the fluid mass at the silhouette
+  // edge. Wider R + looser thresh bridges them at the cost of slightly
+  // less silhouette sharpness (still cut off cleanly at the 0.99999
+  // background short-circuit above).
+  let R: i32 = 32;
+  let depthThresh: f32 = 0.07;
+  let sigma2_inv: f32 = 1.0 / 340.0;
   var sum: f32 = center;
   var totalW: f32 = 1.0;
   for (var i: i32 = 1; i <= R; i = i + 1) {

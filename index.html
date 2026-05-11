@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v95</span>
+    <span class="tag">v96</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v95 shrinks particle imposters 0.022 → 0.017 for finer-grained surface detail. v80's wider bilateral blur (R=26) bridges the smaller particles cleanly.</div>
+  <div class="desc">MLS-MPM on the GPU. v96 widens the depth bilateral kernel (R 26→32, depthThresh 0.05→0.07) to bridge particle columns packed against the front side walls — kills wall-adjacent dimples that v95's smaller imposters exposed.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

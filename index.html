@@ -6,6 +6,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#050913">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Water Box — home</title>
 <style>
   :root { color-scheme: dark; }
@@ -80,7 +83,7 @@
 
 <div class="section-title">Simulations</div>
 
-<a class="card primary" href="./cpu.html">
+<a class="card primary" id="link-cpu" href="./cpu.html">
   <div class="row">
     <span class="name">CPU fluid (SPH)</span>
     <span class="tag">v26</span>
@@ -88,17 +91,17 @@
   <div class="desc">600-particle SPH with position projection, runs in JavaScript on the CPU. Soft additive blue sprites. Tap-to-begin permission flow, full debug overlay, 37 unit tests.</div>
 </a>
 
-<a class="card gpu" href="./gpu.html">
+<a class="card gpu" id="link-gpu" href="./gpu.html">
   <div class="row">
     <span class="name">GPU fluid (WebGPU)</span>
-    <span class="tag">v28</span>
+    <span class="tag">v29</span>
   </div>
   <div class="desc">WebGPU compute-shader build. 4000 particles, gravity + wall collisions, no inter-particle pressure yet. Next versions add SPH on the GPU for more realistic fluid behaviour.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
 
-<a class="card diag" href="./test.html">
+<a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
     <span class="tag">37</span>
@@ -106,13 +109,26 @@
   <div class="desc">Run the full simulation test suite in the browser. Validates the CPU sim's stability under sustained gravity, gyro sweep, splash pokes, and lattice-collapse regression tests.</div>
 </a>
 
-<a class="card diag" href="./webgpu-check.html">
+<a class="card diag" id="link-webgpu" href="./webgpu-check.html">
   <div class="row">
     <span class="name">WebGPU support check</span>
     <span class="tag">diag</span>
   </div>
   <div class="desc">Verifies that your device's Safari can run WebGPU compute shaders end-to-end. Useful if the GPU build above misbehaves.</div>
 </a>
+
+<script>
+// Aggressively bust the Safari cache by appending a fresh query string to
+// each link every time the hub loads. iOS Safari otherwise reuses cached
+// HTML for the same URL even when the GitHub Pages copy has been updated.
+(function () {
+  const t = Date.now();
+  for (const id of ['link-cpu', 'link-gpu', 'link-tests', 'link-webgpu']) {
+    const a = document.getElementById(id);
+    if (a) a.href = a.getAttribute('href') + '?t=' + t;
+  }
+})();
+</script>
 
 <footer>
   <a href="https://github.com/1337H4X4D4Y5/Claude-html-test">github</a>

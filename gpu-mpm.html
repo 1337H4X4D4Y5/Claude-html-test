@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v97 (2026-05-11 — caustics gated by actual surface curvature)';
+const APP_VERSION = 'mpm-v98 (2026-05-11 — perf: single-submit substeps + reused JS scratch buffers)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2138,6 +2138,12 @@ async function initAndRun() {
   // v79: clock used by the composite shader's fractal-noise ripples.
   const startT = lastT;
   let frames = 0, fpsAcc = 0;
+  // v98 perf: hoist per-frame Float32Array allocations. Allocating inside
+  // frame() created GC churn (~256 bytes/frame). One-time allocation
+  // and reuse — same memory rewritten each frame.
+  const simBufScratch    = new Float32Array(SIM_PARAMS_SIZE / 4);
+  const renderBufScratch = new Float32Array(24);
+  const compBufScratch   = new Float32Array(COMPOSITE_PARAMS_SIZE / 4);
   function frame() {
     requestAnimationFrame(frame);
     const now = performance.now() / 1000;
@@ -2159,7 +2165,7 @@ async function initAndRun() {
     const stepDt = dt / subSteps;
 
     // Sim params layout (16-aligned).
-    const simBuf = new Float32Array(SIM_PARAMS_SIZE / 4);
+    const simBuf = simBufScratch;
     simBuf[0] = state.gravity.x;
     simBuf[1] = state.gravity.y;
     simBuf[2] = state.gravity.z;
@@ -2187,26 +2193,32 @@ async function initAndRun() {
 
     const cellGroups = Math.ceil(NUM_CELLS / 64);
     const particleGroups = Math.ceil(N / 64);
-    for (let s = 0; s < subSteps; s++) {
+    // v98 perf: previously each substep had its own encoder + submit
+    // (up to 8 submits/frame). Combine into a single compute pass with
+    // pipeline switches between substeps — one encoder, one submit.
+    // Driver overhead drops; the GPU sees one continuous queue of work.
+    {
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
       pass.setBindGroup(0, computeBindGroup);
-      pass.setPipeline(clearPipeline);
-      pass.dispatchWorkgroups(cellGroups);
-      pass.setPipeline(p2gPipeline);
-      pass.dispatchWorkgroups(particleGroups);
-      pass.setPipeline(gridPipeline);
-      pass.dispatchWorkgroups(cellGroups);
-      pass.setPipeline(g2pPipeline);
-      pass.dispatchWorkgroups(particleGroups);
+      for (let s = 0; s < subSteps; s++) {
+        pass.setPipeline(clearPipeline);
+        pass.dispatchWorkgroups(cellGroups);
+        pass.setPipeline(p2gPipeline);
+        pass.dispatchWorkgroups(particleGroups);
+        pass.setPipeline(gridPipeline);
+        pass.dispatchWorkgroups(cellGroups);
+        pass.setPipeline(g2pPipeline);
+        pass.dispatchWorkgroups(particleGroups);
+        state.steps++;
+      }
       pass.end();
       device.queue.submit([enc.finish()]);
-      state.steps++;
     }
     // Render.
     const aspect = canvas.width / canvas.height;
     const cam = buildViewProj(aspect);
-    const renderBuf = new Float32Array(24);
+    const renderBuf = renderBufScratch;
     renderBuf.set(cam.mvp, 0);
     renderBuf[16] = cam.right[0]; renderBuf[17] = cam.right[1]; renderBuf[18] = cam.right[2];
     renderBuf[19] = PARTICLE_RADIUS;
@@ -2224,7 +2236,7 @@ async function initAndRun() {
     ensureDepthTex();
     const fovY = 50 * DEG;
     const f = 1 / Math.tan(fovY / 2);
-    const compBuf = new Float32Array(COMPOSITE_PARAMS_SIZE / 4);
+    const compBuf = compBufScratch;
     compBuf[0] = 0.1; compBuf[1] = 100;
     compBuf[2] = f / aspect; compBuf[3] = f;
     compBuf[4] = canvas.width; compBuf[5] = canvas.height;

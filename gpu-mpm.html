@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v93 (2026-05-11 — remove foam + perf pass (simpler composite, fewer blur passes))';
+const APP_VERSION = 'mpm-v94 (2026-05-11 — water lighter (relaxed adaptive damping + lighter preset))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -354,16 +354,15 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      // v76: low viscosity + light velDamping for genuinely splashy water
-      // in motion. The new velocity-adaptive damping in cs_g2p ramps
-      // both up sharply when particles are near-stationary, so the fluid
-      // still settles to flat within ~2 seconds despite the loose
-      // nominal values.
-      pressureKMul: 55, velDamping: 0.997, restitution: 0.0,
-      wallFriction: 0.96, viscosity: 0.004, maxAccel: 100.0,
+      // v94: even lighter than v76. Pair with the relaxed adaptive-damping
+      // band in cs_g2p (0.03-0.60 instead of 0.05-0.30) so mid-speed
+      // particles aren't crushed into rest-damp territory. maxAccel
+      // bumped so pressure can move the fluid energetically against
+      // gravity when tilted hard.
+      pressureKMul: 55, velDamping: 0.998, restitution: 0.0,
+      wallFriction: 0.97, viscosity: 0.003, maxAccel: 130.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
-      // v59: screen-space refraction strength in pixels.
       refractStrength: 35.0,
     },
   },
@@ -897,9 +896,16 @@ fn cs_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // settling — solves the trade-off that's been driving the v66-v75
   // iteration cycle.
   let speed = length(newV);
-  let restW = 1.0 - smoothstep(0.05, 0.30, speed);
-  let effectiveDamp = mix(P.velDamping, 0.94, restW);
-  let effectiveVisc = mix(P.viscosity, 0.05, restW);
+  // v94: widen and soften. v76's smoothstep(0.05, 0.30) made any
+  // moderately-slow particle hit the 0.94/0.05 rest values hard — the
+  // user reported water "feels too heavy and viscous" as the bulk of
+  // sloshing fluid was in that range. Widen the band (0.03, 0.6) so
+  // only TRULY near-stationary particles get the rest clamp, and
+  // soften the rest values (0.94 -> 0.965, 0.05 -> 0.025) so settle
+  // feels like water gliding to rest, not glue grabbing it.
+  let restW = 1.0 - smoothstep(0.03, 0.60, speed);
+  let effectiveDamp = mix(P.velDamping, 0.965, restW);
+  let effectiveVisc = mix(P.viscosity, 0.025, restW);
   newC = newC * (1.0 - effectiveVisc);
   newV = newV * effectiveDamp;
   p = p + newV * P.dt;

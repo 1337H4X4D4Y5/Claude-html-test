@@ -255,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v61 (2026-05-11 — box matches your phone aspect + camera fits exactly)';
+const APP_VERSION = 'mpm-v62 (2026-05-11 — fix stuck particles + deeper box + camera fits front face)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -301,7 +301,17 @@ let FILL_VOLUME = 4 * BOX_HALF_X * BOX_HALF_Y * BOX_HALF_Z;
 let _natRho = N * 1.0 / FILL_VOLUME;
 
 function recomputeBoxDerived() {
-  GRID_HALF = Math.max(BOX_HALF_X, BOX_HALF_Y, BOX_HALF_Z);
+  // v62: grid is 2 cells wider than the box on every face. Why: cs_p2g
+  // and cs_g2p early-return when base.* falls outside [0, GRID_SIZE-3].
+  // With the previous gridHalf = max(boxHalf), a particle clamped to
+  // p.y = boxHalfY - 0.01 had base.y = -1 in the next frame's gather
+  // and the particle never updated again — visually, fluid that hit
+  // the floor got "stuck below the screen". Margin formula:
+  //   gridHalf = max(box) * GRID_SIZE / (GRID_SIZE - 4)
+  // gives exactly 2 cells of padding on each end so any in-box position
+  // maps to a valid base index.
+  const maxHalf = Math.max(BOX_HALF_X, BOX_HALF_Y, BOX_HALF_Z);
+  GRID_HALF = maxHalf * GRID_SIZE / (GRID_SIZE - 4);
   CELL_SIZE = (2 * GRID_HALF) / GRID_SIZE;
   FILL_VOLUME = 4 * BOX_HALF_X * BOX_HALF_Y * BOX_HALF_Z;
   _natRho = N * 1.0 / FILL_VOLUME;
@@ -1160,11 +1170,12 @@ async function initAndRun() {
 
   // v61: size the simulation box to match the canvas aspect, so the box
   // edges line up with the phone screen edges exactly. Keep BOX_HALF_Y
-  // = 1.0 (height anchor) and derive width from aspect. Depth (Z) stays
-  // a thin iPhone-like proportion so the fluid is constrained front/back.
+  // = 1.0 (height anchor) and derive width from aspect.
+  // v62: depth (Z) was 0.06 (iPhone-thin), now 0.25 per user request —
+  // gives the fluid real volume to slosh in front/back.
   const canvasAspect = canvas.width / canvas.height;   // < 1 in portrait
   BOX_HALF_X = canvasAspect * BOX_HALF_Y;
-  BOX_HALF_Z = 0.06;
+  BOX_HALF_Z = 0.25;
   recomputeBoxDerived();
   applyPreset(state.preset);   // refresh pressureK + restDensity from new _natRho
 
@@ -1471,13 +1482,12 @@ async function initAndRun() {
 
   // --- Camera ---
   function buildViewProj(aspect) {
-    // v61: fit camera so the box exactly fills the viewport.
-    // visible_half_h = d * tan(fovY/2) — set equal to BOX_HALF_Y.
-    // Because BOX_HALF_X = aspect * BOX_HALF_Y (set in initAndRun), this
-    // also makes visible_half_w = aspect * d * tan = BOX_HALF_X exactly.
+    // v62: fit so the FRONT face of the box (z = +BOX_HALF_Z) fills the
+    // viewport. Front-face is closer to camera, so it projects largest;
+    // fitting from z=0 (v61) over-extended the front corners off-screen.
     const fovY = 50 * DEG;
     const near = 0.1, far = 100;
-    const fitD = BOX_HALF_Y / Math.tan(fovY / 2);
+    const fitD = BOX_HALF_Y / Math.tan(fovY / 2) + BOX_HALF_Z;
     const eye = [0, 0, fitD];
     const f = 1 / Math.tan(fovY / 2);
     const proj = [

@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v61</span>
+    <span class="tag">v62</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v61 makes the simulation box match the user's actual canvas aspect (BOX_HALF_X = aspect × height) and moves the camera so box edges hit the screen edges exactly. Presets now use pressureKMul so physics stays stable across box sizes.</div>
+  <div class="desc">MLS-MPM on the GPU. v62 fixes "stuck particles at the floor" (grid now extends 2 cells beyond box bounds so wall-clamped positions always have valid grid mapping). Box is deeper (Z half-extent 0.06 → 0.25) and the camera fits from the front face so corners don't clip the screen.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

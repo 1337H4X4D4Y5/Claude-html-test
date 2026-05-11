@@ -834,13 +834,15 @@
 
     test('gpu-mpm v48: CFL margin > 1.0 at current SIM_TUNE values', () => {
       // v61: presets store pressureKMul (multiplier over _natRho).
-      // c = sqrt(K/rho0) = sqrt(pressureKMul) since rho0 == _natRho. CFL
-      // depends only on the multiplier, not absolute values, so box-volume
-      // changes don't affect it.
+      // c = sqrt(K/rho0) = sqrt(pressureKMul) since rho0 == _natRho.
+      // v62: grid extends 2 cells beyond max(boxHalf) on each face, so
+      // cellSize = 2 * gridHalf / GRID_SIZE = 2 * maxBox / (GRID_SIZE - 4)
+      // for the worst-case (maxBox = BOX_HALF_Y = 1.0).
       const src = readMpmScript();
       const mulMatch = src.match(/pressureKMul:\s*(\d+(?:\.\d+)?)/);
       assert(mulMatch, 'pressureKMul literal not found');
-      const cellSize = 2.0 / parseGridSize(src);
+      const gridSize = parseGridSize(src);
+      const cellSize = 2.0 / (gridSize - 4);
       const subDt = 1 / 240;
       const soundC = Math.sqrt(parseFloat(mulMatch[1]));
       const cflDt = cellSize / soundC;
@@ -890,8 +892,9 @@
       // v61: presets store pressureKMul (multiplier over _natRho). CFL
       // margin depends only on the multiplier — c = sqrt(K/rho0) =
       // sqrt(pressureKMul) since rho0 = _natRho — so we just check each.
+      // v62: cellSize = 2 / (GRID_SIZE - 4) per the 2-cell-margin grid.
       const src = readMpmScript();
-      const cellSize = 2.0 / parseGridSize(src);
+      const cellSize = 2.0 / (parseGridSize(src) - 4);
       const subDt = 1 / 240;
       const re = /pressureKMul:\s*(\d+(?:\.\d+)?)/g;
       const multipliers = [];

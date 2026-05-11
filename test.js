@@ -867,7 +867,11 @@
       // Each preset must define every live tunable so a swap doesn't leave
       // stale fields. Pull each tune block and verify keys.
       const tuneRe = /key:\s*'([a-z]+)',\s*label:[^,]+,\s*tune:\s*{([\s\S]*?)}/g;
-      const required = ['pressureK', 'velDamping', 'restitution', 'wallFriction', 'viscosity', 'maxAccel'];
+      const required = [
+        'pressureK', 'velDamping', 'restitution', 'wallFriction', 'viscosity', 'maxAccel',
+        'baseColorR', 'baseColorG', 'baseColorB',
+        'absorptionR', 'absorptionG', 'absorptionB',
+      ];
       let m;
       let count = 0;
       while ((m = tuneRe.exec(arrMatch[1]))) {
@@ -955,6 +959,7 @@
         'resolutionX', 'resolutionY', 'thicknessScale', '_pad0',
         'lightDirX', 'lightDirY', 'lightDirZ', '_pad1',
         'absorptionR', 'absorptionG', 'absorptionB', '_pad2',
+        'baseColorR', 'baseColorG', 'baseColorB', '_pad3',
       ];
       assert(fields.length === expectedWgsl.length,
         'CompositeParams has ' + fields.length + ' fields, expected ' + expectedWgsl.length);
@@ -962,20 +967,20 @@
         assert(fields[i] === expectedWgsl[i],
           'CompositeParams field ' + i + ': expected "' + expectedWgsl[i] + '", got "' + fields[i] + '"');
       }
-      // Now confirm JS writes the same logical 16 slots (every compBuf[N] = ...).
+      // Now confirm JS writes the same logical 20 slots (every compBuf[N] = ...).
       const jsAssigns = [];
       const re = /compBuf\[(\d+)\]\s*=\s*([^;]+);/g;
       let m;
       while ((m = re.exec(src))) jsAssigns.push(parseInt(m[1], 10));
       jsAssigns.sort((a, b) => a - b);
-      for (let i = 0; i < 16; i++) {
+      for (let i = 0; i < 20; i++) {
         assert(jsAssigns.indexOf(i) >= 0, 'compBuf[' + i + '] never assigned in JS');
       }
-      // COMPOSITE_PARAMS_SIZE must equal 64 (16 floats).
+      // COMPOSITE_PARAMS_SIZE must equal 80 (20 floats).
       const sizeMatch = src.match(/COMPOSITE_PARAMS_SIZE\s*=\s*(\d+)/);
       assert(sizeMatch, 'COMPOSITE_PARAMS_SIZE constant not found');
-      assert(parseInt(sizeMatch[1], 10) === 64,
-        'COMPOSITE_PARAMS_SIZE must be 64 bytes (got ' + sizeMatch[1] + ')');
+      assert(parseInt(sizeMatch[1], 10) === 80,
+        'COMPOSITE_PARAMS_SIZE must be 80 bytes (got ' + sizeMatch[1] + ')');
     });
 
     test('gpu-mpm v53: thickness pass shader + pipeline + frame draw wired', () => {

@@ -255,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v55 (2026-05-11 — fix thickness alphaScale=0 bug (was silver), deeper water tint)';
+const APP_VERSION = 'mpm-v56 (2026-05-11 — each preset has its own colour (water/honey/syrup/mercury))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -288,12 +288,22 @@ const _natRho = N * 1.0 / 4.0;
 // maxAccel — no reload required because simBuf is rewritten every frame.
 // Fields not in `tune` (restDensity, particleMass, eos) stay shared so
 // the EOS shape and per-particle mass don't shift between presets.
+// v56: each preset now carries its visual identity too — base colour (the
+// transmitted hue at zero thickness) and per-channel Beer's law extinction
+// coefficients (which channel dies fastest as thickness grows).
+//
+//   Water:    light cyan -> deep blue at depth   (red dies first)
+//   Honey:    amber      -> dark amber at depth  (blue dies first)
+//   Syrup:    orange     -> dark brown at depth  (blue + green absorbed)
+//   Mercury:  silver     -> nearly opaque        (all channels absorb hard)
 const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
       pressureK: _natRho * 50, velDamping: 0.998, restitution: 0.20,
       wallFriction: 0.95, viscosity: 0.03, maxAccel: 50.0,
+      baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
+      absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
     },
   },
   {
@@ -302,6 +312,8 @@ const FLUID_PRESETS = [
       // Soft K + heavy damping + sticky walls + very high XSPH viscosity.
       pressureK: _natRho * 30, velDamping: 0.985, restitution: 0.05,
       wallFriction: 0.75, viscosity: 0.20, maxAccel: 25.0,
+      baseColorR: 1.00, baseColorG: 0.78, baseColorB: 0.32,
+      absorptionR: 0.6, absorptionG: 1.8, absorptionB: 6.0,
     },
   },
   {
@@ -309,6 +321,8 @@ const FLUID_PRESETS = [
     tune: {
       pressureK: _natRho * 40, velDamping: 0.993, restitution: 0.10,
       wallFriction: 0.85, viscosity: 0.10, maxAccel: 40.0,
+      baseColorR: 0.85, baseColorG: 0.48, baseColorB: 0.18,
+      absorptionR: 1.5, absorptionG: 3.5, absorptionB: 8.0,
     },
   },
   {
@@ -318,6 +332,8 @@ const FLUID_PRESETS = [
       // viscosity, nearly-free slip, big bounce. Reads as a dense metal.
       pressureK: _natRho * 80, velDamping: 0.9995, restitution: 0.40,
       wallFriction: 0.99, viscosity: 0.002, maxAccel: 120.0,
+      baseColorR: 0.85, baseColorG: 0.88, baseColorB: 0.95,
+      absorptionR: 8.0, absorptionG: 8.0, absorptionB: 8.0,
     },
   },
 ];
@@ -949,6 +965,7 @@ struct CompositeParams {
   resolutionX: f32, resolutionY: f32, thicknessScale: f32, _pad0: f32,
   lightDirX: f32, lightDirY: f32, lightDirZ: f32, _pad1: f32,
   absorptionR: f32, absorptionG: f32, absorptionB: f32, _pad2: f32,
+  baseColorR: f32, baseColorG: f32, baseColorB: f32, _pad3: f32,
 };
 
 @group(0) @binding(0) var depthTex: texture_depth_2d;
@@ -1015,10 +1032,11 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     exp(-P.absorptionG * thickness),
     exp(-P.absorptionB * thickness)
   );
-  // Water base colour: light cyan. Even at zero thickness this reads as
-  // water rather than white paint, while Beer's law still deepens it
-  // toward dark blue as thickness grows.
-  let waterTint = vec3<f32>(0.45, 0.78, 0.92) * absorption;
+  // Per-preset base colour (cyan for water, amber for honey, etc.). Even
+  // at zero thickness this reads as the fluid's intrinsic colour, while
+  // Beer's law absorption deepens it as thickness grows.
+  let baseColor = vec3<f32>(P.baseColorR, P.baseColorG, P.baseColorB);
+  let waterTint = baseColor * absorption;
 
   // Sky reflection sampled by the reflected view ray. In view space the
   // camera looks down -Z and "up" is +Y; reflectedV.y picks the right
@@ -1152,9 +1170,9 @@ async function initAndRun() {
     size: RENDER_PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  // Composite uniform buffer. v53: bumped 48 → 64 bytes to fit the
-  // thicknessScale + absorption coefficients added for Beer's-law water.
-  const COMPOSITE_PARAMS_SIZE = 64;
+  // Composite uniform buffer. v53: bumped 48 → 64 for thicknessScale +
+  // absorption. v56: bumped 64 → 80 for baseColor (per-preset hue).
+  const COMPOSITE_PARAMS_SIZE = 80;
   const compositeParamsBuf = device.createBuffer({
     size: COMPOSITE_PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -1493,11 +1511,16 @@ async function initAndRun() {
     const Llen = Math.hypot(Lv[0], Lv[1], Lv[2]) || 1;
     compBuf[8] = Lv[0] / Llen; compBuf[9] = Lv[1] / Llen; compBuf[10] = Lv[2] / Llen;
     compBuf[11] = 0;
-    // Beer's law extinction coefficients per channel. Red highest → dies
-    // first in thick water; blue lowest → carries through, giving the
-    // characteristic deep-blue tint.
-    compBuf[12] = 5.0; compBuf[13] = 2.5; compBuf[14] = 0.8;
+    // v56: Beer's law extinction + base colour are per-preset (sourced
+    // from SIM_TUNE). Tapping a preset hot-swaps both physics and look.
+    compBuf[12] = SIM_TUNE.absorptionR;
+    compBuf[13] = SIM_TUNE.absorptionG;
+    compBuf[14] = SIM_TUNE.absorptionB;
     compBuf[15] = 0;
+    compBuf[16] = SIM_TUNE.baseColorR;
+    compBuf[17] = SIM_TUNE.baseColorG;
+    compBuf[18] = SIM_TUNE.baseColorB;
+    compBuf[19] = 0;
     device.queue.writeBuffer(compositeParamsBuf, 0, compBuf);
 
     const enc2 = device.createCommandEncoder();

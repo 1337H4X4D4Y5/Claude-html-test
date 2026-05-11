@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v86 (2026-05-11 — box side walls + thin-water refraction clamp + softer caustics)';
+const APP_VERSION = 'mpm-v87 (2026-05-11 — proper caustic curves (noise level-set, not diagonal stripes))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1186,28 +1186,36 @@ fn fbm2(p: vec2<f32>, t: f32) -> f32 {
   return v;
 }
 
-// v85: projected light caustics — the classic "dancing bright patterns
-// on the pool floor" that water focuses through its surface curvature.
-// We don't trace rays; we just paint a caustic-shaped procedural pattern
-// onto the backdrop. The warp-then-narrow-sin trick gives the sharp
-// converging-bright look real caustics have. Animated by P.time so the
-// pattern flows continuously.
+// v87: projected light caustics, rewritten. Previous version computed
+// sin(q.x + q.y) which produces diagonal stripes — wrong. Real
+// caustics are the LEVEL SET of a smooth field: the curves where some
+// smoothly-varying quantity equals a constant. Through fBm noise, the
+// 0.5-level-set is a tangle of wavy bright curves that intersect at
+// bright nodes — exactly the underwater pool-floor look.
+//
+//   1. Iteratively warp UV space so the noise flows like turbulent water.
+//   2. Sample fBm (4 octaves) at the warped UV.
+//   3. Distance-to-0.5 gives the caustic "skeleton".
+//   4. Animated by P.time drift inside fbm2.
 fn lightCaustic(p: vec2<f32>, t: f32) -> f32 {
-  // Two iterations of UV warping with sinusoids — Inigo-Quilez-style.
-  let q1 = vec2<f32>(
-    p.x + sin(p.y * 1.5 + t * 0.43) * 0.45,
-    p.y + cos(p.x * 1.3 + t * 0.51) * 0.45
+  var q = p;
+  // Two warp iterations — different freqs/phases per axis so the warp
+  // is anisotropic and the resulting caustic isn't grid-aligned.
+  q = vec2<f32>(
+    q.x + sin(q.y * 1.5 + t * 0.41) * 0.40,
+    q.y + cos(q.x * 1.7 + t * 0.53) * 0.40,
   );
-  let q2 = vec2<f32>(
-    q1.x + sin(q1.y * 2.6 + t * 0.31) * 0.28,
-    q1.y + cos(q1.x * 2.9 + t * 0.37) * 0.28
+  q = vec2<f32>(
+    q.x + sin(q.y * 2.7 + t * 0.31) * 0.22,
+    q.y + cos(q.x * 2.9 + t * 0.37) * 0.22,
   );
-  let d = q2.x + q2.y;
-  // v86: pow 8 -> 4 — wider, softer bright peaks instead of pinpoint
-  // sharp spots. Reads more like real caustic flowing patterns and
-  // less like a regular dot grid.
-  let s = sin(d * 1.8 + t * 0.2) * 0.5 + 0.5;
-  return pow(s, 4.0);
+  // Sample the multi-octave noise. fbm2 already animates with t internally.
+  let n = fbm2(q * 0.55, t * 0.25);
+  // Two level sets at 0.5 and 0.62 — gives doubled-up caustic curves
+  // that look like real sunlight on a pool floor.
+  let l1 = 1.0 - smoothstep(0.0, 0.05, abs(n - 0.50));
+  let l2 = 1.0 - smoothstep(0.0, 0.04, abs(n - 0.62));
+  return clamp(l1 + l2 * 0.6, 0.0, 1.0);
 }
 
 // Procedural three-stop sky gradient (view-space Y). Used by the Fresnel
@@ -1329,13 +1337,17 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let causticTint = vec3<f32>(1.00, 0.96, 0.84);
   bg = bg + causticTint * (curvatureCaustic * curvatureCaustic) * 0.5;
 
-  // v85/v86: projected light caustics. Procedural pattern keyed to
-  // surface world XZ and time; multiplicative onto bg so the tile
-  // pattern stays visible. v86 dropped multiplier 1.4 -> 0.5 and the
-  // pow exponent (in lightCaustic) 8 -> 4, much subtler.
+  // v87: projected light caustics — additively brightens the floor at
+  // the caustic curves. Additive (not multiplicative) matches how real
+  // caustic light works: sunlight focused through the surface deposits
+  // extra photons on the floor at curve peaks; trough regions still get
+  // ambient floor light. With lc in [0,1] and tint magnitude ~0.45 the
+  // peak adds half-white on top of bg, which saturates over the tile
+  // (0.9) → visibly bright lines without obliterating the tile pattern.
   let causticUV = vec2<f32>(viewPos.x, -viewPos.z) * 6.0;
   let lc = lightCaustic(causticUV, P.time);
-  bg = bg * (1.0 + lc * 0.5);
+  let causticColor = vec3<f32>(0.50, 0.46, 0.36);
+  bg = bg + lc * causticColor;
 
   // Body model (v60+): uniform-opacity lerp between absorbed background
   // and lit baseColor, so baseColor keeps its hue at any thickness.

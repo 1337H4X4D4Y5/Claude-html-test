@@ -1133,6 +1133,27 @@
         'cs_g2p must compute effective damping/viscosity from rest weight');
     });
 
+    test('gpu-mpm v81: bloom post-process pipeline wired (extract + 2-blur + combine)', () => {
+      const src = readMpmScript();
+      assert(src.indexOf('WGSL_BLOOM') >= 0, 'WGSL_BLOOM shader missing');
+      assert(src.indexOf('WGSL_COMBINE') >= 0, 'WGSL_COMBINE shader missing');
+      assert(src.indexOf('bloomBrightPipeline') >= 0, 'bloomBrightPipeline not created');
+      assert(src.indexOf('bloomBlurHPipeline') >= 0, 'bloomBlurHPipeline not created');
+      assert(src.indexOf('bloomBlurVPipeline') >= 0, 'bloomBlurVPipeline not created');
+      assert(src.indexOf('combinePipeline') >= 0, 'combinePipeline not created');
+      assert(src.indexOf('compositeTex') >= 0, 'compositeTex render target not created');
+      // Composite must now target compositeTex (not the canvas view directly).
+      const fluidCompIdx = src.indexOf('p.setPipeline(compositePipeline)');
+      assert(fluidCompIdx >= 0, 'composite pipeline never used in frame loop');
+      // Look back ~300 chars to find the colorAttachment view used for this pass.
+      const ctxBefore = src.slice(Math.max(0, fluidCompIdx - 400), fluidCompIdx);
+      assert(ctxBefore.indexOf('compositeTex.createView()') >= 0,
+        'composite pass must target compositeTex (not canvas) for bloom to read it');
+      // Final combine must target the canvas view.
+      const combineIdx = src.indexOf('p.setPipeline(combinePipeline)');
+      assert(combineIdx >= 0, 'combinePipeline never used in frame loop');
+    });
+
     test('gpu-mpm v79: composite uses fractal noise to perturb surface normal', () => {
       const src = readMpmScript();
       const compIdx = src.indexOf('const WGSL_COMPOSITE');

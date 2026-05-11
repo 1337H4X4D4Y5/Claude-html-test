@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v80 (2026-05-11 — kill residual dimples (wider imposter + bigger blur))';
+const APP_VERSION = 'mpm-v81 (2026-05-11 — bloom on specular highlights (cinematic sparkle))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1312,6 +1312,105 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 }
 `;
 
+// v81: bloom post-process. Bright pixels (specular glints, sky-reflected
+// highlights) get extracted to a side texture, blurred with a wide
+// gaussian, then added back onto the canvas with controllable intensity.
+// The result is a cinematic sparkle on the wet surface; the cost is
+// 4 small full-screen passes per frame.
+const WGSL_BLOOM = `
+struct BloomParams {
+  threshold: f32,
+  intensity: f32,
+  _pad0: f32,
+  _pad1: f32,
+};
+
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> P: BloomParams;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 3.0, -1.0), vec2<f32>(-1.0,  3.0)
+  );
+  return vec4<f32>(p[vi], 0.0, 1.0);
+}
+
+// Soft-knee bright extract: only pixels whose luminance exceeds
+// P.threshold contribute, and the contribution rises quadratically with
+// the excess so very-bright highlights bloom much harder than mildly
+// bright ones (matches real-world bloom from camera optics).
+@fragment
+fn fs_bright(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = textureLoad(src, vec2<i32>(i32(frag.x), i32(frag.y)), 0).rgb;
+  let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+  let excess = max(0.0, lum - P.threshold);
+  let weight = excess * excess / (lum + 0.001);
+  return vec4<f32>(c * weight, 1.0);
+}
+
+// Separable gaussian blur for the bloom texture. R=12 sigma=6 gives a
+// soft glow that spans 25 pixels — enough for visible bloom without
+// being so wide it crosses the screen.
+fn bloomBlur1D(coord: vec2<i32>, dir: vec2<i32>) -> vec3<f32> {
+  let R: i32 = 12;
+  let sigma2_inv: f32 = 1.0 / 50.0;
+  var sum: vec3<f32> = textureLoad(src, coord, 0).rgb;
+  var totalW: f32 = 1.0;
+  for (var i: i32 = 1; i <= R; i = i + 1) {
+    let w = exp(-f32(i * i) * sigma2_inv);
+    let l = textureLoad(src, coord - dir * i, 0).rgb;
+    let r = textureLoad(src, coord + dir * i, 0).rgb;
+    sum = sum + (l + r) * w;
+    totalW = totalW + 2.0 * w;
+  }
+  return sum / totalW;
+}
+
+@fragment
+fn fs_blurH(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = bloomBlur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(1, 0));
+  return vec4<f32>(c, 1.0);
+}
+@fragment
+fn fs_blurV(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = bloomBlur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(0, 1));
+  return vec4<f32>(c, 1.0);
+}
+`;
+
+// v81: final combine — reads the un-bloomed composite and the bloomed
+// bright pixels, adds them on the canvas. Intensity-scaled so the user
+// can dial bloom strength without rebuilding the pipeline.
+const WGSL_COMBINE = `
+struct BloomParams {
+  threshold: f32,
+  intensity: f32,
+  _pad0: f32,
+  _pad1: f32,
+};
+
+@group(0) @binding(0) var compositeTex: texture_2d<f32>;
+@group(0) @binding(1) var bloomTex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> P: BloomParams;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 3.0, -1.0), vec2<f32>(-1.0,  3.0)
+  );
+  return vec4<f32>(p[vi], 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let coord = vec2<i32>(i32(frag.x), i32(frag.y));
+  let c = textureLoad(compositeTex, coord, 0).rgb;
+  let b = textureLoad(bloomTex, coord, 0).rgb;
+  return vec4<f32>(c + b * P.intensity, 1.0);
+}
+`;
+
 const WGSL_LINES = `
 struct RenderParams {
   viewProj: mat4x4<f32>,
@@ -1580,6 +1679,49 @@ async function initAndRun() {
     primitive: { topology: 'triangle-list', cullMode: 'none' },
   });
 
+  // v81: bloom post-process pipelines.
+  const bloomModule = device.createShaderModule({ code: WGSL_BLOOM });
+  const bloomBrightPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: bloomModule, entryPoint: 'vs_main' },
+    fragment: { module: bloomModule, entryPoint: 'fs_bright', targets: [{ format: format }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const bloomBlurHPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: bloomModule, entryPoint: 'vs_main' },
+    fragment: { module: bloomModule, entryPoint: 'fs_blurH', targets: [{ format: format }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const bloomBlurVPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: bloomModule, entryPoint: 'vs_main' },
+    fragment: { module: bloomModule, entryPoint: 'fs_blurV', targets: [{ format: format }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const combineModule = device.createShaderModule({ code: WGSL_COMBINE });
+  const combinePipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: combineModule, entryPoint: 'vs_main' },
+    fragment: { module: combineModule, entryPoint: 'fs_main', targets: [{ format: format }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  // BloomParams uniform buffer (16 bytes).
+  const BLOOM_PARAMS_SIZE = 16;
+  const bloomParamsBuf = device.createBuffer({
+    size: BLOOM_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  // Write once — threshold and intensity are constants for now.
+  // threshold 0.7 catches only the brightest highlights (specular,
+  // sky-edge); intensity 0.6 is moderate sparkle without overcooking.
+  const bloomBuf = new Float32Array(BLOOM_PARAMS_SIZE / 4);
+  bloomBuf[0] = 0.7;   // threshold
+  bloomBuf[1] = 0.6;   // intensity
+  bloomBuf[2] = 0;
+  bloomBuf[3] = 0;
+  device.queue.writeBuffer(bloomParamsBuf, 0, bloomBuf);
+
   const linesModule = device.createShaderModule({ code: WGSL_LINES });
   const linesPipeline = device.createRenderPipeline({
     layout: 'auto',
@@ -1616,16 +1758,16 @@ async function initAndRun() {
     entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
   });
 
-  // Depth + thickness + background textures and ping-pong bind groups
-  // for the SSF passes. v73: thicknessTex now goes through a 2-pass
-  // separable blur (thicknessH then thicknessV) before the composite
-  // samples it — kills the grid-of-dimples artifact that came from
-  // per-cell density variation read through Beer's law.
+  // Depth + thickness + background + bloom textures and ping-pong bind
+  // groups for the SSF + post-process passes.
   let depthRaw = null, depthH = null, depthV = null;
   let thicknessTex = null, thicknessH = null, thicknessV = null;
   let backgroundTex = null;
+  // v81 bloom textures.
+  let compositeTex = null, bloomBrightTex = null, bloomBlurredTex = null;
   let compositeBindGroup = null, blurH1 = null, blurV1 = null, blurH2 = null, blurV2 = null;
   let thickBlurHBind = null, thickBlurVBind = null, thickBlurHBind2 = null;
+  let bloomBrightBind = null, bloomBlurHBind = null, bloomBlurVBind = null, combineBind = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
     const w = canvas.width, h = canvas.height;
@@ -1637,6 +1779,9 @@ async function initAndRun() {
     if (thicknessH) thicknessH.destroy();
     if (thicknessV) thicknessV.destroy();
     if (backgroundTex) backgroundTex.destroy();
+    if (compositeTex) compositeTex.destroy();
+    if (bloomBrightTex) bloomBrightTex.destroy();
+    if (bloomBlurredTex) bloomBlurredTex.destroy();
     const opts = {
       size: { width: w, height: h },
       format: 'depth32float',
@@ -1661,6 +1806,17 @@ async function initAndRun() {
       format: format,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
+    // v81: bloom pipeline targets. compositeTex holds the un-bloomed
+    // fluid composite; bloomBright/BlurredTex are intermediate buffers
+    // for the bright-extract -> blur sequence.
+    const canvasFmtOpts = {
+      size: { width: w, height: h },
+      format: format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    };
+    compositeTex   = device.createTexture(canvasFmtOpts);
+    bloomBrightTex = device.createTexture(canvasFmtOpts);
+    bloomBlurredTex= device.createTexture(canvasFmtOpts);
     blurH1 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthRaw.createView() }] });
     blurV1 = device.createBindGroup({ layout: blurV.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthH.createView() }] });
     blurH2 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthV.createView() }] });
@@ -1686,6 +1842,39 @@ async function initAndRun() {
         { binding: 1, resource: { buffer: compositeParamsBuf } },
         { binding: 2, resource: thicknessV.createView() },   // <-- BLURRED
         { binding: 3, resource: backgroundTex.createView() },
+      ],
+    });
+    // v81 bloom pipeline bind groups.
+    bloomBrightBind = device.createBindGroup({
+      layout: bloomBrightPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: compositeTex.createView() },
+        { binding: 1, resource: { buffer: bloomParamsBuf } },
+      ],
+    });
+    bloomBlurHBind = device.createBindGroup({
+      layout: bloomBlurHPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: bloomBrightTex.createView() },
+        { binding: 1, resource: { buffer: bloomParamsBuf } },
+      ],
+    });
+    bloomBlurVBind = device.createBindGroup({
+      layout: bloomBlurVPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: bloomBlurredTex.createView() },
+        { binding: 1, resource: { buffer: bloomParamsBuf } },
+      ],
+    });
+    // Final combine: composite + bloomed bright (alternating bloomBright
+    // tex which holds the V-blur output, since we ping-pong H→bloomBlurred,
+    // V→bloomBright).
+    combineBind = device.createBindGroup({
+      layout: combinePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: compositeTex.createView() },
+        { binding: 1, resource: bloomBrightTex.createView() },
+        { binding: 2, resource: { buffer: bloomParamsBuf } },
       ],
     });
     lastW = w; lastH = h;
@@ -1978,16 +2167,68 @@ async function initAndRun() {
       p.draw(3, 1); p.end();
     }
     const view = ctx.getCurrentTexture().createView();
+    // v81: composite now renders to compositeTex (not the canvas) so
+    // we can run the bloom post-process on its output before final blit.
     {
-      // v59: composite both blits the background through (no-fluid pixels)
-      // and refracts it for fluid pixels, so the wireframe is no longer
-      // re-drawn on top of the canvas — it's already inside backgroundTex.
       const p = enc2.beginRenderPass({
-        colorAttachments: [{ view: view, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
+        colorAttachments: [{
+          view: compositeTex.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
       });
       p.setPipeline(compositePipeline); p.setBindGroup(0, compositeBindGroup);
       p.draw(3, 1);
       p.end();
+    }
+    // v81 bloom pipeline:
+    //   compositeTex -> [bright extract]  -> bloomBrightTex
+    //   bloomBrightTex -> [H blur]        -> bloomBlurredTex
+    //   bloomBlurredTex -> [V blur]       -> bloomBrightTex (ping-pong)
+    //   compositeTex + bloomBrightTex -> [combine] -> canvas
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: bloomBrightTex.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(bloomBrightPipeline); p.setBindGroup(0, bloomBrightBind);
+      p.draw(3, 1); p.end();
+    }
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: bloomBlurredTex.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(bloomBlurHPipeline); p.setBindGroup(0, bloomBlurHBind);
+      p.draw(3, 1); p.end();
+    }
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: bloomBrightTex.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(bloomBlurVPipeline); p.setBindGroup(0, bloomBlurVBind);
+      p.draw(3, 1); p.end();
+    }
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: view,
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(combinePipeline); p.setBindGroup(0, combineBind);
+      p.draw(3, 1); p.end();
     }
     device.queue.submit([enc2.finish()]);
 

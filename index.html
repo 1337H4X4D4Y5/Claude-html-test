@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v80</span>
+    <span class="tag">v81</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v80 erases residual per-particle dimples: wider depth imposters, bilateral threshold up 2× so it averages farther inside the fluid body, 1 extra H+V round of depth blur, 40% wider thickness blur. The v79 fractal ripples supply the visible micro-detail now that the underlying surface is glass-smooth.</div>
+  <div class="desc">MLS-MPM on the GPU. v81 adds bloom — composite now renders to a texture, a 4-pass post-process pipeline (bright extract → H blur → V blur → combine) adds cinematic sparkle around specular highlights and sky-reflection edges.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
@@ -112,7 +112,7 @@
 <a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
-    <span class="tag">56</span>
+    <span class="tag">57</span>
   </div>
   <div class="desc">Run the full simulation test suite in the browser. CPU sim stability + gpu-mpm regression checks (TDZ, error banner, SimParams / CompositeParams uniform layouts, CFL margin, wall-friction + viscosity, preset menu, thickness pass, WGSL reserved-word scanner).</div>
 </a>

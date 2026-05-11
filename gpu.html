@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<title>Water Box (WebGPU)</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #050913; color: #e8f1ff;
+    font-family: -apple-system, BlinkMacSystemFont, ui-monospace, monospace;
+    -webkit-user-select: none; user-select: none;
+    overscroll-behavior: none; touch-action: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #overlay {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 18px;
+    background: radial-gradient(circle at 50% 40%, rgba(20,40,80,0.92), rgba(0,0,0,0.95));
+    z-index: 10;
+    padding: env(safe-area-inset-top, 0) env(safe-area-inset-right, 0) env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0);
+    text-align: center;
+  }
+  #overlay h1 { margin: 0; font-size: 26px; font-weight: 600; }
+  #overlay p { margin: 0 24px; font-size: 14px; opacity: 0.8; max-width: 320px; line-height: 1.4; }
+  #start-btn {
+    appearance: none; -webkit-appearance: none; border: none;
+    min-width: 240px; min-height: 56px; padding: 0 28px;
+    border-radius: 28px;
+    background: linear-gradient(135deg, #4aa3ff, #2a7fb8);
+    color: #fff; font-size: 17px; font-weight: 600;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    box-shadow: 0 8px 24px rgba(74,163,255,0.35);
+  }
+  #overlay-version, #overlay-msg {
+    margin-top: 6px; font-size: 12px; opacity: 0.55;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    max-width: 320px; word-break: break-word;
+  }
+  #overlay-msg.fail { opacity: 1; color: #ffb6b6; }
+  #fps {
+    position: fixed; top: env(safe-area-inset-top, 8px); left: 8px;
+    font-size: 11px; opacity: 0.6; pointer-events: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #version {
+    position: fixed; top: env(safe-area-inset-top, 8px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    padding: 4px 9px; border-radius: 10px;
+    background: rgba(74,163,255,0.18); color: #cfe6ff;
+    font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    pointer-events: none;
+  }
+  #debug {
+    position: fixed;
+    bottom: calc(env(safe-area-inset-bottom, 8px) + 8px);
+    left: 8px; right: 8px;
+    padding: 8px 10px; border-radius: 8px;
+    background: rgba(0,0,0,0.55); color: #cfe6ff;
+    font-size: 11px; line-height: 1.5;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre;
+  }
+  #copy-btn {
+    appearance: none; -webkit-appearance: none; border: none;
+    display: block; width: 100%; min-height: 38px; margin-top: 6px;
+    border-radius: 8px;
+    background: rgba(74,163,255,0.30); color: #fff;
+    font-size: 13px; font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+</style>
+</head>
+<body>
+<canvas id="gpu-canvas"></canvas>
+<div id="overlay">
+  <h1>Water Box (GPU)</h1>
+  <p>Particle fluid simulated on the GPU via WebGPU compute shaders. Tilt the phone to drag gravity around.</p>
+  <button id="start-btn">Tap to begin</button>
+  <div id="overlay-msg"></div>
+  <div id="overlay-version"></div>
+</div>
+<div id="fps"></div>
+<div id="version"></div>
+<div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
+
+<script>
+const APP_VERSION = 'gpu-v27 (2026-05-11 — WebGPU gravity + walls)';
+document.getElementById('overlay-version').textContent = APP_VERSION;
+document.getElementById('version').textContent = APP_VERSION;
+
+const N = 4000;                // particle count
+const BOX_HALF = 1.0;           // simulation box half-extent (matches glass cube)
+const PARTICLE_RADIUS = 0.05;
+
+const overlay = document.getElementById('overlay');
+const overlayMsg = document.getElementById('overlay-msg');
+const startBtn = document.getElementById('start-btn');
+const fpsEl = document.getElementById('fps');
+const debugTextEl = document.getElementById('debug-text');
+const copyBtn = document.getElementById('copy-btn');
+
+const state = {
+  gyroPermission: 'unknown',
+  events: 0,
+  beta: 0,
+  gamma: 0,
+  gravity: { x: 0, y: -9.8, z: 0 },
+  target: { x: 0, y: -9.8, z: 0 },
+  fps: 0,
+  steps: 0,
+  initError: null
+};
+
+// --- Gyro → gravity mapping. Same shared formula we tested in sim.js. ---
+const DEG = Math.PI / 180;
+function mapOrientationToGravity(beta, gamma, screenAngle, magnitude) {
+  const b = (beta || 0) * DEG, g = (gamma || 0) * DEG;
+  const cb = Math.cos(b), sb = Math.sin(b);
+  const cg = Math.cos(g), sg = Math.sin(g);
+  const gxDev =  cb * sg;
+  const gyDev = -sb;
+  const gzDev = -cb * cg;
+  const o = (screenAngle || 0) * DEG;
+  const co = Math.cos(o), so = Math.sin(o);
+  const rx =  co * gxDev + so * gyDev;
+  const ry = -so * gxDev + co * gyDev;
+  const rz = gzDev;
+  const m = Math.hypot(rx, ry, rz);
+  const mag = m < 1e-6 ? 1 : m;
+  const s = magnitude / mag;
+  return { x: rx * s, y: ry * s, z: rz * s };
+}
+
+function onOrientation(e) {
+  state.events++;
+  state.beta = e.beta || 0;
+  state.gamma = e.gamma || 0;
+  const orient = (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle
+    : (typeof window.orientation === 'number' ? window.orientation : 0);
+  state.target = mapOrientationToGravity(state.beta, state.gamma, orient, 9.8);
+}
+
+startBtn.addEventListener('click', async function () {
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const r = await DeviceOrientationEvent.requestPermission();
+      state.gyroPermission = r;
+      if (r === 'granted') window.addEventListener('deviceorientation', onOrientation, true);
+    } else {
+      state.gyroPermission = (typeof DeviceOrientationEvent === 'undefined') ? 'no-api' : 'granted';
+      window.addEventListener('deviceorientation', onOrientation, true);
+    }
+  } catch (err) {
+    state.gyroPermission = 'error: ' + (err.message || err);
+  }
+
+  // Start WebGPU after permission flow so device is created in a user-gesture context.
+  try {
+    await initAndRun();
+    overlay.style.display = 'none';
+  } catch (err) {
+    console.error(err);
+    state.initError = err.message || String(err);
+    overlayMsg.className = 'fail';
+    overlayMsg.textContent = 'WebGPU init failed: ' + state.initError;
+  }
+});
+
+// --- WebGPU init + main loop ---
+const WGSL_COMPUTE = `
+struct SimParams {
+  gravity: vec3<f32>,
+  dt: f32,
+  boxHalf: f32,
+  restitution: f32,
+  velDamping: f32,
+  _pad: f32,
+};
+
+@group(0) @binding(0) var<storage, read_write> pos: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> vel: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> P: SimParams;
+
+@compute @workgroup_size(64)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= ${N}u) { return; }
+  var p = pos[i].xyz;
+  var v = vel[i].xyz;
+
+  // Gravity
+  v = v + P.gravity * P.dt;
+  // Integrate position
+  p = p + v * P.dt;
+
+  // Wall collisions (axis-aligned cube).
+  let h = P.boxHalf;
+  if (p.x < -h) { p.x = -h; v.x = -v.x * P.restitution; }
+  else if (p.x > h) { p.x = h; v.x = -v.x * P.restitution; }
+  if (p.y < -h) { p.y = -h; v.y = -v.y * P.restitution; }
+  else if (p.y > h) { p.y = h; v.y = -v.y * P.restitution; }
+  if (p.z < -h) { p.z = -h; v.z = -v.z * P.restitution; }
+  else if (p.z > h) { p.z = h; v.z = -v.z * P.restitution; }
+
+  // Speed cap so a near-zero dt step can't fling particles.
+  let sp2 = dot(v, v);
+  let maxSp = 12.0;
+  if (sp2 > maxSp * maxSp) {
+    v = v * (maxSp / sqrt(sp2));
+  }
+
+  // Global drag
+  v = v * P.velDamping;
+
+  pos[i] = vec4<f32>(p, 0.0);
+  vel[i] = vec4<f32>(v, 0.0);
+}
+`;
+
+const WGSL_RENDER = `
+struct RenderParams {
+  viewProj: mat4x4<f32>,
+  cameraRight: vec3<f32>, _pad1: f32,
+  cameraUp: vec3<f32>, _pad2: f32,
+  particleSize: f32, _pad3: vec3<f32>,
+};
+
+@group(0) @binding(0) var<storage, read> pos: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> R: RenderParams;
+
+struct VOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32,
+           @builtin(instance_index) ii: u32) -> VOut {
+  // Two triangles forming a quad — vertex_index 0..5 with strip-like layout.
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0)
+  );
+  let q = quad[vi];
+  let center = pos[ii].xyz;
+  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * R.particleSize;
+  var out: VOut;
+  out.position = R.viewProj * vec4<f32>(wp, 1.0);
+  out.uv = q;
+  return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+  let r = length(in.uv);
+  if (r > 1.0) { discard; }
+  // Soft falloff so overlapping sprites blend into a fluid glow.
+  let glow = pow(1.0 - r, 2.0);
+  let col = mix(vec3<f32>(0.16, 0.43, 0.78), vec3<f32>(0.78, 0.92, 1.0), glow);
+  return vec4<f32>(col, glow * 0.55);
+}
+`;
+
+// Render-only edge wireframe of the cube container.
+const WGSL_LINES = `
+struct RenderParams {
+  viewProj: mat4x4<f32>,
+  cameraRight: vec3<f32>, _pad1: f32,
+  cameraUp: vec3<f32>, _pad2: f32,
+  particleSize: f32, _pad3: vec3<f32>,
+};
+
+@group(0) @binding(0) var<uniform> R: RenderParams;
+
+@vertex
+fn vs_main(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
+  return R.viewProj * vec4<f32>(p, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+  return vec4<f32>(0.66, 0.85, 1.0, 0.7);
+}
+`;
+
+async function initAndRun() {
+  const canvas = document.getElementById('gpu-canvas');
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(canvas.clientWidth * dpr);
+  canvas.height = Math.floor(canvas.clientHeight * dpr);
+  window.addEventListener('resize', function () {
+    canvas.width = Math.floor(canvas.clientWidth * dpr);
+    canvas.height = Math.floor(canvas.clientHeight * dpr);
+  });
+
+  if (!navigator.gpu) throw new Error('navigator.gpu missing');
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error('no adapter');
+  const device = await adapter.requestDevice();
+  const ctx = canvas.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device: device, format: format, alphaMode: 'premultiplied' });
+
+  // --- Buffers ---
+  const posData = new Float32Array(N * 4);
+  const velData = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    posData[i * 4 + 0] = (Math.random() * 2 - 1) * (BOX_HALF * 0.85);
+    posData[i * 4 + 1] = -BOX_HALF + Math.random() * BOX_HALF * 0.9;
+    posData[i * 4 + 2] = (Math.random() * 2 - 1) * (BOX_HALF * 0.85);
+    posData[i * 4 + 3] = 0;
+    velData[i * 4 + 0] = (Math.random() - 0.5) * 0.4;
+    velData[i * 4 + 1] = (Math.random() - 0.5) * 0.4;
+    velData[i * 4 + 2] = (Math.random() - 0.5) * 0.4;
+    velData[i * 4 + 3] = 0;
+  }
+  const posBuf = device.createBuffer({
+    size: posData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(posBuf, 0, posData);
+  const velBuf = device.createBuffer({
+    size: velData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(velBuf, 0, velData);
+
+  const SIM_PARAMS_SIZE = 32; // vec3 + 5 floats (with padding)
+  const simParamsBuf = device.createBuffer({
+    size: SIM_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // Render uniforms: 16*4 (mat4) + 4*4 (right.xyzw) + 4*4 (up.xyzw) + 4*4 (particleSize.xyzw)
+  const RENDER_PARAMS_SIZE = 64 + 16 + 16 + 16;
+  const renderParamsBuf = device.createBuffer({
+    size: RENDER_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // --- Compute pipeline ---
+  const computeModule = device.createShaderModule({ code: WGSL_COMPUTE });
+  const computePipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: { module: computeModule, entryPoint: 'cs_main' },
+  });
+  const computeBindGroup = device.createBindGroup({
+    layout: computePipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: posBuf } },
+      { binding: 1, resource: { buffer: velBuf } },
+      { binding: 2, resource: { buffer: simParamsBuf } },
+    ],
+  });
+
+  // --- Particle render pipeline ---
+  const renderModule = device.createShaderModule({ code: WGSL_RENDER });
+  const renderPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: renderModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: renderModule, entryPoint: 'fs_main',
+      targets: [{
+        format: format,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        },
+        writeMask: GPUColorWrite.RGB,
+      }],
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const renderBindGroup = device.createBindGroup({
+    layout: renderPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: posBuf } },
+      { binding: 1, resource: { buffer: renderParamsBuf } },
+    ],
+  });
+
+  // --- Line render pipeline for cube wireframe ---
+  const linesModule = device.createShaderModule({ code: WGSL_LINES });
+  const linesPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: {
+      module: linesModule, entryPoint: 'vs_main',
+      buffers: [{
+        arrayStride: 12,
+        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
+      }],
+    },
+    fragment: {
+      module: linesModule, entryPoint: 'fs_main',
+      targets: [{ format: format, blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' } } }],
+    },
+    primitive: { topology: 'line-list' },
+  });
+  // 12 edges * 2 vertices * 3 floats
+  const cubeEdges = new Float32Array([
+    -1,-1,-1,  1,-1,-1,    1,-1,-1,  1, 1,-1,    1, 1,-1, -1, 1,-1,   -1, 1,-1, -1,-1,-1,
+    -1,-1, 1,  1,-1, 1,    1,-1, 1,  1, 1, 1,    1, 1, 1, -1, 1, 1,   -1, 1, 1, -1,-1, 1,
+    -1,-1,-1, -1,-1, 1,    1,-1,-1,  1,-1, 1,    1, 1,-1,  1, 1, 1,   -1, 1,-1, -1, 1, 1
+  ]);
+  const cubeEdgeBuf = device.createBuffer({
+    size: cubeEdges.byteLength,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(cubeEdgeBuf, 0, cubeEdges);
+  const linesBindGroup = device.createBindGroup({
+    layout: linesPipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
+  });
+
+  // --- Camera ---
+  function buildViewProj(aspect) {
+    // Look at origin from (0, 1.6, 4).
+    const eye = [0, 1.6, 4];
+    const fovY = 50 * DEG;
+    const near = 0.1, far = 100;
+    const f = 1 / Math.tan(fovY / 2);
+    const proj = [
+      f / aspect, 0, 0, 0,
+      0, f, 0, 0,
+      0, 0, far / (near - far), -1,
+      0, 0, (near * far) / (near - far), 0
+    ];
+    // View: lookAt origin, up = +y.
+    const target = [0, 0, 0], up = [0, 1, 0];
+    const zx = eye[0] - target[0], zy = eye[1] - target[1], zz = eye[2] - target[2];
+    const zlen = Math.hypot(zx, zy, zz);
+    const zn = [zx / zlen, zy / zlen, zz / zlen];
+    const xx = up[1] * zn[2] - up[2] * zn[1];
+    const xy = up[2] * zn[0] - up[0] * zn[2];
+    const xz = up[0] * zn[1] - up[1] * zn[0];
+    const xlen = Math.hypot(xx, xy, xz);
+    const xn = [xx / xlen, xy / xlen, xz / xlen];
+    const yn = [zn[1] * xn[2] - zn[2] * xn[1], zn[2] * xn[0] - zn[0] * xn[2], zn[0] * xn[1] - zn[1] * xn[0]];
+    const view = [
+      xn[0], yn[0], zn[0], 0,
+      xn[1], yn[1], zn[1], 0,
+      xn[2], yn[2], zn[2], 0,
+      -(xn[0]*eye[0] + xn[1]*eye[1] + xn[2]*eye[2]),
+      -(yn[0]*eye[0] + yn[1]*eye[1] + yn[2]*eye[2]),
+      -(zn[0]*eye[0] + zn[1]*eye[1] + zn[2]*eye[2]),
+      1
+    ];
+    // Multiply proj * view (column-major).
+    const out = new Float32Array(16);
+    for (let row = 0; row < 4; row++) {
+      for (let col = 0; col < 4; col++) {
+        let s = 0;
+        for (let k = 0; k < 4; k++) s += proj[k * 4 + row] * view[col * 4 + k];
+        out[col * 4 + row] = s;
+      }
+    }
+    return { mvp: out, right: xn, up: yn };
+  }
+
+  // --- Main loop ---
+  let lastT = performance.now() / 1000;
+  let frames = 0, fpsAcc = 0;
+  function frame() {
+    requestAnimationFrame(frame);
+    const now = performance.now() / 1000;
+    let dt = now - lastT;
+    lastT = now;
+    if (dt > 1 / 20) dt = 1 / 20;
+    if (dt < 1 / 240) dt = 1 / 240;
+
+    // Smooth gravity toward target.
+    state.gravity.x += (state.target.x - state.gravity.x) * 0.15;
+    state.gravity.y += (state.target.y - state.gravity.y) * 0.15;
+    state.gravity.z += (state.target.z - state.gravity.z) * 0.15;
+
+    // Multiple sub-steps for stability.
+    const SUB_DT = 1 / 240;
+    const subSteps = Math.max(1, Math.min(8, Math.ceil(dt / SUB_DT)));
+    const stepDt = dt / subSteps;
+
+    // Write sim params.
+    const simBuf = new Float32Array(SIM_PARAMS_SIZE / 4);
+    simBuf[0] = state.gravity.x;
+    simBuf[1] = state.gravity.y;
+    simBuf[2] = state.gravity.z;
+    simBuf[3] = stepDt;
+    simBuf[4] = BOX_HALF;
+    simBuf[5] = 0.20;     // restitution
+    simBuf[6] = 0.992;    // velDamping
+    simBuf[7] = 0;        // pad
+    device.queue.writeBuffer(simParamsBuf, 0, simBuf);
+
+    // Compute pass(es).
+    for (let s = 0; s < subSteps; s++) {
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(computePipeline);
+      pass.setBindGroup(0, computeBindGroup);
+      pass.dispatchWorkgroups(Math.ceil(N / 64));
+      pass.end();
+      device.queue.submit([enc.finish()]);
+      state.steps++;
+    }
+
+    // Camera + render uniforms.
+    const aspect = canvas.width / canvas.height;
+    const cam = buildViewProj(aspect);
+    const renderBuf = new Float32Array(RENDER_PARAMS_SIZE / 4);
+    renderBuf.set(cam.mvp, 0);
+    renderBuf[16] = cam.right[0]; renderBuf[17] = cam.right[1]; renderBuf[18] = cam.right[2]; renderBuf[19] = 0;
+    renderBuf[20] = cam.up[0]; renderBuf[21] = cam.up[1]; renderBuf[22] = cam.up[2]; renderBuf[23] = 0;
+    renderBuf[24] = PARTICLE_RADIUS; renderBuf[25] = 0; renderBuf[26] = 0; renderBuf[27] = 0;
+    device.queue.writeBuffer(renderParamsBuf, 0, renderBuf);
+
+    // Render pass.
+    const enc2 = device.createCommandEncoder();
+    const view = ctx.getCurrentTexture().createView();
+    const pass2 = enc2.beginRenderPass({
+      colorAttachments: [{
+        view: view,
+        clearValue: { r: 0.02, g: 0.035, b: 0.07, a: 1 },
+        loadOp: 'clear', storeOp: 'store',
+      }],
+    });
+    // Cube wireframe first.
+    pass2.setPipeline(linesPipeline);
+    pass2.setBindGroup(0, linesBindGroup);
+    pass2.setVertexBuffer(0, cubeEdgeBuf);
+    pass2.draw(24, 1);
+    // Particles (additive sprites).
+    pass2.setPipeline(renderPipeline);
+    pass2.setBindGroup(0, renderBindGroup);
+    pass2.draw(6, N);
+    pass2.end();
+    device.queue.submit([enc2.finish()]);
+
+    frames++;
+    fpsAcc += dt;
+    if (fpsAcc > 0.5) { state.fps = frames / fpsAcc; frames = 0; fpsAcc = 0; }
+    updateDebug();
+  }
+  frame();
+}
+
+function fmt(v, w) {
+  const s = (v >= 0 ? ' ' : '') + v.toFixed(2);
+  return s.padStart(w || 6, ' ');
+}
+function updateDebug() {
+  debugTextEl.textContent =
+    'fps: ' + state.fps.toFixed(1) + '   particles: ' + N + '   steps: ' + state.steps + '\n' +
+    'gyro: ' + state.gyroPermission + '   events: ' + state.events + '   β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '\n' +
+    'gravity   x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) + '\n' +
+    'target    x:' + fmt(state.target.x) + ' y:' + fmt(state.target.y) + ' z:' + fmt(state.target.z);
+}
+updateDebug();
+
+copyBtn.addEventListener('click', function () {
+  const report = [
+    '=== Water Box GPU debug ===',
+    'version: ' + APP_VERSION,
+    'fps: ' + state.fps.toFixed(1),
+    'particles: ' + N,
+    'steps: ' + state.steps,
+    '',
+    'gyro permission: ' + state.gyroPermission,
+    'orientation events: ' + state.events,
+    'beta:  ' + state.beta.toFixed(3),
+    'gamma: ' + state.gamma.toFixed(3),
+    '',
+    'gravity x: ' + state.gravity.x.toFixed(3),
+    'gravity y: ' + state.gravity.y.toFixed(3),
+    'gravity z: ' + state.gravity.z.toFixed(3),
+    '',
+    'init error: ' + (state.initError || 'none'),
+    'userAgent: ' + navigator.userAgent,
+  ].join('\n');
+  function ok() { copyBtn.textContent = 'Copied ✓'; setTimeout(function () { copyBtn.textContent = 'Copy debug info'; }, 1500); }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(report).then(ok, function () {
+      const ta = document.createElement('textarea');
+      ta.value = report; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); ok(); } catch (_) {}
+      document.body.removeChild(ta);
+    });
+  }
+});
+</script>
+</body>
+</html>

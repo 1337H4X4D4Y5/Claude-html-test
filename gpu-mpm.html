@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v77 (2026-05-11 — grid 48^3 -> 64^3 (sharper sim) + substep 240 -> 300 Hz)';
+const APP_VERSION = 'mpm-v78 (2026-05-11 — finer depth + wider thickness + more blur (smoother surface))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -445,12 +445,11 @@ function applyPreset(key) {
 // _natRho can read BOX_HALF_X without TDZ. v52: 32 → 48 grid, 3.375x more
 // cells (32^3=32768 → 48^3=110592). cs_clearGrid and cs_grid scale with
 // cell count; P2G/G2P stay particle-bound.)
-// v50: 0.014 → 0.020. At v49's N=8000 and r=0.014, average inter-particle
-// distance (~0.079) was ~5.6x the radius and you could see daylight between
-// particles. New default is N=24000 (spacing ~0.055) with radius 0.020 →
-// ratio drops to 2.7x, so the SSF bilateral blur bridges neighbours into
-// one continuous surface. Still well below v33's "bubble sphere" 0.030.
-const PARTICLE_RADIUS = 0.020;
+// v78: 0.020 -> 0.016. Smaller depth imposters = finer surface detail
+// (less "blobby" silhouette). The thickness pass uses a 1.6x scaled
+// imposter to compensate, so color blending between adjacent particles
+// remains smooth even with the smaller depth radius.
+const PARTICLE_RADIUS = 0.016;
 // Fixed-point scale for atomicAdd into i32 storage. iOS WebGPU has no
 // atomic<f32>, so each float value is encoded as round(v * SCALE) and
 // decoded after the P2G pass by dividing back.
@@ -974,6 +973,9 @@ fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
 // view-ray integrated "thickness" of fluid in front of the camera —
 // exactly the quantity Beer's law (the composite shader) needs to tint
 // water by depth (deep parts darker / more blue, shallow parts clearer).
+// v78: the thickness imposter is 1.6x the size of the depth imposter so
+// neighbouring particles' colour contributions overlap heavily even with
+// a small depth radius. Depth keeps finer detail, thickness stays smooth.
 const WGSL_THICKNESS = `
 struct RenderParams {
   viewProj: mat4x4<f32>,
@@ -998,7 +1000,8 @@ fn vs_main(@builtin(vertex_index) vi: u32,
   );
   let q = quad[vi];
   let center = pos[ii].xyz;
-  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * R.particleSize;
+  // v78: 1.6x larger than the depth imposter — wider color overlap.
+  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * (R.particleSize * 1.6);
   var out: VOut;
   out.position = R.viewProj * vec4<f32>(wp, 1.0);
   out.uv = q;
@@ -1554,7 +1557,7 @@ async function initAndRun() {
   let thicknessTex = null, thicknessH = null, thicknessV = null;
   let backgroundTex = null;
   let compositeBindGroup = null, blurH1 = null, blurV1 = null, blurH2 = null, blurV2 = null;
-  let thickBlurHBind = null, thickBlurVBind = null;
+  let thickBlurHBind = null, thickBlurVBind = null, thickBlurHBind2 = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
     const w = canvas.width, h = canvas.height;
@@ -1595,6 +1598,7 @@ async function initAndRun() {
     blurH2 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthV.createView() }] });
     blurV2 = device.createBindGroup({ layout: blurV.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthH.createView() }] });
     // v73 thickness blur bind groups: raw -> thicknessH (H pass) -> thicknessV (V pass).
+    // v78 adds a 2nd round: thicknessV -> thicknessH (H pass) -> thicknessV (V pass).
     thickBlurHBind = device.createBindGroup({
       layout: thicknessBlurH.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: thicknessTex.createView() }],
@@ -1602,6 +1606,10 @@ async function initAndRun() {
     thickBlurVBind = device.createBindGroup({
       layout: thicknessBlurV.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: thicknessH.createView() }],
+    });
+    thickBlurHBind2 = device.createBindGroup({
+      layout: thicknessBlurH.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: thicknessV.createView() }],
     });
     compositeBindGroup = device.createBindGroup({
       layout: compositePipeline.getBindGroupLayout(0),
@@ -1819,6 +1827,8 @@ async function initAndRun() {
     // v73: blur the thickness texture. Horizontal then vertical, both
     // gaussian (R=14, sigma~7.7 px) — kills the per-cell density bumps
     // that Beer's law was amplifying into a visible dimple grid.
+    // v78: second H+V round to better smooth the now-wider thickness
+    // imposters (1.6x particleSize).
     {
       const p = enc2.beginRenderPass({
         colorAttachments: [{
@@ -1841,6 +1851,29 @@ async function initAndRun() {
       p.setPipeline(thicknessBlurV); p.setBindGroup(0, thickBlurVBind);
       p.draw(3, 1); p.end();
     }
+    // 2nd round: thicknessV -> thicknessH -> thicknessV.
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: thicknessH.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(thicknessBlurH); p.setBindGroup(0, thickBlurHBind2);
+      p.draw(3, 1); p.end();
+    }
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: thicknessV.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(thicknessBlurV); p.setBindGroup(0, thickBlurVBind);
+      p.draw(3, 1); p.end();
+    }
     // Depth.
     {
       const p = enc2.beginRenderPass({
@@ -1850,9 +1883,15 @@ async function initAndRun() {
       p.setPipeline(depthPipeline); p.setBindGroup(0, depthBindGroup);
       p.draw(6, N); p.end();
     }
+    // v78: 2 H+V rounds -> 3 H+V rounds. Smoother surface at finer
+    // imposter resolution. The 3rd round reuses blurH2/blurV2 bind groups
+    // because the ping-pong source for the 3rd H is depthV (same as
+    // blurH2's source) and the 3rd V's source is depthH (same as blurV2's).
     const blurSeq = [
       { pipe: blurH, bind: blurH1, target: depthH },
       { pipe: blurV, bind: blurV1, target: depthV },
+      { pipe: blurH, bind: blurH2, target: depthH },
+      { pipe: blurV, bind: blurV2, target: depthV },
       { pipe: blurH, bind: blurH2, target: depthH },
       { pipe: blurV, bind: blurV2, target: depthV },
     ];

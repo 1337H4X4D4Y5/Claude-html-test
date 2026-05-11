@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v77</span>
+    <span class="tag">v78</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v77 raises grid resolution 48³ → 64³ (262k cells, 2.4× the detail) and bumps substep rate 240 → 300 Hz so all presets stay inside CFL with the new smaller cellSize.</div>
+  <div class="desc">MLS-MPM on the GPU. v78 attacks the "discrete particle" look: smaller depth imposter (0.020 → 0.016) for finer detail, wider thickness imposter (1.6× depth) for smoother color blending, and 50% more blur passes on each (depth 4 → 6, thickness 2 → 4).</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

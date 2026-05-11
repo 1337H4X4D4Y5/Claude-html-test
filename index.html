@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v39 wip</span>
+    <span class="tag">v39</span>
   </div>
-  <div class="desc">Moving Least Squares Material Point Method on the GPU — the same algorithm matsuoka-601's WebGPU-Ocean uses. Hybrid grid + particle solver, no preferred packing geometry. Currently a placeholder while the compute pipeline is being built.</div>
+  <div class="desc">Material Point Method on the GPU. PIC mode for now: 8000 particles + 32³ grid, P2G + G2P with trilinear B-spline weights, atomic fixed-point. No preferred packing geometry. v40 upgrades to MLS-MPM with affine velocity gradient.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

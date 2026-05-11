@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v76</span>
+    <span class="tag">v77</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v76 introduces velocity-adaptive damping (lively in motion, fast settle at rest) and upgrades the composite shader: 5-tap normal reconstruction, sharper Fresnel, tighter specular, chromatic refraction. Water preset finally splashy AND settles.</div>
+  <div class="desc">MLS-MPM on the GPU. v77 raises grid resolution 48³ → 64³ (262k cells, 2.4× the detail) and bumps substep rate 240 → 300 Hz so all presets stay inside CFL with the new smaller cellSize.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

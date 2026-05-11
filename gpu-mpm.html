@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v76 (2026-05-11 — adaptive damping + improved composite (5-tap normal, chromatic refraction))';
+const APP_VERSION = 'mpm-v77 (2026-05-11 — grid 48^3 -> 64^3 (sharper sim) + substep 240 -> 300 Hz)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -294,7 +294,11 @@ let BOX_HALF_X = 0.480;
 const BOX_HALF_Y = 1.000;
 let BOX_HALF_Z = 0.052;
 let GRID_HALF = Math.max(BOX_HALF_X, BOX_HALF_Y, BOX_HALF_Z);
-const GRID_SIZE = 48;
+// v77: 48 -> 64. 2.4x more cells (110k -> 262k) for sharper surface
+// features + less grid-averaging viscosity in the velocity field.
+// Pair with SUB_DT 1/300 to keep CFL margins safe at the smaller
+// cellSize (now ~0.0356 with the 2-cell-margin expansion).
+const GRID_SIZE = 64;
 const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;
 let CELL_SIZE = (2 * GRID_HALF) / GRID_SIZE;
 
@@ -1666,7 +1670,7 @@ async function initAndRun() {
     let dt = now - lastT;
     lastT = now;
     if (dt > 1 / 20) dt = 1 / 20;
-    if (dt < 1 / 240) dt = 1 / 240;
+    if (dt < 1 / 300) dt = 1 / 300;
 
     state.gravity.x += (state.target.x - state.gravity.x) * 0.15;
     state.gravity.y += (state.target.y - state.gravity.y) * 0.15;
@@ -1674,9 +1678,10 @@ async function initAndRun() {
 
     // MPM substep. Use a small fixed dt for stability — the grid CFL
     // condition wants cell-size / max-velocity, but with damping a fixed
-    // 1/240 is comfortable.
-    const SUB_DT = 1 / 240;
-    const subSteps = Math.max(1, Math.min(6, Math.ceil(dt / SUB_DT)));
+    // 1/300 is comfortable. v77: bumped 1/240 -> 1/300 because the 64^3
+    // grid has smaller cellSize and tighter CFL.
+    const SUB_DT = 1 / 300;
+    const subSteps = Math.max(1, Math.min(8, Math.ceil(dt / SUB_DT)));
     const stepDt = dt / subSteps;
 
     // Sim params layout (16-aligned).
@@ -1915,8 +1920,8 @@ function updateDebug() {
     'wallFric=' + SIM_TUNE.wallFriction.toFixed(2) +
       '  visc=' + SIM_TUNE.viscosity.toFixed(3) + '\n' +
     'CFL: c=' + soundC.toFixed(2) + '  dtCFL=' + cflDt.toFixed(4) +
-      '  ourDt≤1/240=' + (1/240).toFixed(4) +
-      '  margin=' + (cflDt / (1/240)).toFixed(1) + 'x' +
+      '  ourDt≤1/300=' + (1/300).toFixed(4) +
+      '  margin=' + (cflDt / (1/300)).toFixed(1) + 'x' +
     (state.gpuError ? '\nGPU ERR: ' + state.gpuError : '');
 }
 updateDebug();
@@ -1957,8 +1962,8 @@ copyBtn.addEventListener('click', function () {
     '--- derived / CFL ---',
     'sound speed c = sqrt(K/ρ₀) = ' + soundC.toFixed(3),
     'CFL dt < cellSize/c       = ' + cflDt.toFixed(5),
-    'substep dt cap (1/240)    = ' + (1/240).toFixed(5),
-    'CFL margin                = ' + (cflDt / (1/240)).toFixed(2) + 'x',
+    'substep dt cap (1/300)    = ' + (1/300).toFixed(5),
+    'CFL margin                = ' + (cflDt / (1/300)).toFixed(2) + 'x',
     '',
     'init error: ' + (state.initError || 'none'),
     'gpu error:  ' + (state.gpuError || 'none'),

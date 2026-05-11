@@ -831,6 +831,12 @@
       assert(m, 'default N literal not found in readParticleCount');
       return parseInt(m[1], 10);
     }
+    function parseSubDt(src) {
+      // const SUB_DT = 1 / NNN;
+      const m = src.match(/const\s+SUB_DT\s*=\s*1\s*\/\s*(\d+)/);
+      assert(m, 'SUB_DT constant not found');
+      return 1 / parseInt(m[1], 10);
+    }
 
     test('gpu-mpm v48: CFL margin > 1.0 at current SIM_TUNE values', () => {
       // v61: presets store pressureKMul (multiplier over _natRho).
@@ -843,7 +849,7 @@
       assert(mulMatch, 'pressureKMul literal not found');
       const gridSize = parseGridSize(src);
       const cellSize = 2.0 / (gridSize - 4);
-      const subDt = 1 / 240;
+      const subDt = parseSubDt(src);
       const soundC = Math.sqrt(parseFloat(mulMatch[1]));
       const cflDt = cellSize / soundC;
       const margin = cflDt / subDt;
@@ -895,7 +901,7 @@
       // v62: cellSize = 2 / (GRID_SIZE - 4) per the 2-cell-margin grid.
       const src = readMpmScript();
       const cellSize = 2.0 / (parseGridSize(src) - 4);
-      const subDt = 1 / 240;
+      const subDt = parseSubDt(src);
       const re = /pressureKMul:\s*(\d+(?:\.\d+)?)/g;
       const multipliers = [];
       let m;

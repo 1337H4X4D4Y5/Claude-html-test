@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v41</span>
+    <span class="tag">v42</span>
   </div>
-  <div class="desc">MLS-MPM + Tait equation-of-state pressure on the GPU. Quadratic B-spline, affine C matrix, 27-cell scatter, central-difference pressure gradient force at every grid cell. Particles resist compression — actual fluid behaviour rather than a heap.</div>
+  <div class="desc">MLS-MPM + linear pressure on the GPU. Quadratic B-spline, affine C matrix, central-difference pressure gradient, max-accel clamp. Tuned so hydrostatic pressure at the column base balances gravity at modest compression.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

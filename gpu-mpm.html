@@ -108,7 +108,7 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'mpm-v41 (2026-05-11 — MLS-MPM + Tait pressure)';
+const APP_VERSION = 'mpm-v42 (2026-05-11 — linear EOS + accel clamp)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -263,9 +263,13 @@ fn outerProd(a: vec3<f32>, b: vec3<f32>) -> mat3x3<f32> {
   return mat3x3<f32>(a * b.x, a * b.y, a * b.z);
 }
 
-// Tait-style equation-of-state pressure at a grid cell.
-// P = K * ((rho/rho0)^gamma - 1), clamped to >= 0 so only compression
-// creates pressure (no negative pressure tension).
+// LINEAR equation-of-state pressure at a grid cell.
+// P = K * max(0, rho/rho0 - 1).
+// v41 used Tait (ratio^7 - 1) which is the textbook choice for water but
+// way too sharp for the CFL-limited stiffness our timestep can support
+// — a 2x compression gave 128x pressure, blasted everything to the walls.
+// Linear keeps pressure proportional to compression so the response stays
+// in a sane range.
 fn samplePressure(ix: i32, iy: i32, iz: i32) -> f32 {
   if (ix < 0 || ix >= i32(GRID_SIZE)) { return 0.0; }
   if (iy < 0 || iy >= i32(GRID_SIZE)) { return 0.0; }
@@ -275,12 +279,7 @@ fn samplePressure(ix: i32, iy: i32, iz: i32) -> f32 {
   let cv = P.cellSize * P.cellSize * P.cellSize;
   let r = m / cv;
   if (r <= P.restDensity) { return 0.0; }
-  let ratio = r / P.restDensity;
-  // ratio^7 via successive squares (cheaper than pow + works on small GPUs).
-  let r2 = ratio * ratio;
-  let r4 = r2 * r2;
-  let r7 = r4 * r2 * ratio;
-  return P.pressureK * (r7 - 1.0);
+  return P.pressureK * (r / P.restDensity - 1.0);
 }
 
 @compute @workgroup_size(64)
@@ -386,7 +385,14 @@ fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   );
   let cellVolume = P.cellSize * P.cellSize * P.cellSize;
   let rho = mass / cellVolume;
-  v = v - (gradP / rho) * P.dt;
+  var accel = -gradP / rho;
+  // Clamp to ~5x gravity. Without this, a single under-resolved cell
+  // can briefly read a huge density spike and fire its neighbours
+  // hundreds of m/s away (= v41 disaster).
+  let maxAccel: f32 = 50.0;
+  let aMag = length(accel);
+  if (aMag > maxAccel) { accel = accel * (maxAccel / aMag); }
+  v = v + accel * P.dt;
 
   // Wall boundary: clamp normal velocity at the outer ring of cells.
   let edge: u32 = 1u;
@@ -937,12 +943,16 @@ async function initAndRun() {
     simBuf[6] = 1.0 / CELL_SIZE;
     simBuf[7] = FIXED_POINT;
     simBuf[8] = 1.0;              // particleMass (cancels out)
-    simBuf[9] = 0.9995;           // velDamping
+    simBuf[9] = 0.998;            // velDamping
     simBuf[10] = 0.20;            // wall restitution
-    // 8000 particles spread across half the 2x2x2 box average density ~1000.
-    // EOS pressure resists compression beyond that.
-    simBuf[11] = 600.0;           // pressureK (Tait stiffness for water)
-    simBuf[12] = 1000.0;          // restDensity (target mass per unit volume)
+    // 8000 particles m=1 nominally fill the lower half of the 2x2x2 box,
+    // so the natural rest density is 8000/4 = 2000 mass per unit volume.
+    // Linear EOS: P = K * (rho/rho0 - 1). For ~20% compression at the
+    // bottom of a 1-deep column under g=9.8 we need
+    //   P_bottom = rho0 * g * H = 19600
+    //   K        = P_bottom / 0.2 ~ 100000
+    simBuf[11] = 80000.0;         // pressureK (linear)
+    simBuf[12] = 2000.0;          // restDensity
     device.queue.writeBuffer(simParamsBuf, 0, simBuf);
 
     const cellGroups = Math.ceil(NUM_CELLS / 64);

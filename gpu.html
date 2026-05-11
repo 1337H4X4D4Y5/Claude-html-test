@@ -91,7 +91,7 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'gpu-v27 (2026-05-11 — WebGPU gravity + walls)';
+const APP_VERSION = 'gpu-v28 (2026-05-11 — fix uniform align, error log)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -115,7 +115,8 @@ const state = {
   target: { x: 0, y: -9.8, z: 0 },
   fps: 0,
   steps: 0,
-  initError: null
+  initError: null,
+  gpuError: null
 };
 
 // --- Gyro → gravity mapping. Same shared formula we tested in sim.js. ---
@@ -227,11 +228,17 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 const WGSL_RENDER = `
+// Packed so total size is 96 bytes with proper WGSL uniform alignment.
+// Bug in v27: had four 16-byte slots with vec3+pad explicit; final _pad3
+// was a vec3 that needed offset 112, making struct 128 bytes while buffer
+// was sized 112 — uniform binding silently produced zero matrix and
+// nothing rendered.
 struct RenderParams {
-  viewProj: mat4x4<f32>,
-  cameraRight: vec3<f32>, _pad1: f32,
-  cameraUp: vec3<f32>, _pad2: f32,
-  particleSize: f32, _pad3: vec3<f32>,
+  viewProj: mat4x4<f32>,            // bytes 0..63
+  cameraRight: vec3<f32>,           // bytes 64..75
+  particleSize: f32,                // byte  76..79 (packs into vec3's slack)
+  cameraUp: vec3<f32>,              // bytes 80..91
+  _pad: f32,                        // bytes 92..95
 };
 
 @group(0) @binding(0) var<storage, read> pos: array<vec4<f32>>;
@@ -274,9 +281,10 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 const WGSL_LINES = `
 struct RenderParams {
   viewProj: mat4x4<f32>,
-  cameraRight: vec3<f32>, _pad1: f32,
-  cameraUp: vec3<f32>, _pad2: f32,
-  particleSize: f32, _pad3: vec3<f32>,
+  cameraRight: vec3<f32>,
+  particleSize: f32,
+  cameraUp: vec3<f32>,
+  _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RenderParams;
@@ -306,6 +314,12 @@ async function initAndRun() {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('no adapter');
   const device = await adapter.requestDevice();
+  // Surface any GPU validation errors on the debug strip instead of having
+  // them silently fail.
+  device.addEventListener('uncapturederror', function (event) {
+    const msg = event.error && event.error.message ? event.error.message : String(event.error);
+    state.gpuError = (state.gpuError ? state.gpuError + ' | ' : '') + msg;
+  });
   const ctx = canvas.getContext('webgpu');
   const format = navigator.gpu.getPreferredCanvasFormat();
   ctx.configure({ device: device, format: format, alphaMode: 'premultiplied' });
@@ -340,8 +354,8 @@ async function initAndRun() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
-  // Render uniforms: 16*4 (mat4) + 4*4 (right.xyzw) + 4*4 (up.xyzw) + 4*4 (particleSize.xyzw)
-  const RENDER_PARAMS_SIZE = 64 + 16 + 16 + 16;
+  // Render uniforms: 64 (mat4) + 12+4 (right+size) + 12+4 (up+pad) = 96 bytes.
+  const RENDER_PARAMS_SIZE = 96;
   const renderParamsBuf = device.createBuffer({
     size: RENDER_PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -511,14 +525,19 @@ async function initAndRun() {
       state.steps++;
     }
 
-    // Camera + render uniforms.
+    // Camera + render uniforms — must match the WGSL RenderParams layout.
     const aspect = canvas.width / canvas.height;
     const cam = buildViewProj(aspect);
-    const renderBuf = new Float32Array(RENDER_PARAMS_SIZE / 4);
-    renderBuf.set(cam.mvp, 0);
-    renderBuf[16] = cam.right[0]; renderBuf[17] = cam.right[1]; renderBuf[18] = cam.right[2]; renderBuf[19] = 0;
-    renderBuf[20] = cam.up[0]; renderBuf[21] = cam.up[1]; renderBuf[22] = cam.up[2]; renderBuf[23] = 0;
-    renderBuf[24] = PARTICLE_RADIUS; renderBuf[25] = 0; renderBuf[26] = 0; renderBuf[27] = 0;
+    const renderBuf = new Float32Array(RENDER_PARAMS_SIZE / 4); // 24 floats
+    renderBuf.set(cam.mvp, 0);                                  //  0..15 viewProj
+    renderBuf[16] = cam.right[0];                               // 16..18 cameraRight
+    renderBuf[17] = cam.right[1];
+    renderBuf[18] = cam.right[2];
+    renderBuf[19] = PARTICLE_RADIUS;                            // 19    particleSize
+    renderBuf[20] = cam.up[0];                                  // 20..22 cameraUp
+    renderBuf[21] = cam.up[1];
+    renderBuf[22] = cam.up[2];
+    renderBuf[23] = 0;                                          // 23    _pad
     device.queue.writeBuffer(renderParamsBuf, 0, renderBuf);
 
     // Render pass.
@@ -560,7 +579,8 @@ function updateDebug() {
     'fps: ' + state.fps.toFixed(1) + '   particles: ' + N + '   steps: ' + state.steps + '\n' +
     'gyro: ' + state.gyroPermission + '   events: ' + state.events + '   β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '\n' +
     'gravity   x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) + '\n' +
-    'target    x:' + fmt(state.target.x) + ' y:' + fmt(state.target.y) + ' z:' + fmt(state.target.z);
+    'target    x:' + fmt(state.target.x) + ' y:' + fmt(state.target.y) + ' z:' + fmt(state.target.z) +
+    (state.gpuError ? '\nGPU ERR: ' + state.gpuError : '');
 }
 updateDebug();
 

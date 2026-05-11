@@ -871,6 +871,7 @@
         'pressureK', 'velDamping', 'restitution', 'wallFriction', 'viscosity', 'maxAccel',
         'baseColorR', 'baseColorG', 'baseColorB',
         'absorptionR', 'absorptionG', 'absorptionB',
+        'refractStrength',
       ];
       let m;
       let count = 0;
@@ -956,7 +957,7 @@
         .map(s => s.split(':')[0].trim());
       const expectedWgsl = [
         'near', 'far', 'fAspect', 'fVert',
-        'resolutionX', 'resolutionY', 'thicknessScale', '_pad0',
+        'resolutionX', 'resolutionY', 'thicknessScale', 'refractStrength',
         'lightDirX', 'lightDirY', 'lightDirZ', '_pad1',
         'absorptionR', 'absorptionG', 'absorptionB', '_pad2',
         'baseColorR', 'baseColorG', 'baseColorB', '_pad3',
@@ -1028,6 +1029,29 @@
           assert(!hit, block.name + ' uses reserved word "' + word + '" as a let/var identifier');
         }
       }
+    });
+
+    test('gpu-mpm v59: refraction wiring — backgroundTex pass + composite samples it', () => {
+      const src = readMpmScript();
+      // backgroundTex texture exists and is set up.
+      assert(src.indexOf('backgroundTex = device.createTexture') >= 0,
+        'backgroundTex texture not created');
+      // The composite bind group includes a 4th entry for backgroundTex.
+      const bgIdx = src.indexOf('backgroundTex.createView()');
+      assert(bgIdx >= 0, 'backgroundTex view never bound');
+      // A render pass renders linesPipeline into backgroundTex (the
+      // background render pass). Heuristic: `view: backgroundTex.createView()`
+      // appears as a colorAttachment.view setting.
+      assert(src.indexOf('view: backgroundTex.createView()') >= 0,
+        'background render pass missing (no colorAttachment view: backgroundTex.createView())');
+      // Composite shader samples backgroundTex.
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.indexOf('textureLoad(backgroundTex') >= 0,
+        'composite shader does not sample backgroundTex');
+      assert(compositeSrc.indexOf('refractStrength') >= 0,
+        'composite shader does not reference refractStrength uniform');
     });
 
     test('gpu-mpm v55: alphaScale (renderBuf[23]) is non-zero so thickness pass writes signal', () => {

@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v58</span>
+    <span class="tag">v59</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v58 raises the particle ceiling to 200000 (slider on the gear icon). At 200k particles physically overlap their imposters — surface reads as fully continuous fluid. Per-preset colour identity.</div>
+  <div class="desc">MLS-MPM on the GPU. v59 adds screen-space refraction: the box wireframe (and clear colour) renders into a background texture first, then the composite samples it warped by the fluid's surface normal so edges bend through the water. Per-preset refraction strength (water bends most, mercury barely).</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
@@ -112,7 +112,7 @@
 <a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
-    <span class="tag">51</span>
+    <span class="tag">52</span>
   </div>
   <div class="desc">Run the full simulation test suite in the browser. CPU sim stability + gpu-mpm regression checks (TDZ, error banner, SimParams / CompositeParams uniform layouts, CFL margin, wall-friction + viscosity, preset menu, thickness pass, WGSL reserved-word scanner).</div>
 </a>

@@ -255,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v58 (2026-05-11 — particle ceiling 80000 -> 200000)';
+const APP_VERSION = 'mpm-v59 (2026-05-11 — screen-space refraction through background)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -306,6 +306,8 @@ const FLUID_PRESETS = [
       wallFriction: 0.95, viscosity: 0.03, maxAccel: 50.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
+      // v59: screen-space refraction strength in pixels.
+      refractStrength: 35.0,
     },
   },
   {
@@ -316,6 +318,7 @@ const FLUID_PRESETS = [
       wallFriction: 0.75, viscosity: 0.20, maxAccel: 25.0,
       baseColorR: 1.00, baseColorG: 0.78, baseColorB: 0.32,
       absorptionR: 0.6, absorptionG: 1.8, absorptionB: 6.0,
+      refractStrength: 22.0,
     },
   },
   {
@@ -325,6 +328,7 @@ const FLUID_PRESETS = [
       wallFriction: 0.85, viscosity: 0.10, maxAccel: 40.0,
       baseColorR: 0.85, baseColorG: 0.48, baseColorB: 0.18,
       absorptionR: 1.5, absorptionG: 3.5, absorptionB: 8.0,
+      refractStrength: 18.0,
     },
   },
   {
@@ -336,6 +340,8 @@ const FLUID_PRESETS = [
       wallFriction: 0.99, viscosity: 0.002, maxAccel: 120.0,
       baseColorR: 0.85, baseColorG: 0.88, baseColorB: 0.95,
       absorptionR: 8.0, absorptionG: 8.0, absorptionB: 8.0,
+      // Metal — barely refracts.
+      refractStrength: 4.0,
     },
   },
 ];
@@ -964,7 +970,7 @@ fn fs_v(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
 const WGSL_COMPOSITE = `
 struct CompositeParams {
   near: f32, far: f32, fAspect: f32, fVert: f32,
-  resolutionX: f32, resolutionY: f32, thicknessScale: f32, _pad0: f32,
+  resolutionX: f32, resolutionY: f32, thicknessScale: f32, refractStrength: f32,
   lightDirX: f32, lightDirY: f32, lightDirZ: f32, _pad1: f32,
   absorptionR: f32, absorptionG: f32, absorptionB: f32, _pad2: f32,
   baseColorR: f32, baseColorG: f32, baseColorB: f32, _pad3: f32,
@@ -973,6 +979,7 @@ struct CompositeParams {
 @group(0) @binding(0) var depthTex: texture_depth_2d;
 @group(0) @binding(1) var<uniform> P: CompositeParams;
 @group(0) @binding(2) var thicknessTex: texture_2d<f32>;
+@group(0) @binding(3) var backgroundTex: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -1007,7 +1014,11 @@ fn sampleSky(dir: vec3<f32>) -> vec3<f32> {
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let coord = vec2<i32>(i32(frag.x), i32(frag.y));
   let depth = textureLoad(depthTex, coord, 0);
-  if (depth >= 0.99999) { discard; }
+  // v59: where there's no fluid, output the background straight through so
+  // the wireframe and clear colour are still visible.
+  if (depth >= 0.99999) {
+    return vec4<f32>(textureLoad(backgroundTex, coord, 0).rgb, 1.0);
+  }
 
   let viewPos = viewPosFromDepth(frag.xy, depth);
   let ddx_p = dpdx(viewPos);
@@ -1034,11 +1045,25 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     exp(-P.absorptionG * thickness),
     exp(-P.absorptionB * thickness)
   );
-  // Per-preset base colour (cyan for water, amber for honey, etc.). Even
-  // at zero thickness this reads as the fluid's intrinsic colour, while
-  // Beer's law absorption deepens it as thickness grows.
+  // v59: screen-space refraction. Sample the background texture (box
+  // wireframe + clear colour) at a UV warped by the surface normal so
+  // the lines behind the fluid appear bent. Pure pixel-offset hack —
+  // not a real IOR but visually convincing for thin fluid surfaces.
+  let warpX = i32(n.x * P.refractStrength);
+  let warpY = i32(-n.y * P.refractStrength);
+  let bgX = clamp(coord.x + warpX, 0, i32(P.resolutionX) - 1);
+  let bgY = clamp(coord.y + warpY, 0, i32(P.resolutionY) - 1);
+  let bg = textureLoad(backgroundTex, vec2<i32>(bgX, bgY), 0).rgb;
+
+  // Per-preset base colour. With refraction the body model is:
+  //   transmitted = bg * absorption       (background light through fluid)
+  //              + baseColor * (1 - absorption)   (scattered fluid colour)
+  // Thin fluid -> bg dominates (transparent). Thick fluid -> baseColor
+  // dominates (opaque). Mercury's high uniform absorption blocks bg
+  // almost entirely so its baseColor (silver) reads as a metal body.
   let baseColor = vec3<f32>(P.baseColorR, P.baseColorG, P.baseColorB);
-  let waterTint = baseColor * absorption;
+  let litBase = baseColor * (0.30 + 0.70 * diffuse);
+  let transmitted = bg * absorption + litBase * (1.0 - absorption);
 
   // Sky reflection sampled by the reflected view ray. In view space the
   // camera looks down -Z and "up" is +Y; reflectedV.y picks the right
@@ -1046,11 +1071,9 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let reflectedV = reflect(-viewDir, n);
   let sky = sampleSky(reflectedV);
 
-  // Composite: diffuse-lit transmitted colour blended toward sky reflection
-  // by Fresnel, plus a tight specular highlight.
-  let lit = waterTint * (0.30 + 0.70 * diffuse);
-  // 'final' is a WGSL reserved word — use outColor instead.
-  let outColor = mix(lit, sky, fresnel) + vec3<f32>(0.95, 0.98, 1.0) * spec * 0.55;
+  // Composite: refracted/absorbed body blended toward sky reflection by
+  // Fresnel, plus a tight specular highlight on top.
+  let outColor = mix(transmitted, sky, fresnel) + vec3<f32>(0.95, 0.98, 1.0) * spec * 0.55;
   return vec4<f32>(outColor, 1.0);
 }
 `;
@@ -1328,8 +1351,9 @@ async function initAndRun() {
     entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
   });
 
-  // Depth + thickness textures and ping-pong bind groups for the SSF passes.
-  let depthRaw = null, depthH = null, depthV = null, thicknessTex = null;
+  // Depth + thickness + background textures and ping-pong bind groups
+  // for the SSF passes.
+  let depthRaw = null, depthH = null, depthV = null, thicknessTex = null, backgroundTex = null;
   let compositeBindGroup = null, blurH1 = null, blurV1 = null, blurH2 = null, blurV2 = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
@@ -1339,6 +1363,7 @@ async function initAndRun() {
     if (depthH) depthH.destroy();
     if (depthV) depthV.destroy();
     if (thicknessTex) thicknessTex.destroy();
+    if (backgroundTex) backgroundTex.destroy();
     const opts = {
       size: { width: w, height: h },
       format: 'depth32float',
@@ -1352,6 +1377,14 @@ async function initAndRun() {
       format: THICKNESS_FORMAT,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
+    // v59: the background texture holds the box wireframe + clear colour.
+    // Rendered each frame before the fluid composite, then sampled
+    // (warped by surface normal) by the composite for refraction.
+    backgroundTex = device.createTexture({
+      size: { width: w, height: h },
+      format: format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
     blurH1 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthRaw.createView() }] });
     blurV1 = device.createBindGroup({ layout: blurV.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthH.createView() }] });
     blurH2 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthV.createView() }] });
@@ -1362,6 +1395,7 @@ async function initAndRun() {
         { binding: 0, resource: depthV.createView() },
         { binding: 1, resource: { buffer: compositeParamsBuf } },
         { binding: 2, resource: thicknessTex.createView() },
+        { binding: 3, resource: backgroundTex.createView() },
       ],
     });
     lastW = w; lastH = h;
@@ -1501,7 +1535,8 @@ async function initAndRun() {
     // value into Beer's-law absorption units. Tuned so a "full" column of
     // particles (a few overlapping imposters deep) drops the red channel
     // to near zero while leaving blue mostly intact.
-    compBuf[6] = 0.18; compBuf[7] = 0;
+    // v59: compBuf[7] is now refractStrength (per-preset, in pixels).
+    compBuf[6] = 0.18; compBuf[7] = SIM_TUNE.refractStrength;
     const Lw = [0.35, 0.80, 0.50];
     const Lv = [
       cam.right[0]*Lw[0] + cam.right[1]*Lw[1] + cam.right[2]*Lw[2],
@@ -1526,6 +1561,22 @@ async function initAndRun() {
     device.queue.writeBuffer(compositeParamsBuf, 0, compBuf);
 
     const enc2 = device.createCommandEncoder();
+    // v59: background pass — clear + box wireframe lines into backgroundTex.
+    // The composite shader samples this with a normal-warped UV to produce
+    // refraction; it also blits straight through where there's no fluid,
+    // so this is the only place the wireframe is drawn.
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: backgroundTex.createView(),
+          clearValue: { r: 0.02, g: 0.025, b: 0.06, a: 1 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(linesPipeline); p.setBindGroup(0, linesBindGroup);
+      p.setVertexBuffer(0, cubeEdgeBuf); p.draw(24, 1);
+      p.end();
+    }
     // Thickness (additive). Each particle adds a soft falloff disc into
     // the thickness target; total per pixel is the view-ray fluid mass
     // sampled by the Beer's-law branch of the composite shader.
@@ -1565,13 +1616,14 @@ async function initAndRun() {
     }
     const view = ctx.getCurrentTexture().createView();
     {
+      // v59: composite both blits the background through (no-fluid pixels)
+      // and refracts it for fluid pixels, so the wireframe is no longer
+      // re-drawn on top of the canvas — it's already inside backgroundTex.
       const p = enc2.beginRenderPass({
-        colorAttachments: [{ view: view, clearValue: { r: 0.02, g: 0.025, b: 0.06, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
+        colorAttachments: [{ view: view, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
       });
       p.setPipeline(compositePipeline); p.setBindGroup(0, compositeBindGroup);
       p.draw(3, 1);
-      p.setPipeline(linesPipeline); p.setBindGroup(0, linesBindGroup);
-      p.setVertexBuffer(0, cubeEdgeBuf); p.draw(24, 1);
       p.end();
     }
     device.queue.submit([enc2.finish()]);

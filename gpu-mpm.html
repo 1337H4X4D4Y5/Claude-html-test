@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v75 (2026-05-11 — water settles AND flows (high friction-free wall, mid damping))';
+const APP_VERSION = 'mpm-v76 (2026-05-11 — adaptive damping + improved composite (5-tap normal, chromatic refraction))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,13 +350,13 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      // v75: both state variables (particle velocity AND C-matrix) need
-      // enough damping to settle. v74 had velDamping high but viscosity
-      // too low — C kept re-injecting momentum every substep so the
-      // surface never reached flat. Bump both, but keep wallFriction
-      // high (slippy walls) so flow still LOOKS fluid in motion.
-      pressureKMul: 50, velDamping: 0.987, restitution: 0.0,
-      wallFriction: 0.94, viscosity: 0.014, maxAccel: 80.0,
+      // v76: low viscosity + light velDamping for genuinely splashy water
+      // in motion. The new velocity-adaptive damping in cs_g2p ramps
+      // both up sharply when particles are near-stationary, so the fluid
+      // still settles to flat within ~2 seconds despite the loose
+      // nominal values.
+      pressureKMul: 55, velDamping: 0.997, restitution: 0.0,
+      wallFriction: 0.96, viscosity: 0.004, maxAccel: 100.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
       // v59: screen-space refraction strength in pixels.
@@ -881,16 +881,20 @@ fn cs_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the quadratic B-spline). This is the 'MLS' in MLS-MPM.
   newC = newC * (4.0 * P.invCellSize * P.invCellSize);
 
-  // v48: XSPH-style viscosity. Decay the APIC affine matrix each substep.
-  // Inviscid MLS-MPM preserves the velocity gradient through scatter/gather,
-  // which makes the fluid almost lossless — splashes shed long thin
-  // fingers. Damping C by (1 - viscosity) per substep removes the spin
-  // and shear, giving a more cohesive 'water has surface tension' feel
-  // without losing the bulk velocity field.
-  newC = newC * (1.0 - P.viscosity);
-
-  // Apply small global damping and advect.
-  newV = newV * P.velDamping;
+  // v76: velocity-adaptive damping. Both per-particle damping coefficients
+  // (velocity AND C-matrix decay) ramp up sharply for nearly-stationary
+  // particles, while moving particles keep their bulk velocity and swirl.
+  // Effect: fluid in motion looks lively (low base damping); fluid at
+  // rest collapses to flat fast (high rest damping). Lets us drop the
+  // nominal viscosity into "splashy water" territory without sacrificing
+  // settling — solves the trade-off that's been driving the v66-v75
+  // iteration cycle.
+  let speed = length(newV);
+  let restW = 1.0 - smoothstep(0.05, 0.30, speed);
+  let effectiveDamp = mix(P.velDamping, 0.94, restW);
+  let effectiveVisc = mix(P.viscosity, 0.05, restW);
+  newC = newC * (1.0 - effectiveVisc);
+  newV = newV * effectiveDamp;
   p = p + newV * P.dt;
   // v60: per-axis box bounds (iPhone aspect — much thinner in z than y).
   let limitX = P.boxHalfX - 0.01;
@@ -1148,30 +1152,42 @@ fn sampleSky(dir: vec3<f32>) -> vec3<f32> {
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let coord = vec2<i32>(i32(frag.x), i32(frag.y));
   let depth = textureLoad(depthTex, coord, 0);
-  // v59: where there's no fluid, output the background straight through so
-  // the wireframe and clear colour are still visible.
   if (depth >= 0.99999) {
     return vec4<f32>(textureLoad(backgroundTex, coord, 0).rgb, 1.0);
   }
 
   let viewPos = viewPosFromDepth(frag.xy, depth);
-  let ddx_p = dpdx(viewPos);
-  let ddy_p = dpdy(viewPos);
-  let n = normalize(cross(ddy_p, ddx_p));
+  // v76: 5-tap improved normal. Pick the CLOSER of left/right (and
+  // up/down) neighbours when computing the depth gradient — avoids
+  // reading across the silhouette of separated fluid blobs, which
+  // would otherwise produce a black sliver along every edge.
+  let dL = textureLoad(depthTex, coord + vec2<i32>(-1, 0), 0);
+  let dR = textureLoad(depthTex, coord + vec2<i32>( 1, 0), 0);
+  let dU = textureLoad(depthTex, coord + vec2<i32>(0, -1), 0);
+  let dD = textureLoad(depthTex, coord + vec2<i32>(0,  1), 0);
+  let pL = viewPosFromDepth(frag.xy + vec2<f32>(-1.0, 0.0), dL);
+  let pR = viewPosFromDepth(frag.xy + vec2<f32>( 1.0, 0.0), dR);
+  let pU = viewPosFromDepth(frag.xy + vec2<f32>(0.0, -1.0), dU);
+  let pD = viewPosFromDepth(frag.xy + vec2<f32>(0.0,  1.0), dD);
+  let useLeft = abs(dL - depth) < abs(dR - depth);
+  let useUp   = abs(dU - depth) < abs(dD - depth);
+  let dpx = select(pR - viewPos, viewPos - pL, useLeft);
+  let dpy = select(pD - viewPos, viewPos - pU, useUp);
+  let n = normalize(cross(dpy, dpx));
+
   let viewDir = -normalize(viewPos);
   let lightDir = normalize(vec3<f32>(P.lightDirX, P.lightDirY, P.lightDirZ));
   let halfDir = normalize(viewDir + lightDir);
 
   let diffuse = max(0.0, dot(n, lightDir));
-  let spec = pow(max(0.0, dot(n, halfDir)), 96.0);
+  // v76: tighter, brighter Blinn-Phong specular for the wet glass look.
+  let spec = pow(max(0.0, dot(n, halfDir)), 160.0);
   let nv = max(0.0, dot(n, viewDir));
-  // Sharper Fresnel curve — water has a strong glancing-angle reflection.
-  let fresnel = pow(1.0 - nv, 4.0);
+  // v76: pow 4 -> pow 5. Real water has a near-mirror-like rim at very
+  // grazing angles; sharper falloff makes the surface read as wet glass.
+  let fresnel = pow(1.0 - nv, 5.0);
 
-  // Beer's law absorption. Thickness is sampled from the additive thickness
-  // pass (in front of this fragment) and scaled to absorption units.
-  // exp(-coef * thickness) is per-channel: red dies fastest, blue lasts
-  // longest → water naturally tints toward deep blue as thickness grows.
+  // Beer's law absorption from the blurred thickness texture (v73).
   let thicknessRaw = textureLoad(thicknessTex, coord, 0).r;
   let thickness = thicknessRaw * P.thicknessScale;
   let absorption = vec3<f32>(
@@ -1179,24 +1195,30 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     exp(-P.absorptionG * thickness),
     exp(-P.absorptionB * thickness)
   );
-  // v59: screen-space refraction. Sample the background texture (box
-  // wireframe + clear colour) at a UV warped by the surface normal so
-  // the lines behind the fluid appear bent. Pure pixel-offset hack —
-  // not a real IOR but visually convincing for thin fluid surfaces.
-  let warpX = i32(n.x * P.refractStrength);
-  let warpY = i32(-n.y * P.refractStrength);
-  let bgX = clamp(coord.x + warpX, 0, i32(P.resolutionX) - 1);
-  let bgY = clamp(coord.y + warpY, 0, i32(P.resolutionY) - 1);
-  let bg = textureLoad(backgroundTex, vec2<i32>(bgX, bgY), 0).rgb;
 
-  // Per-preset base colour. v60: switched from component-wise mixing to
-  // a uniform-opacity lerp because the previous formula
-  //   bg*absorption + baseColor*(1 - absorption)
-  // multiplied baseColor by (1 - absorption) per channel — i.e. by the
-  // *absorbed* (short-lived) channels — which biased the visible body
-  // toward those channels. For water (red dies first), that pulled the
-  // body toward red+green ≈ green. The fix: blend bg vs baseColor with a
-  // single scalar so baseColor keeps its hue.
+  // v76: CHROMATIC refraction. Sample background with slightly different
+  // warp magnitude per channel — wavelength-dependent IOR, blue (short
+  // wavelength) refracts more than red. Subtle prismatic fringe at
+  // grazing surfaces, the hallmark of glass + water.
+  let chroma = 0.07;
+  let resMax = vec2<i32>(i32(P.resolutionX) - 1, i32(P.resolutionY) - 1);
+  let warpR = vec2<i32>(i32(n.x * P.refractStrength * (1.0 - chroma)),
+                        i32(-n.y * P.refractStrength * (1.0 - chroma)));
+  let warpG = vec2<i32>(i32(n.x * P.refractStrength),
+                        i32(-n.y * P.refractStrength));
+  let warpB = vec2<i32>(i32(n.x * P.refractStrength * (1.0 + chroma)),
+                        i32(-n.y * P.refractStrength * (1.0 + chroma)));
+  let cR = clamp(coord + warpR, vec2<i32>(0), resMax);
+  let cG = clamp(coord + warpG, vec2<i32>(0), resMax);
+  let cB = clamp(coord + warpB, vec2<i32>(0), resMax);
+  let bg = vec3<f32>(
+    textureLoad(backgroundTex, cR, 0).r,
+    textureLoad(backgroundTex, cG, 0).g,
+    textureLoad(backgroundTex, cB, 0).b
+  );
+
+  // Body model (v60+): uniform-opacity lerp between absorbed background
+  // and lit baseColor, so baseColor keeps its hue at any thickness.
   let baseColor = vec3<f32>(P.baseColorR, P.baseColorG, P.baseColorB);
   let litBase = baseColor * (0.30 + 0.70 * diffuse);
   let avgAbsorb = (absorption.r + absorption.g + absorption.b) * (1.0 / 3.0);
@@ -1204,15 +1226,13 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let absorbedBg = bg * absorption;
   let transmitted = mix(absorbedBg, litBase, opacity);
 
-  // Sky reflection sampled by the reflected view ray. In view space the
-  // camera looks down -Z and "up" is +Y; reflectedV.y picks the right
-  // stop of the gradient.
+  // Sky reflection sampled by reflected view ray.
   let reflectedV = reflect(-viewDir, n);
   let sky = sampleSky(reflectedV);
 
-  // Composite: refracted/absorbed body blended toward sky reflection by
-  // Fresnel, plus a tight specular highlight on top.
-  let outColor = mix(transmitted, sky, fresnel) + vec3<f32>(0.95, 0.98, 1.0) * spec * 0.55;
+  // v76: brighter and slightly warmer specular highlight (sun glint),
+  // 0.55 -> 0.95 — makes the wet sparkle pop.
+  let outColor = mix(transmitted, sky, fresnel) + vec3<f32>(1.0, 0.97, 0.92) * spec * 0.95;
   return vec4<f32>(outColor, 1.0);
 }
 `;

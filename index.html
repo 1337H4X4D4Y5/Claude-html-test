@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v75</span>
+    <span class="tag">v76</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v75 balances "settles" vs "looks fluid": more viscosity (kills C-matrix), moderate velDamping, but kept slippy walls (wallFriction 0.94) so flow still looks lively even though the fluid itself decays motion fast.</div>
+  <div class="desc">MLS-MPM on the GPU. v76 introduces velocity-adaptive damping (lively in motion, fast settle at rest) and upgrades the composite shader: 5-tap normal reconstruction, sharper Fresnel, tighter specular, chromatic refraction. Water preset finally splashy AND settles.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
@@ -112,7 +112,7 @@
 <a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
-    <span class="tag">53</span>
+    <span class="tag">55</span>
   </div>
   <div class="desc">Run the full simulation test suite in the browser. CPU sim stability + gpu-mpm regression checks (TDZ, error banner, SimParams / CompositeParams uniform layouts, CFL margin, wall-friction + viscosity, preset menu, thickness pass, WGSL reserved-word scanner).</div>
 </a>

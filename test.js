@@ -1109,6 +1109,46 @@
         'composite shader does not sample procedural sky');
     });
 
+    test('gpu-mpm v76: cs_g2p uses velocity-adaptive damping', () => {
+      const src = readMpmScript();
+      function bodyOf(fnName) {
+        const start = src.indexOf('fn ' + fnName);
+        if (start < 0) return null;
+        let end = src.indexOf('@compute', start + 1);
+        if (end < 0) end = src.length;
+        return src.slice(start, end);
+      }
+      const g2p = bodyOf('cs_g2p');
+      assert(g2p, 'cs_g2p not found');
+      // Adaptive damping: speed-based smoothstep + mix into effective coefficient.
+      assert(g2p.indexOf('smoothstep') >= 0 && g2p.indexOf('length(newV)') >= 0,
+        'cs_g2p must compute speed-dependent rest weight via smoothstep(length(newV))');
+      assert(g2p.indexOf('effectiveDamp') >= 0 || g2p.indexOf('effectiveVisc') >= 0,
+        'cs_g2p must compute effective damping/viscosity from rest weight');
+    });
+
+    test('gpu-mpm v76: composite shader uses 5-tap normal + chromatic refraction', () => {
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      // 5-tap normal: needs L/R/U/D depth samples and select() on which is closer.
+      assert(compositeSrc.indexOf('vec2<i32>(-1, 0)') >= 0 &&
+             compositeSrc.indexOf('vec2<i32>( 1, 0)') >= 0,
+        'composite must sample left+right depth neighbours for 5-tap normal');
+      assert(compositeSrc.indexOf('select(') >= 0,
+        'composite must use select() to pick closer neighbour (avoid silhouette spans)');
+      // Chromatic refraction: three samples of backgroundTex.
+      let bgSamples = 0;
+      let i = 0;
+      while ((i = compositeSrc.indexOf('textureLoad(backgroundTex', i)) >= 0) {
+        bgSamples++;
+        i++;
+      }
+      assert(bgSamples >= 3,
+        'composite should sample backgroundTex 3 times for chromatic refraction; got ' + bgSamples);
+    });
+
     test('gpu-mpm v48: wall friction applied in cs_grid, viscosity applied in cs_g2p', () => {
       // The WGSL must actually USE the new uniforms or they are dead code.
       // Slice each function body by index since JS regex has no \Z and

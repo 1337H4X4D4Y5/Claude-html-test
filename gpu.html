@@ -150,7 +150,7 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'gpu-v32 (2026-05-11 — smaller particles, more of them)';
+const APP_VERSION = 'gpu-v33 (2026-05-11 — screen-space fluid surface)';
 
 // Particle count is configurable via the in-page settings panel which
 // reloads with ?n=NNNN. Clamped to a range that we know is stable.
@@ -456,6 +456,138 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 }
 `;
 
+// Screen-space-fluid DEPTH pass. Each particle renders a billboard quad,
+// but the fragment computes the depth of a sphere's front face at that
+// pixel and writes it via @builtin(frag_depth). Combined with depth-test
+// 'less', the closest particle to the camera wins each pixel.
+const WGSL_DEPTH = `
+struct RenderParams {
+  viewProj: mat4x4<f32>,
+  cameraRight: vec3<f32>,
+  particleSize: f32,
+  cameraUp: vec3<f32>,
+  alphaScale: f32,
+};
+
+@group(0) @binding(0) var<storage, read> pos: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> R: RenderParams;
+
+struct VOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32,
+           @builtin(instance_index) ii: u32) -> VOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0)
+  );
+  let q = quad[vi];
+  let center = pos[ii].xyz;
+  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * R.particleSize;
+  var out: VOut;
+  out.position = R.viewProj * vec4<f32>(wp, 1.0);
+  out.uv = q;
+  return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
+  let r2 = dot(in.uv, in.uv);
+  if (r2 > 1.0) { discard; }
+  // The billboard plane is at the sphere center's depth. To get sphere-
+  // FRONT depth, push it toward the camera by radius * sqrt(1 - r²).
+  // In WGSL fragment, in.position.w = 1/clip.w. Our projection has
+  // clip.w = -view_z, so view_z_center = -1 / in.position.w.
+  let viewZcenter = -1.0 / in.position.w;
+  let viewZ = viewZcenter + R.particleSize * sqrt(1.0 - r2);
+  // Convert view z back to NDC depth in [0,1] for this projection.
+  // Constants come from buildViewProj(): near=0.1, far=100.
+  let near: f32 = 0.1;
+  let far: f32 = 100.0;
+  let d = -viewZ;            // positive distance from camera
+  if (d <= near) { return 0.0; }
+  return (1.0 - near / d) * far / (far - near);
+}
+`;
+
+// Fullscreen composite. Samples the depth texture, reconstructs view-space
+// position, derives a surface normal from screen-space position derivatives,
+// shades the result with Lambert + Fresnel + Blinn-Phong specular.
+const WGSL_COMPOSITE = `
+struct CompositeParams {
+  near: f32,
+  far: f32,
+  fAspect: f32,    // proj[0][0] = f / aspect
+  fVert: f32,      // proj[1][1] = f
+  resolutionX: f32,
+  resolutionY: f32,
+  lightDirX: f32,
+  lightDirY: f32,
+  lightDirZ: f32,
+  _pad: f32,
+};
+
+@group(0) @binding(0) var depthTex: texture_depth_2d;
+@group(0) @binding(1) var<uniform> P: CompositeParams;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  // Single triangle that covers the screen (-1,-1) (3,-1) (-1,3).
+  var p = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 3.0, -1.0),
+    vec2<f32>(-1.0,  3.0)
+  );
+  return vec4<f32>(p[vi], 0.0, 1.0);
+}
+
+fn viewPosFromDepth(fragXY: vec2<f32>, depth: f32) -> vec3<f32> {
+  let ndcX = (fragXY.x / P.resolutionX) * 2.0 - 1.0;
+  let ndcY = 1.0 - (fragXY.y / P.resolutionY) * 2.0;
+  // Inverse of our projection (column-major).
+  // view_z = near * far / (depth * (far - near) - far)
+  let viewZ = P.near * P.far / (depth * (P.far - P.near) - P.far);
+  let viewX = -ndcX * viewZ / P.fAspect;
+  let viewY = -ndcY * viewZ / P.fVert;
+  return vec3<f32>(viewX, viewY, viewZ);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let coord = vec2<i32>(i32(frag.x), i32(frag.y));
+  let depth = textureLoad(depthTex, coord, 0);
+  // No water at this pixel — discard so the cleared cube background shows.
+  if (depth >= 0.99999) { discard; }
+
+  let viewPos = viewPosFromDepth(frag.xy, depth);
+
+  // Surface normal: cross product of screen-space derivatives of view pos.
+  let ddx_p = dpdx(viewPos);
+  let ddy_p = dpdy(viewPos);
+  let n = normalize(cross(ddy_p, ddx_p));
+
+  // Camera at origin looking down -z.
+  let viewDir = -normalize(viewPos);
+  let lightDir = normalize(vec3<f32>(P.lightDirX, P.lightDirY, P.lightDirZ));
+  let halfDir = normalize(viewDir + lightDir);
+
+  let diffuse = max(0.0, dot(n, lightDir));
+  let spec = pow(max(0.0, dot(n, halfDir)), 48.0);
+  // Schlick-ish Fresnel: edges reflect more.
+  let nv = max(0.0, dot(n, viewDir));
+  let fresnel = pow(1.0 - nv, 4.0);
+
+  let deep   = vec3<f32>(0.06, 0.22, 0.48);
+  let shallow = vec3<f32>(0.55, 0.85, 1.00);
+  let waterCol = mix(deep, shallow, fresnel);
+  let lit = waterCol * (0.25 + 0.75 * diffuse) + vec3<f32>(0.92, 0.97, 1.0) * spec;
+  return vec4<f32>(lit, 1.0);
+}
+`;
+
 // Render-only edge wireframe of the cube container.
 const WGSL_LINES = `
 struct RenderParams {
@@ -592,31 +724,65 @@ async function initAndRun() {
     ],
   });
 
-  // --- Particle render pipeline ---
-  const renderModule = device.createShaderModule({ code: WGSL_RENDER });
-  const renderPipeline = device.createRenderPipeline({
+  // --- SSF depth-only pipeline (writes sphere-front depth per pixel) ---
+  const depthModule = device.createShaderModule({ code: WGSL_DEPTH });
+  const depthPipeline = device.createRenderPipeline({
     layout: 'auto',
-    vertex: { module: renderModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: renderModule, entryPoint: 'fs_main',
-      targets: [{
-        format: format,
-        blend: {
-          color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-        },
-        writeMask: GPUColorWrite.RGB,
-      }],
-    },
+    vertex: { module: depthModule, entryPoint: 'vs_main' },
+    fragment: { module: depthModule, entryPoint: 'fs_main', targets: [] },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: {
+      format: 'depth32float',
+      depthWriteEnabled: true,
+      depthCompare: 'less',
+    },
   });
-  const renderBindGroup = device.createBindGroup({
-    layout: renderPipeline.getBindGroupLayout(0),
+  const depthBindGroup = device.createBindGroup({
+    layout: depthPipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: posBuf } },
       { binding: 1, resource: { buffer: renderParamsBuf } },
     ],
   });
+
+  // --- SSF composite pipeline (fullscreen, samples depth, shades surface) ---
+  const COMPOSITE_PARAMS_SIZE = 48; // 10 floats + 2 pads = 48 bytes (16-aligned)
+  const compositeParamsBuf = device.createBuffer({
+    size: COMPOSITE_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const compositeModule = device.createShaderModule({ code: WGSL_COMPOSITE });
+  const compositePipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: compositeModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: compositeModule, entryPoint: 'fs_main',
+      targets: [{ format: format }],
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  // depthTex + compositeBindGroup are recreated whenever the canvas resizes.
+  let depthTex = null;
+  let compositeBindGroup = null;
+  let lastDepthW = 0, lastDepthH = 0;
+  function ensureDepthTex() {
+    const w = canvas.width, h = canvas.height;
+    if (w === lastDepthW && h === lastDepthH && depthTex) return;
+    if (depthTex) depthTex.destroy();
+    depthTex = device.createTexture({
+      size: { width: w, height: h },
+      format: 'depth32float',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    compositeBindGroup = device.createBindGroup({
+      layout: compositePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: depthTex.createView() },
+        { binding: 1, resource: { buffer: compositeParamsBuf } },
+      ],
+    });
+    lastDepthW = w; lastDepthH = h;
+  }
 
   // --- Line render pipeline for cube wireframe ---
   const linesModule = device.createShaderModule({ code: WGSL_LINES });
@@ -766,26 +932,72 @@ async function initAndRun() {
     renderBuf[23] = ALPHA_SCALE;                                // 23    alphaScale
     device.queue.writeBuffer(renderParamsBuf, 0, renderBuf);
 
-    // Render pass.
+    // Composite uniform params depend on camera + canvas size.
+    ensureDepthTex();
+    const fovY = 50 * Math.PI / 180;
+    const f = 1 / Math.tan(fovY / 2);
+    const compBuf = new Float32Array(COMPOSITE_PARAMS_SIZE / 4);
+    compBuf[0] = 0.1;                        // near
+    compBuf[1] = 100;                        // far
+    compBuf[2] = f / aspect;                 // fAspect = proj[0][0]
+    compBuf[3] = f;                          // fVert   = proj[1][1]
+    compBuf[4] = canvas.width;
+    compBuf[5] = canvas.height;
+    // World-space light direction "from upper-right-front". Transform into
+    // camera/view space so the shader can use it as-is.
+    const Lw = [0.35, 0.80, 0.50];
+    const Lv = [
+      cam.right[0]*Lw[0] + cam.right[1]*Lw[1] + cam.right[2]*Lw[2],
+      cam.up[0]*Lw[0]    + cam.up[1]*Lw[1]    + cam.up[2]*Lw[2],
+      -(((Lw[0] * (cam.right[1]*cam.up[2] - cam.right[2]*cam.up[1])) +
+         (Lw[1] * (cam.right[2]*cam.up[0] - cam.right[0]*cam.up[2])) +
+         (Lw[2] * (cam.right[0]*cam.up[1] - cam.right[1]*cam.up[0])))) // forward in view space
+    ];
+    const Llen = Math.hypot(Lv[0], Lv[1], Lv[2]) || 1;
+    compBuf[6] = Lv[0] / Llen;
+    compBuf[7] = Lv[1] / Llen;
+    compBuf[8] = Lv[2] / Llen;
+    compBuf[9] = 0;
+    device.queue.writeBuffer(compositeParamsBuf, 0, compBuf);
+
+    // PASS A: render particles to depth-only attachment (sphere-front depth).
     const enc2 = device.createCommandEncoder();
+    {
+      const passA = enc2.beginRenderPass({
+        colorAttachments: [],
+        depthStencilAttachment: {
+          view: depthTex.createView(),
+          depthClearValue: 1.0,
+          depthLoadOp: 'clear',
+          depthStoreOp: 'store',
+        },
+      });
+      passA.setPipeline(depthPipeline);
+      passA.setBindGroup(0, depthBindGroup);
+      passA.draw(6, N);
+      passA.end();
+    }
+
+    // PASS B: composite to canvas. Fullscreen triangle samples the depth
+    // texture and shades the reconstructed surface. Wireframe drawn after.
     const view = ctx.getCurrentTexture().createView();
-    const pass2 = enc2.beginRenderPass({
-      colorAttachments: [{
-        view: view,
-        clearValue: { r: 0.02, g: 0.035, b: 0.07, a: 1 },
-        loadOp: 'clear', storeOp: 'store',
-      }],
-    });
-    // Cube wireframe first.
-    pass2.setPipeline(linesPipeline);
-    pass2.setBindGroup(0, linesBindGroup);
-    pass2.setVertexBuffer(0, cubeEdgeBuf);
-    pass2.draw(24, 1);
-    // Particles (additive sprites).
-    pass2.setPipeline(renderPipeline);
-    pass2.setBindGroup(0, renderBindGroup);
-    pass2.draw(6, N);
-    pass2.end();
+    {
+      const passB = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: view,
+          clearValue: { r: 0.02, g: 0.035, b: 0.07, a: 1 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      passB.setPipeline(compositePipeline);
+      passB.setBindGroup(0, compositeBindGroup);
+      passB.draw(3, 1);
+      passB.setPipeline(linesPipeline);
+      passB.setBindGroup(0, linesBindGroup);
+      passB.setVertexBuffer(0, cubeEdgeBuf);
+      passB.draw(24, 1);
+      passB.end();
+    }
     device.queue.submit([enc2.finish()]);
 
     frames++;

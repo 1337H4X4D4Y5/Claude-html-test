@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>WebGPU support check</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: #0a0f1a; color: #e8f1ff;
+    font-family: -apple-system, BlinkMacSystemFont, ui-monospace, monospace;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    min-height: 100vh;
+  }
+  h1 { margin: 16px; font-size: 18px; font-weight: 600; }
+  ol { margin: 0 12px 16px; padding: 0; list-style: none; font-size: 13px; line-height: 1.5; }
+  li {
+    margin: 6px 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.04);
+  }
+  li.pass::before { content: '✓ '; color: #6fe0a0; font-weight: 700; }
+  li.fail { background: rgba(220,80,80,0.18); }
+  li.fail::before { content: '✗ '; color: #ff8a8a; font-weight: 700; }
+  .detail { display: block; margin-top: 4px; font-size: 11px; color: #c8d0e0; white-space: pre-wrap; word-break: break-word; }
+  #copy-btn {
+    appearance: none; -webkit-appearance: none;
+    display: block; margin: 12px; width: calc(100% - 24px); min-height: 44px;
+    border: none; border-radius: 10px;
+    background: rgba(74,163,255,0.30); color: #fff;
+    font-size: 14px; font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  a {
+    display: inline-block; margin: 0 16px 24px;
+    color: #cfe6ff; text-decoration: underline; font-size: 13px;
+  }
+  pre { display: none; }
+</style>
+</head>
+<body>
+<h1>WebGPU support check</h1>
+<ol id="list"></ol>
+<button id="copy-btn">Copy report</button>
+<pre id="raw"></pre>
+<a href="./">← back to the water box</a>
+
+<script>
+(async function () {
+  const list = document.getElementById('list');
+  const raw = document.getElementById('raw');
+  const lines = [];
+  function add(name, pass, detail) {
+    const li = document.createElement('li');
+    li.className = pass ? 'pass' : 'fail';
+    li.textContent = name;
+    if (detail) {
+      const span = document.createElement('span');
+      span.className = 'detail';
+      span.textContent = detail;
+      li.appendChild(span);
+    }
+    list.appendChild(li);
+    lines.push((pass ? 'PASS  ' : 'FAIL  ') + name + (detail ? '\n      ' + detail.replace(/\n/g, '\n      ') : ''));
+  }
+
+  // 1. navigator.gpu present?
+  if (!('gpu' in navigator)) {
+    add('navigator.gpu present', false, 'WebGPU not exposed on this browser/OS');
+    finish();
+    return;
+  }
+  add('navigator.gpu present', true);
+
+  // 2. requestAdapter()
+  let adapter = null;
+  try {
+    adapter = await navigator.gpu.requestAdapter();
+  } catch (e) {
+    add('requestAdapter()', false, e && e.message ? e.message : String(e));
+    finish();
+    return;
+  }
+  if (!adapter) {
+    add('requestAdapter()', false, 'returned null (no compatible adapter)');
+    finish();
+    return;
+  }
+  const info = adapter.info || {};
+  add('requestAdapter()', true,
+    'vendor=' + (info.vendor || '?') +
+    ' arch=' + (info.architecture || '?') +
+    ' device=' + (info.device || '?') +
+    ' desc=' + (info.description || '?'));
+
+  // 3. limits and features
+  const limits = adapter.limits || {};
+  add('adapter.limits', true,
+    'maxBufferSize=' + (limits.maxBufferSize || '?') +
+    '\nmaxComputeWorkgroupStorageSize=' + (limits.maxComputeWorkgroupStorageSize || '?') +
+    '\nmaxComputeWorkgroupSizeX=' + (limits.maxComputeWorkgroupSizeX || '?') +
+    '\nmaxStorageBufferBindingSize=' + (limits.maxStorageBufferBindingSize || '?'));
+  const features = [];
+  if (adapter.features) for (const f of adapter.features) features.push(f);
+  add('adapter.features', true, features.length ? features.join(', ') : '(none)');
+
+  // 4. requestDevice()
+  let device = null;
+  try {
+    device = await adapter.requestDevice();
+  } catch (e) {
+    add('requestDevice()', false, e && e.message ? e.message : String(e));
+    finish();
+    return;
+  }
+  add('requestDevice()', true);
+
+  // 5. compute shader pipeline + dispatch.
+  // Trivial: write 256 incrementing integers into a storage buffer.
+  try {
+    const wgsl = `
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i < arrayLength(&data)) {
+    data[i] = i * 2u + 1u;
+  }
+}`;
+    const module = device.createShaderModule({ code: wgsl });
+    const pipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: module, entryPoint: 'main' }
+    });
+    add('compileShaderModule + createComputePipeline', true);
+
+    const N = 256;
+    const byteLen = N * 4;
+    const storageBuf = device.createBuffer({
+      size: byteLen,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const readBuf = device.createBuffer({
+      size: byteLen,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: storageBuf } }]
+    });
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(N / 64));
+    pass.end();
+    enc.copyBufferToBuffer(storageBuf, 0, readBuf, 0, byteLen);
+    device.queue.submit([enc.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    const arr = new Uint32Array(readBuf.getMappedRange().slice(0));
+    readBuf.unmap();
+    // Verify a few entries.
+    let ok = true, badIdx = -1, badVal = -1;
+    for (let i = 0; i < N; i++) {
+      const expected = i * 2 + 1;
+      if (arr[i] !== expected) { ok = false; badIdx = i; badVal = arr[i]; break; }
+    }
+    if (ok) {
+      add('dispatch compute + read back results', true,
+        'first 8 outputs: [' + Array.from(arr.slice(0, 8)).join(', ') + ']');
+    } else {
+      add('dispatch compute + read back results', false,
+        'wrong value at index ' + badIdx + ': got ' + badVal);
+    }
+  } catch (e) {
+    add('compute pipeline + dispatch', false, e && e.message ? e.message : String(e));
+  }
+
+  finish();
+
+  function finish() {
+    const ua = navigator.userAgent;
+    add('userAgent', true, ua);
+    raw.textContent = lines.join('\n');
+  }
+})();
+
+document.getElementById('copy-btn').addEventListener('click', function () {
+  const text = document.getElementById('raw').textContent;
+  function ok() {
+    const btn = document.getElementById('copy-btn');
+    btn.textContent = 'Copied ✓';
+    setTimeout(function () { btn.textContent = 'Copy report'; }, 1500);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(ok, function () {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); ok(); } catch (_) {}
+      document.body.removeChild(ta);
+    });
+  }
+});
+</script>
+</body>
+</html>

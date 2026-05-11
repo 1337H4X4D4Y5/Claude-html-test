@@ -108,7 +108,7 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'mpm-v39 (2026-05-11 — PIC with linear B-spline)';
+const APP_VERSION = 'mpm-v40 (2026-05-11 — MLS-MPM: quadratic + affine C)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -224,25 +224,43 @@ struct SimParams {
   particleMass: f32,
   velDamping: f32,
   restitution: f32,
-  _pad: vec2<f32>,
+  pressureK: f32,    // EOS stiffness (Tait water)
+  restDensity: f32,
 };
 
 const N: u32 = ${N}u;
 const GRID_SIZE: u32 = ${GRID_SIZE}u;
 const NUM_CELLS: u32 = ${NUM_CELLS}u;
 
-// Particles.
 @group(0) @binding(0) var<storage, read_write> pos: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> vel: array<vec4<f32>>;
-// Grid as 4 atomic<i32> per cell: mass, mx, my, mz (all fixed-point).
 @group(0) @binding(2) var<storage, read_write> grid: array<atomic<i32>>;
-// Per-cell velocity (vec4 f32, .xyz velocity / .w spare) — written by
-// cs_grid, read by cs_g2p.
 @group(0) @binding(3) var<storage, read_write> gridVel: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> P: SimParams;
+// Per-particle affine velocity gradient (APIC C matrix). 3x3 stored as
+// mat3x3<f32> (48 bytes per particle).
+@group(0) @binding(5) var<storage, read_write> Cmat: array<mat3x3<f32>>;
 
 fn cellIndex(ix: u32, iy: u32, iz: u32) -> u32 {
   return ix + GRID_SIZE * (iy + GRID_SIZE * iz);
+}
+
+// Quadratic B-spline weights. fx is the particle's fractional position
+// relative to (base + 0.5) of its 3-cell window.
+fn quadWeights(fx: vec3<f32>) -> array<vec3<f32>, 3> {
+  let a = vec3<f32>(1.5) - fx;
+  let b = fx - vec3<f32>(1.0);
+  let c = fx - vec3<f32>(0.5);
+  var w: array<vec3<f32>, 3>;
+  w[0] = 0.5 * a * a;
+  w[1] = vec3<f32>(0.75) - b * b;
+  w[2] = 0.5 * c * c;
+  return w;
+}
+
+// Outer product a (column) * b^T -> mat3x3. column j = a * b[j].
+fn outerProd(a: vec3<f32>, b: vec3<f32>) -> mat3x3<f32> {
+  return mat3x3<f32>(a * b.x, a * b.y, a * b.z);
 }
 
 @compute @workgroup_size(64)
@@ -256,52 +274,56 @@ fn cs_clearGrid(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicStore(&grid[b + 3u], 0);
 }
 
-// Particle-to-Grid. Each particle scatters mass and momentum to 8
-// surrounding grid nodes weighted by the trilinear B-spline.
+// Particle-to-Grid (APIC / MLS-MPM). Each particle scatters to its 27
+// surrounding nodes weighted by a quadratic B-spline. The momentum
+// contribution includes an affine term (C * (node_pos - particle_pos))
+// so the velocity field reconstructed on the grid carries information
+// about the particle's local velocity gradient — much less dissipative
+// than vanilla PIC, and the key reason MLS-MPM water can sustain swirls.
 @compute @workgroup_size(64)
 fn cs_p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= N) { return; }
   let p = pos[i].xyz;
   let v = vel[i].xyz;
+  let C = Cmat[i];
   let h = P.boxHalf;
   let inv = P.invCellSize;
-  // Convert world position [-h, h] -> grid coord [0, GRID_SIZE].
   let gp = (p + vec3<f32>(h)) * inv;
-  let base = vec3<i32>(floor(gp));
-  // Reject if outside the grid (rare; walls keep particles in).
-  if (base.x < 0 || base.x >= i32(GRID_SIZE) - 1 ||
-      base.y < 0 || base.y >= i32(GRID_SIZE) - 1 ||
-      base.z < 0 || base.z >= i32(GRID_SIZE) - 1) {
+  let base = vec3<i32>(floor(gp - vec3<f32>(0.5)));
+  if (base.x < 0 || base.x >= i32(GRID_SIZE) - 2 ||
+      base.y < 0 || base.y >= i32(GRID_SIZE) - 2 ||
+      base.z < 0 || base.z >= i32(GRID_SIZE) - 2) {
     return;
   }
-  let fx = gp - vec3<f32>(base);
-  // Trilinear weights: w0 = (1 - fx.X), w1 = fx.X per axis.
-  let wx = vec2<f32>(1.0 - fx.x, fx.x);
-  let wy = vec2<f32>(1.0 - fx.y, fx.y);
-  let wz = vec2<f32>(1.0 - fx.z, fx.z);
+  let fx = gp - vec3<f32>(base);    // in [0.5, 1.5]
+  let w = quadWeights(fx);
   let m = P.particleMass;
   let scale = P.fixedPoint;
-  for (var oz: u32 = 0u; oz < 2u; oz = oz + 1u) {
-    for (var oy: u32 = 0u; oy < 2u; oy = oy + 1u) {
-      for (var ox: u32 = 0u; ox < 2u; ox = ox + 1u) {
-        let w = wx[ox] * wy[oy] * wz[oz];
-        if (w <= 0.0) { continue; }
+  for (var oz: u32 = 0u; oz < 3u; oz = oz + 1u) {
+    let wzv = w[oz].z;
+    for (var oy: u32 = 0u; oy < 3u; oy = oy + 1u) {
+      let wyv = w[oy].y;
+      for (var ox: u32 = 0u; ox < 3u; ox = ox + 1u) {
+        let wxv = w[ox].x;
+        let weight = wxv * wyv * wzv;
+        if (weight <= 0.0) { continue; }
         let ci = cellIndex(u32(base.x) + ox, u32(base.y) + oy, u32(base.z) + oz);
-        let mw = m * w;
-        // mass
+        // World position of this grid node, in metres (scene units).
+        let nodeWorld = vec3<f32>(f32(base.x + i32(ox)), f32(base.y + i32(oy)), f32(base.z + i32(oz))) * P.cellSize - vec3<f32>(h);
+        let dpos = nodeWorld - p;
+        // Affine velocity at the node = v + C * dpos.
+        let vAtNode = v + C * dpos;
+        let mw = m * weight;
         atomicAdd(&grid[ci * 4u + 0u], i32(mw * scale));
-        // momentum (m * w * v)
-        atomicAdd(&grid[ci * 4u + 1u], i32(mw * v.x * scale));
-        atomicAdd(&grid[ci * 4u + 2u], i32(mw * v.y * scale));
-        atomicAdd(&grid[ci * 4u + 3u], i32(mw * v.z * scale));
+        atomicAdd(&grid[ci * 4u + 1u], i32(mw * vAtNode.x * scale));
+        atomicAdd(&grid[ci * 4u + 2u], i32(mw * vAtNode.y * scale));
+        atomicAdd(&grid[ci * 4u + 3u], i32(mw * vAtNode.z * scale));
       }
     }
   }
 }
 
-// Grid update: decode fixed-point, momentum -> velocity, apply gravity +
-// wall boundary, store result for the G2P pass.
 @compute @workgroup_size(64)
 fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let ci = gid.x;
@@ -318,11 +340,12 @@ fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     f32(atomicLoad(&grid[b + 2u])) * invS,
     f32(atomicLoad(&grid[b + 3u])) * invS
   ) / mass;
-  // External force: gravity. Apply over dt.
+  // Gravity. (Explicit Tait-EOS pressure deferred to v41 — MLS-MPM's
+  // affine velocity gradient alone provides enough fluid behaviour to
+  // tell whether the upgrade from PIC was effective.)
   v = v + P.gravity * P.dt;
 
-  // Boundary conditions: zero out the normal velocity component at the
-  // outermost ring of cells so fluid can't push through the walls.
+  // Wall boundary.
   let iz = ci / (GRID_SIZE * GRID_SIZE);
   let rem = ci - iz * GRID_SIZE * GRID_SIZE;
   let iy = rem / GRID_SIZE;
@@ -338,8 +361,8 @@ fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   gridVel[ci] = vec4<f32>(v, mass);
 }
 
-// Grid-to-Particle. Each particle gathers velocity from its 8 surrounding
-// grid nodes (trilinear). Then advect position.
+// Grid-to-Particle. Quadratic B-spline gather over 27 nodes. Reconstruct
+// the affine matrix C via the MLS formula: C = (4/dx²) * Σ w_i v_i (x_i - x_p)^T.
 @compute @workgroup_size(64)
 fn cs_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
@@ -348,30 +371,41 @@ fn cs_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let h = P.boxHalf;
   let inv = P.invCellSize;
   let gp = (p + vec3<f32>(h)) * inv;
-  let base = vec3<i32>(floor(gp));
-  if (base.x < 0 || base.x >= i32(GRID_SIZE) - 1 ||
-      base.y < 0 || base.y >= i32(GRID_SIZE) - 1 ||
-      base.z < 0 || base.z >= i32(GRID_SIZE) - 1) {
+  let base = vec3<i32>(floor(gp - vec3<f32>(0.5)));
+  if (base.x < 0 || base.x >= i32(GRID_SIZE) - 2 ||
+      base.y < 0 || base.y >= i32(GRID_SIZE) - 2 ||
+      base.z < 0 || base.z >= i32(GRID_SIZE) - 2) {
     return;
   }
   let fx = gp - vec3<f32>(base);
-  let wx = vec2<f32>(1.0 - fx.x, fx.x);
-  let wy = vec2<f32>(1.0 - fx.y, fx.y);
-  let wz = vec2<f32>(1.0 - fx.z, fx.z);
+  let w = quadWeights(fx);
   var newV = vec3<f32>(0.0);
-  for (var oz: u32 = 0u; oz < 2u; oz = oz + 1u) {
-    for (var oy: u32 = 0u; oy < 2u; oy = oy + 1u) {
-      for (var ox: u32 = 0u; ox < 2u; ox = ox + 1u) {
-        let w = wx[ox] * wy[oy] * wz[oz];
+  // Accumulate Σ w_i v_i (x_i - x_p)^T as a 3x3 matrix.
+  var newC = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  for (var oz: u32 = 0u; oz < 3u; oz = oz + 1u) {
+    let wzv = w[oz].z;
+    for (var oy: u32 = 0u; oy < 3u; oy = oy + 1u) {
+      let wyv = w[oy].y;
+      for (var ox: u32 = 0u; ox < 3u; ox = ox + 1u) {
+        let wxv = w[ox].x;
+        let weight = wxv * wyv * wzv;
         let ci = cellIndex(u32(base.x) + ox, u32(base.y) + oy, u32(base.z) + oz);
-        newV = newV + gridVel[ci].xyz * w;
+        let vi = gridVel[ci].xyz;
+        let nodeWorld = vec3<f32>(f32(base.x + i32(ox)), f32(base.y + i32(oy)), f32(base.z + i32(oz))) * P.cellSize - vec3<f32>(h);
+        let dpos = nodeWorld - p;
+        newV = newV + vi * weight;
+        // outer(v_i * weight, dpos)
+        newC = newC + outerProd(vi * weight, dpos);
       }
     }
   }
-  // Velocity damping (small) and advect.
+  // MLS reconstruction: scale by 4/dx² (inverse of the second moment of
+  // the quadratic B-spline). This is the 'MLS' in MLS-MPM.
+  newC = newC * (4.0 * P.invCellSize * P.invCellSize);
+
+  // Apply small global damping and advect.
   newV = newV * P.velDamping;
   p = p + newV * P.dt;
-  // Clamp to box (safety, the grid BC should handle most).
   let limit = h - 0.01;
   if (p.x < -limit) { p.x = -limit; newV.x = -newV.x * P.restitution; }
   if (p.x >  limit) { p.x =  limit; newV.x = -newV.x * P.restitution; }
@@ -382,6 +416,7 @@ fn cs_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   pos[i] = vec4<f32>(p, 0.0);
   vel[i] = vec4<f32>(newV, 0.0);
+  Cmat[i] = newC;
 }
 `;
 
@@ -609,6 +644,14 @@ async function initAndRun() {
     size: NUM_CELLS * 16,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
+  // Per-particle affine velocity gradient C (3x3 matrix). WGSL mat3x3
+  // storage layout is 48 bytes (3 columns of vec3 padded to vec4).
+  const cMatBuf = device.createBuffer({
+    size: N * 48,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  // Initialise to zero so first frame has no velocity gradient.
+  device.queue.writeBuffer(cMatBuf, 0, new Float32Array(N * 12));
 
   // Sim uniform buffer.
   const SIM_PARAMS_SIZE = 64;   // vec3 + 9 f32 + 2 pad = 12 floats + 4 pad
@@ -639,6 +682,7 @@ async function initAndRun() {
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
     ],
   });
   const computePipelineLayout = device.createPipelineLayout({
@@ -668,6 +712,7 @@ async function initAndRun() {
       { binding: 2, resource: { buffer: gridBuf } },
       { binding: 3, resource: { buffer: gridVelBuf } },
       { binding: 4, resource: { buffer: simParamsBuf } },
+      { binding: 5, resource: { buffer: cMatBuf } },
     ],
   });
 
@@ -852,10 +897,11 @@ async function initAndRun() {
     simBuf[5] = CELL_SIZE;
     simBuf[6] = 1.0 / CELL_SIZE;
     simBuf[7] = FIXED_POINT;
-    simBuf[8] = 1.0;              // particleMass (arbitrary unit, cancels out)
-    simBuf[9] = 0.998;            // velDamping
-    simBuf[10] = 0.30;            // restitution at the safety wall clamp
-    simBuf[11] = 0;
+    simBuf[8] = 1.0;              // particleMass (cancels out)
+    simBuf[9] = 0.9995;           // velDamping (gentler; MLS-MPM is less dissipative)
+    simBuf[10] = 0.30;            // wall restitution
+    simBuf[11] = 50.0;            // pressureK (EOS stiffness for water)
+    simBuf[12] = 4.0;             // restDensity (target mass per cell-volume)
     device.queue.writeBuffer(simParamsBuf, 0, simBuf);
 
     const cellGroups = Math.ceil(NUM_CELLS / 64);

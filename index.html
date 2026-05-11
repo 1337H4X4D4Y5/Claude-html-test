@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v39</span>
+    <span class="tag">v40</span>
   </div>
-  <div class="desc">Material Point Method on the GPU. PIC mode for now: 8000 particles + 32³ grid, P2G + G2P with trilinear B-spline weights, atomic fixed-point. No preferred packing geometry. v40 upgrades to MLS-MPM with affine velocity gradient.</div>
+  <div class="desc">MLS-MPM on the GPU: quadratic B-spline (27-cell scatter), per-particle affine velocity gradient (APIC C matrix), 8000 particles + 32³ grid, atomic fixed-point P2G. Less dissipative than PIC, recovers more of fluid's swirl/slosh behaviour.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

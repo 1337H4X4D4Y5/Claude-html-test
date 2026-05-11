@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v62</span>
+    <span class="tag">v63</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v62 fixes "stuck particles at the floor" (grid now extends 2 cells beyond box bounds so wall-clamped positions always have valid grid mapping). Box is deeper (Z half-extent 0.06 → 0.25) and the camera fits from the front face so corners don't clip the screen.</div>
+  <div class="desc">MLS-MPM on the GPU. v63 adds a Box depth slider in the settings panel (range 0.10 – 1.50, default 0.25). Also exposed as <code>?d=</code> URL param. Camera auto-fits the new depth so the front face always frames the screen edges.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

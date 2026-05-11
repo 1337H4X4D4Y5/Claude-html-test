@@ -210,6 +210,9 @@
   <div class="label">Particles</div>
   <div class="count" id="settings-count">24000</div>
   <input id="settings-slider" type="range" min="1000" max="200000" step="1000" value="24000">
+  <div class="label" style="margin-top: 12px;">Box depth</div>
+  <div class="count" id="settings-depth-count">0.25</div>
+  <input id="settings-depth-slider" type="range" min="0.10" max="1.50" step="0.05" value="0.25">
   <button id="settings-apply">Apply (reloads)</button>
   <button id="settings-cancel">Cancel</button>
 </div>
@@ -255,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v62 (2026-05-11 — fix stuck particles + deeper box + camera fits front face)';
+const APP_VERSION = 'mpm-v63 (2026-05-11 — user-controllable box depth via settings slider + ?d= URL)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -272,6 +275,15 @@ function readParticleCount() {
   return Math.max(500, Math.min(200000, parseInt(m[1], 10) || 24000));
 }
 const N = readParticleCount();
+
+// v63: user-controllable box depth via ?d=NN URL param + settings slider.
+// Min 0.10 (thin phone), max 1.50 (deep tank). Default 0.25.
+function readBoxDepth() {
+  const m = location.search.match(/[?&]d=(\d+(?:\.\d+)?)/);
+  if (!m) return 0.25;
+  return Math.max(0.10, Math.min(1.50, parseFloat(m[1]) || 0.25));
+}
+const BOX_DEPTH_INITIAL = readBoxDepth();
 
 // v60: iPhone 15 Pro Max aspect (159.9 x 76.7 x 8.25 mm) ≈ 1 : 2.083 : 0.108.
 // v61: BOX_HALF_X is now updated at run time to canvas aspect * BOX_HALF_Y,
@@ -487,24 +499,36 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
   window.location.href = './?t=' + Date.now();
 });
 
-// Settings panel: gear → slider → Apply reloads with ?n=NNNN.
+// Settings panel: gear → sliders → Apply reloads with ?n=NNNN&d=DEPTH.
+// v63: depth slider added.
 (function () {
   const btn = document.getElementById('settings-btn');
   const panel = document.getElementById('settings-panel');
   const slider = document.getElementById('settings-slider');
   const countLabel = document.getElementById('settings-count');
+  const depthSlider = document.getElementById('settings-depth-slider');
+  const depthLabel = document.getElementById('settings-depth-count');
   const applyBtn = document.getElementById('settings-apply');
   const cancelBtn = document.getElementById('settings-cancel');
   slider.value = String(N);
   countLabel.textContent = N;
+  depthSlider.value = String(BOX_DEPTH_INITIAL);
+  depthLabel.textContent = BOX_DEPTH_INITIAL.toFixed(2);
   slider.addEventListener('input', function () { countLabel.textContent = slider.value; });
+  depthSlider.addEventListener('input', function () {
+    depthLabel.textContent = parseFloat(depthSlider.value).toFixed(2);
+  });
   btn.addEventListener('click', function () { panel.classList.toggle('open'); });
   cancelBtn.addEventListener('click', function () { panel.classList.remove('open'); });
   applyBtn.addEventListener('click', function () {
     const v = parseInt(slider.value, 10);
-    if (!v || v === N) { panel.classList.remove('open'); return; }
+    const d = parseFloat(depthSlider.value);
+    const nChanged = v && v !== N;
+    const dChanged = Math.abs(d - BOX_DEPTH_INITIAL) > 1e-4;
+    if (!nChanged && !dChanged) { panel.classList.remove('open'); return; }
     const url = new URL(window.location.href);
-    url.searchParams.set('n', String(v));
+    if (v) url.searchParams.set('n', String(v));
+    if (d) url.searchParams.set('d', d.toFixed(2));
     url.searchParams.set('t', String(Date.now()));
     window.location.href = url.toString();
   });
@@ -1171,11 +1195,11 @@ async function initAndRun() {
   // v61: size the simulation box to match the canvas aspect, so the box
   // edges line up with the phone screen edges exactly. Keep BOX_HALF_Y
   // = 1.0 (height anchor) and derive width from aspect.
-  // v62: depth (Z) was 0.06 (iPhone-thin), now 0.25 per user request —
-  // gives the fluid real volume to slosh in front/back.
+  // v62: depth (Z) was 0.06 (iPhone-thin), now defaults to 0.25.
+  // v63: depth controllable via settings slider / ?d= URL param.
   const canvasAspect = canvas.width / canvas.height;   // < 1 in portrait
   BOX_HALF_X = canvasAspect * BOX_HALF_Y;
-  BOX_HALF_Z = 0.25;
+  BOX_HALF_Z = BOX_DEPTH_INITIAL;
   recomputeBoxDerived();
   applyPreset(state.preset);   // refresh pressureK + restDensity from new _natRho
 

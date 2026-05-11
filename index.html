@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v60</span>
+    <span class="tag">v61</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v60 reshapes the simulation box to iPhone 15 Pro Max aspect (159.9 × 76.7 × 8.25 mm) — tall, narrow, thin. Also fixes a green-cast bug in the water composite by switching to uniform-opacity body blending.</div>
+  <div class="desc">MLS-MPM on the GPU. v61 makes the simulation box match the user's actual canvas aspect (BOX_HALF_X = aspect × height) and moves the camera so box edges hit the screen edges exactly. Presets now use pressureKMul so physics stays stable across box sizes.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

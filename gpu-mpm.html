@@ -255,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v60 (2026-05-11 — iPhone 15 Pro Max box dimensions + fix green water)';
+const APP_VERSION = 'mpm-v61 (2026-05-11 — box matches your phone aspect + camera fits exactly)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -274,19 +274,17 @@ function readParticleCount() {
 const N = readParticleCount();
 
 // v60: iPhone 15 Pro Max aspect (159.9 x 76.7 x 8.25 mm) ≈ 1 : 2.083 : 0.108.
-// Normalising height to BOX_HALF_Y = 1.0:
-//   BOX_HALF_X = 0.480  (width)
-//   BOX_HALF_Y = 1.000  (height — longest)
-//   BOX_HALF_Z = 0.052  (depth — thinnest)
-// Declared HERE (above _natRho) because _natRho reads them; v60 originally
-// declared them later and tripped the same TDZ pattern fixed in v47 for N.
-const BOX_HALF_X = 0.480;
+// v61: BOX_HALF_X is now updated at run time to canvas aspect * BOX_HALF_Y,
+// so the box matches the *user's* phone screen exactly — they're declared
+// `let` and the values here are placeholders for the initial preset apply.
+// Declared HERE (above _natRho) because _natRho reads them.
+let BOX_HALF_X = 0.480;
 const BOX_HALF_Y = 1.000;
-const BOX_HALF_Z = 0.052;
-const GRID_HALF = Math.max(BOX_HALF_X, BOX_HALF_Y, BOX_HALF_Z);
+let BOX_HALF_Z = 0.052;
+let GRID_HALF = Math.max(BOX_HALF_X, BOX_HALF_Y, BOX_HALF_Z);
 const GRID_SIZE = 48;
 const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;
-const CELL_SIZE = (2 * GRID_HALF) / GRID_SIZE;
+let CELL_SIZE = (2 * GRID_HALF) / GRID_SIZE;
 
 // All MPM tunables live in one place. Surfaced in the on-screen debug
 // strip and the copy-debug report so we can iterate from screenshots.
@@ -295,13 +293,19 @@ const CELL_SIZE = (2 * GRID_HALF) / GRID_SIZE;
 // compression no matter what particle count is loaded:
 //   rho0 ~ (N * particleMass) / (filled volume)
 //   filled volume ~ box_volume / 2  (fluid fills the lower half at rest)
-// v60: box is now an iPhone aspect prism. filled_vol = 4 * BOX_HALF_X *
-// BOX_HALF_Y * BOX_HALF_Z (= total/2). For the default 0.48 × 1.0 × 0.052
-// box that's 0.0998 — ~40× smaller than the old 4-cube fill volume, so
-// _natRho is ~40× larger but pressureK and restDensity scale together
-// → sound speed c = sqrt(K/rho0) is unchanged, CFL margin unchanged.
-const FILL_VOLUME = 4 * BOX_HALF_X * BOX_HALF_Y * BOX_HALF_Z;
-const _natRho = N * 1.0 / FILL_VOLUME;
+// v60: box is an iPhone-aspect prism so filled_vol is much smaller than
+// the old 4-cube but pressureK and restDensity scale together → CFL
+// margin unchanged. v61: _natRho is recomputed in initAndRun after the
+// canvas aspect drives BOX_HALF_X.
+let FILL_VOLUME = 4 * BOX_HALF_X * BOX_HALF_Y * BOX_HALF_Z;
+let _natRho = N * 1.0 / FILL_VOLUME;
+
+function recomputeBoxDerived() {
+  GRID_HALF = Math.max(BOX_HALF_X, BOX_HALF_Y, BOX_HALF_Z);
+  CELL_SIZE = (2 * GRID_HALF) / GRID_SIZE;
+  FILL_VOLUME = 4 * BOX_HALF_X * BOX_HALF_Y * BOX_HALF_Z;
+  _natRho = N * 1.0 / FILL_VOLUME;
+}
 
 // v51: fluid styles. Each preset overrides the live-tunable subset of
 // SIM_TUNE — pressureK / damping / restitution / wallFriction / viscosity /
@@ -316,11 +320,15 @@ const _natRho = N * 1.0 / FILL_VOLUME;
 //   Honey:    amber      -> dark amber at depth  (blue dies first)
 //   Syrup:    orange     -> dark brown at depth  (blue + green absorbed)
 //   Mercury:  silver     -> nearly opaque        (all channels absorb hard)
+// v61: presets store pressureKMul (multiplier over _natRho) instead of the
+// already-multiplied pressureK literal. _natRho depends on box volume,
+// which depends on canvas aspect (v61), so it's only known after the
+// canvas is sized. applyPreset() multiplies by the current _natRho.
 const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      pressureK: _natRho * 50, velDamping: 0.998, restitution: 0.20,
+      pressureKMul: 50, velDamping: 0.998, restitution: 0.20,
       wallFriction: 0.95, viscosity: 0.03, maxAccel: 50.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
@@ -332,7 +340,7 @@ const FLUID_PRESETS = [
     key: 'honey', label: 'Honey',
     tune: {
       // Soft K + heavy damping + sticky walls + very high XSPH viscosity.
-      pressureK: _natRho * 30, velDamping: 0.985, restitution: 0.05,
+      pressureKMul: 30, velDamping: 0.985, restitution: 0.05,
       wallFriction: 0.75, viscosity: 0.20, maxAccel: 25.0,
       baseColorR: 1.00, baseColorG: 0.78, baseColorB: 0.32,
       absorptionR: 0.6, absorptionG: 1.8, absorptionB: 6.0,
@@ -342,7 +350,7 @@ const FLUID_PRESETS = [
   {
     key: 'syrup', label: 'Maple syrup',
     tune: {
-      pressureK: _natRho * 40, velDamping: 0.993, restitution: 0.10,
+      pressureKMul: 40, velDamping: 0.993, restitution: 0.10,
       wallFriction: 0.85, viscosity: 0.10, maxAccel: 40.0,
       baseColorR: 0.85, baseColorG: 0.48, baseColorB: 0.18,
       absorptionR: 1.5, absorptionG: 3.5, absorptionB: 8.0,
@@ -354,7 +362,7 @@ const FLUID_PRESETS = [
     tune: {
       // Stiffer K (still inside CFL — c=8.94, margin 1.68x), almost-zero
       // viscosity, nearly-free slip, big bounce. Reads as a dense metal.
-      pressureK: _natRho * 80, velDamping: 0.9995, restitution: 0.40,
+      pressureKMul: 80, velDamping: 0.9995, restitution: 0.40,
       wallFriction: 0.99, viscosity: 0.002, maxAccel: 120.0,
       baseColorR: 0.85, baseColorG: 0.88, baseColorB: 0.95,
       absorptionR: 8.0, absorptionG: 8.0, absorptionB: 8.0,
@@ -369,18 +377,29 @@ function findPreset(key) {
 }
 const DEFAULT_PRESET = 'water';
 
-const SIM_TUNE = Object.assign({
-  // Fields shared across all presets.
-  restDensity: _natRho,
+const SIM_TUNE = {
+  // Shared, not in any preset.
   particleMass: 1.0,
   eos: 'linear',
-}, findPreset(DEFAULT_PRESET).tune);
-// applyPreset swaps the live tunables and (best-effort) updates UI bits
-// that may not exist yet. Safe to call from anywhere in the script.
+  // Filled in by applyPreset() below.
+  restDensity: _natRho,
+  pressureK: 0,
+  pressureKMul: 0,
+  velDamping: 0, restitution: 0, wallFriction: 0, viscosity: 0, maxAccel: 0,
+  baseColorR: 0, baseColorG: 0, baseColorB: 0,
+  absorptionR: 0, absorptionG: 0, absorptionB: 0,
+  refractStrength: 0,
+};
+// v61: applyPreset translates pressureKMul -> pressureK using the current
+// _natRho (which depends on box volume, set in initAndRun). Also refreshes
+// SIM_TUNE.restDensity so it tracks any box-aspect change.
 function applyPreset(key) {
   const p = findPreset(key);
   if (!p) return;
   for (const k in p.tune) { SIM_TUNE[k] = p.tune[k]; }
+  // Derived from box volume (must run AFTER recomputeBoxDerived()).
+  SIM_TUNE.restDensity = _natRho;
+  SIM_TUNE.pressureK   = SIM_TUNE.pressureKMul * _natRho;
   if (typeof state !== 'undefined') {
     state.preset = p.key;
     state.presetLabel = p.label;
@@ -1139,6 +1158,16 @@ async function initAndRun() {
     canvas.height = Math.floor(canvas.clientHeight * dpr);
   });
 
+  // v61: size the simulation box to match the canvas aspect, so the box
+  // edges line up with the phone screen edges exactly. Keep BOX_HALF_Y
+  // = 1.0 (height anchor) and derive width from aspect. Depth (Z) stays
+  // a thin iPhone-like proportion so the fluid is constrained front/back.
+  const canvasAspect = canvas.width / canvas.height;   // < 1 in portrait
+  BOX_HALF_X = canvasAspect * BOX_HALF_Y;
+  BOX_HALF_Z = 0.06;
+  recomputeBoxDerived();
+  applyPreset(state.preset);   // refresh pressureK + restDensity from new _natRho
+
   if (!navigator.gpu) throw new Error('navigator.gpu missing');
   setOverlayMsg('requesting adapter…');
   const adapter = await navigator.gpu.requestAdapter();
@@ -1442,9 +1471,14 @@ async function initAndRun() {
 
   // --- Camera ---
   function buildViewProj(aspect) {
-    const eye = [0, 1.6, 4];
+    // v61: fit camera so the box exactly fills the viewport.
+    // visible_half_h = d * tan(fovY/2) — set equal to BOX_HALF_Y.
+    // Because BOX_HALF_X = aspect * BOX_HALF_Y (set in initAndRun), this
+    // also makes visible_half_w = aspect * d * tan = BOX_HALF_X exactly.
     const fovY = 50 * DEG;
     const near = 0.1, far = 100;
+    const fitD = BOX_HALF_Y / Math.tan(fovY / 2);
+    const eye = [0, 0, fitD];
     const f = 1 / Math.tan(fovY / 2);
     const proj = [
       f / aspect, 0, 0, 0,

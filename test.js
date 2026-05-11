@@ -701,17 +701,18 @@
   }
 
   {
-    test('gpu-mpm: const N declared before const _natRho (TDZ regression check)', () => {
+    test('gpu-mpm: const N declared before _natRho (TDZ regression check)', () => {
       // v46 declared `const _natRho = N * 1.0 / 4.0` ABOVE `const N = ...`,
       // which throws ReferenceError under TDZ at script load and leaves
-      // the overlay button inert. Verify the ordering is correct.
+      // the overlay button inert. v61: _natRho became `let` (recomputed
+      // after canvas sized) — match either declaration form.
       const src = readMpmScript();
       const idxN = src.indexOf('const N = readParticleCount()');
-      const idxRho = src.indexOf('const _natRho = N');
+      const idxRho = (src.match(/\b(?:const|let)\s+_natRho\s*=/) || {}).index ?? -1;
       assert(idxN >= 0, 'const N declaration not found');
-      assert(idxRho >= 0, 'const _natRho declaration not found');
+      assert(idxRho >= 0, '_natRho declaration not found');
       assert(idxN < idxRho,
-        'const N must appear before const _natRho (TDZ violation regressed): ' +
+        'const N must appear before _natRho (TDZ violation regressed): ' +
         'idxN=' + idxN + ' idxRho=' + idxRho);
     });
 
@@ -832,26 +833,21 @@
     }
 
     test('gpu-mpm v48: CFL margin > 1.0 at current SIM_TUNE values', () => {
-      // Pull SIM_TUNE.pressureK and restDensity literals out of the script
-      // and compute the CFL margin. If a future edit raises K past the
-      // stability cliff, this test fires before the user has to see
-      // blasting particles. Grid size + default N are parsed from source
-      // so changing them won't silently invalidate the test.
+      // v61: presets store pressureKMul (multiplier over _natRho).
+      // c = sqrt(K/rho0) = sqrt(pressureKMul) since rho0 == _natRho. CFL
+      // depends only on the multiplier, not absolute values, so box-volume
+      // changes don't affect it.
       const src = readMpmScript();
-      const kMatch  = src.match(/pressureK:\s*_natRho\s*\*\s*(\d+(?:\.\d+)?)/);
-      assert(kMatch, 'pressureK literal not found');
-      const N_DEFAULT = parseDefaultN(src);
-      const natRho = N_DEFAULT / 4;
-      const K = natRho * parseFloat(kMatch[1]);
-      const rho0 = natRho;
+      const mulMatch = src.match(/pressureKMul:\s*(\d+(?:\.\d+)?)/);
+      assert(mulMatch, 'pressureKMul literal not found');
       const cellSize = 2.0 / parseGridSize(src);
       const subDt = 1 / 240;
-      const soundC = Math.sqrt(K / rho0);
+      const soundC = Math.sqrt(parseFloat(mulMatch[1]));
       const cflDt = cellSize / soundC;
       const margin = cflDt / subDt;
       assert(margin > 1.05,
         'CFL margin too tight: ' + margin.toFixed(3) +
-        ' (K=' + K + ' c=' + soundC.toFixed(2) +
+        ' (Kmul=' + mulMatch[1] + ' c=' + soundC.toFixed(2) +
         ' cflDt=' + cflDt.toFixed(5) + ' subDt=' + subDt.toFixed(5) + ')');
     });
 
@@ -872,7 +868,7 @@
       // stale fields. Pull each tune block and verify keys.
       const tuneRe = /key:\s*'([a-z]+)',\s*label:[^,]+,\s*tune:\s*{([\s\S]*?)}/g;
       const required = [
-        'pressureK', 'velDamping', 'restitution', 'wallFriction', 'viscosity', 'maxAccel',
+        'pressureKMul', 'velDamping', 'restitution', 'wallFriction', 'viscosity', 'maxAccel',
         'baseColorR', 'baseColorG', 'baseColorB',
         'absorptionR', 'absorptionG', 'absorptionB',
         'refractStrength',
@@ -891,29 +887,24 @@
     });
 
     test('gpu-mpm v51: every preset stays inside CFL margin > 1.05', () => {
-      // pressureK multipliers (over _natRho) for each preset, as authored
-      // in gpu-mpm.html. If any preset exceeds the CFL ceiling at the
-      // default substep dt the fluid blows up — test catches that before
-      // shipping. Grid size + default N are parsed from source.
+      // v61: presets store pressureKMul (multiplier over _natRho). CFL
+      // margin depends only on the multiplier — c = sqrt(K/rho0) =
+      // sqrt(pressureKMul) since rho0 = _natRho — so we just check each.
       const src = readMpmScript();
-      const N_DEFAULT = parseDefaultN(src);
-      const natRho = N_DEFAULT / 4;
       const cellSize = 2.0 / parseGridSize(src);
       const subDt = 1 / 240;
-      // Pull every "pressureK: _natRho * NUMBER" line from FLUID_PRESETS.
-      const re = /pressureK:\s*_natRho\s*\*\s*(\d+(?:\.\d+)?)/g;
+      const re = /pressureKMul:\s*(\d+(?:\.\d+)?)/g;
       const multipliers = [];
       let m;
       while ((m = re.exec(src))) multipliers.push(parseFloat(m[1]));
       assert(multipliers.length >= 4,
-        'expected >=4 pressureK multipliers (one per preset), got ' + multipliers.length);
+        'expected >=4 pressureKMul values (one per preset), got ' + multipliers.length);
       for (const mul of multipliers) {
-        const K = natRho * mul;
-        const c = Math.sqrt(K / natRho);
+        const c = Math.sqrt(mul);
         const cflDt = cellSize / c;
         const margin = cflDt / subDt;
         assert(margin > 1.05,
-          'preset with K = _natRho * ' + mul + ' violates CFL: margin ' +
+          'preset with pressureKMul = ' + mul + ' violates CFL: margin ' +
           margin.toFixed(3) + ' (c=' + c.toFixed(2) + ')');
       }
     });

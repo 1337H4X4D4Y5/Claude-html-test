@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v65 (2026-05-11 — water less bouncy (restitution 0.30 -> 0.08))';
+const APP_VERSION = 'mpm-v66 (2026-05-11 — water restitution = 0 (no bounce))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,12 +350,13 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      // v64: low viscosity (not goopy) + slippy walls + slightly less
-      // global damping. v65: pulled restitution back from 0.30 to 0.08 —
-      // real water against glass barely bounces, it just splashes via
-      // velocity transfer through the surface, not by elastic rebound.
-      pressureKMul: 50, velDamping: 0.999, restitution: 0.08,
-      wallFriction: 0.97, viscosity: 0.005, maxAccel: 60.0,
+      // v66: restitution = 0 — real water doesn't bounce off glass at all,
+      // it just stops there. Splashy look comes from pressure response +
+      // free-surface velocity transfer, not from elastic wall rebound.
+      // Slight bump to velDamping helps energy dissipate and the surface
+      // settle to flat without persistent ripples.
+      pressureKMul: 50, velDamping: 0.997, restitution: 0.0,
+      wallFriction: 0.97, viscosity: 0.005, maxAccel: 50.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
       // v59: screen-space refraction strength in pixels.

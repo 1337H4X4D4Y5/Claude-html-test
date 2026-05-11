@@ -745,6 +745,7 @@
       const stubDoc = {
         getElementById() { return stubEl; },
         createElement() { return stubEl; },
+        querySelectorAll() { return []; },
         body: stubEl, documentElement: stubEl,
         addEventListener() {},
       };
@@ -837,6 +838,92 @@
         'CFL margin too tight: ' + margin.toFixed(3) +
         ' (K=' + K + ' c=' + soundC.toFixed(2) +
         ' cflDt=' + cflDt.toFixed(5) + ' subDt=' + subDt.toFixed(5) + ')');
+    });
+
+    test('gpu-mpm v51: FLUID_PRESETS contains the expected preset keys', () => {
+      const src = readMpmScript();
+      // FLUID_PRESETS is declared as an array of {key, label, tune} objects.
+      const arrMatch = src.match(/const\s+FLUID_PRESETS\s*=\s*\[([\s\S]*?)\];/);
+      assert(arrMatch, 'FLUID_PRESETS array literal not found');
+      const expected = ['water', 'honey', 'syrup', 'mercury'];
+      for (const k of expected) {
+        assert(arrMatch[1].indexOf("key: '" + k + "'") >= 0 ||
+               arrMatch[1].indexOf('key: "' + k + '"') >= 0,
+          'preset key "' + k + '" missing from FLUID_PRESETS');
+      }
+      // applyPreset wiring must exist.
+      assert(src.indexOf('function applyPreset') >= 0, 'applyPreset() function missing');
+      // Each preset must define every live tunable so a swap doesn't leave
+      // stale fields. Pull each tune block and verify keys.
+      const tuneRe = /key:\s*'([a-z]+)',\s*label:[^,]+,\s*tune:\s*{([\s\S]*?)}/g;
+      const required = ['pressureK', 'velDamping', 'restitution', 'wallFriction', 'viscosity', 'maxAccel'];
+      let m;
+      let count = 0;
+      while ((m = tuneRe.exec(arrMatch[1]))) {
+        count++;
+        for (const r of required) {
+          assert(m[2].indexOf(r + ':') >= 0,
+            'preset "' + m[1] + '" missing tunable "' + r + '"');
+        }
+      }
+      assert(count === expected.length,
+        'expected ' + expected.length + ' preset entries, parsed ' + count);
+    });
+
+    test('gpu-mpm v51: every preset stays inside CFL margin > 1.05', () => {
+      // pressureK multipliers (over _natRho) for each preset, as authored
+      // in gpu-mpm.html. If any preset exceeds the CFL ceiling at the
+      // default substep dt the fluid blows up — test catches that before
+      // shipping. At N=24000 (current default), natRho = 6000.
+      const src = readMpmScript();
+      const N_DEFAULT = 24000;
+      const natRho = N_DEFAULT / 4;
+      const cellSize = 2.0 / 32;
+      const subDt = 1 / 240;
+      // Pull every "pressureK: _natRho * NUMBER" line from FLUID_PRESETS.
+      const re = /pressureK:\s*_natRho\s*\*\s*(\d+(?:\.\d+)?)/g;
+      const multipliers = [];
+      let m;
+      while ((m = re.exec(src))) multipliers.push(parseFloat(m[1]));
+      assert(multipliers.length >= 4,
+        'expected >=4 pressureK multipliers (one per preset), got ' + multipliers.length);
+      for (const mul of multipliers) {
+        const K = natRho * mul;
+        const c = Math.sqrt(K / natRho);
+        const cflDt = cellSize / c;
+        const margin = cflDt / subDt;
+        assert(margin > 1.05,
+          'preset with K = _natRho * ' + mul + ' violates CFL: margin ' +
+          margin.toFixed(3) + ' (c=' + c.toFixed(2) + ')');
+      }
+    });
+
+    test('gpu-mpm v51: presets panel HTML buttons exist and applyPreset is wired', () => {
+      const src = readMpmScript();
+      // Inline scripts also include the static HTML around them — the
+      // readMpmScript helper returns only the script body. So check the
+      // raw file for the panel/button DOM.
+      let html;
+      if (isNode) {
+        const fs = require('fs');
+        const path = require('path');
+        html = fs.readFileSync(path.resolve(__dirname, 'gpu-mpm.html'), 'utf8');
+      } else {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', './gpu-mpm.html?t=' + Date.now(), false);
+        xhr.send(null);
+        html = xhr.responseText;
+      }
+      assert(html.indexOf('id="presets-btn"') >= 0, 'presets-btn missing from HTML');
+      assert(html.indexOf('id="presets-panel"') >= 0, 'presets-panel missing from HTML');
+      for (const k of ['water', 'honey', 'syrup', 'mercury']) {
+        assert(html.indexOf('data-preset="' + k + '"') >= 0,
+          'preset button data-preset="' + k + '" missing from HTML');
+      }
+      // The JS must wire the click → applyPreset path.
+      assert(src.indexOf("applyPreset(b.getAttribute('data-preset'))") >= 0 ||
+             src.indexOf('applyPreset(b.getAttribute("data-preset"))') >= 0,
+        'preset-btn click handler does not call applyPreset(...)');
     });
 
     test('gpu-mpm v48: wall friction applied in cs_grid, viscosity applied in cs_g2p', () => {

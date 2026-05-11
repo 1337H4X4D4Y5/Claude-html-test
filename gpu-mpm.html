@@ -81,7 +81,14 @@
     font-size: 11px; line-height: 1.5;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: pre;
+    transition: padding 0.12s ease;
   }
+  /* Collapsed view: one short line, no buttons. Tap anywhere on the strip
+     to expand the full debug payload + copy/reset buttons. */
+  #debug.collapsed { padding: 6px 10px; opacity: 0.7; }
+  #debug.collapsed #debug-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #debug.collapsed #copy-btn, #debug.collapsed #reset-btn { display: none; }
+  #debug-text { cursor: pointer; -webkit-tap-highlight-color: transparent; }
   #copy-btn, #reset-btn {
     appearance: none; -webkit-appearance: none; border: none;
     display: block; width: 100%; min-height: 38px; margin-top: 6px;
@@ -130,6 +137,60 @@
   }
   #settings-apply { background: linear-gradient(135deg, #a05aff, #5028a0); }
   #settings-cancel { background: rgba(255,255,255,0.06); margin-top: 6px; min-height: 30px; font-size: 12px; }
+  /* Presets button + panel — same visual language as the gear, sitting
+     immediately below it. Tap opens a list of fluid styles that swap
+     the live SIM_TUNE values; no reload required (unlike particle count). */
+  #presets-btn {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 78px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    width: 34px; height: 34px; border: none; border-radius: 17px;
+    background: rgba(74,163,255,0.30);
+    color: #e8f1ff; font-size: 18px; font-weight: 600;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    z-index: 9;
+  }
+  #presets-panel {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 120px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    width: 220px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: rgba(15,28,55,0.96);
+    border: 1px solid rgba(74,163,255,0.30);
+    color: #e8f1ff;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    z-index: 11; display: none;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  }
+  #presets-panel.open { display: block; }
+  #presets-panel .label { font-size: 11px; opacity: 0.65; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.8px; }
+  .preset-btn {
+    appearance: none; -webkit-appearance: none; border: none;
+    display: block; width: 100%; margin-bottom: 6px; min-height: 36px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.06); color: #e8f1ff;
+    font-size: 13px; font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    text-align: left; padding: 0 12px;
+  }
+  .preset-btn:active { background: rgba(74,163,255,0.30); }
+  .preset-btn.active { background: linear-gradient(135deg, rgba(74,163,255,0.45), rgba(42,127,184,0.30)); border: 1px solid rgba(74,163,255,0.55); }
+  .preset-btn .preset-desc {
+    display: block; font-size: 10px; opacity: 0.65; margin-top: 2px;
+    font-weight: 400; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #presets-close {
+    appearance: none; -webkit-appearance: none; border: none;
+    display: block; width: 100%; margin-top: 6px; min-height: 30px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.06); color: #e8f1ff;
+    font-size: 12px; font-weight: 600;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
 </style>
 </head>
 <body>
@@ -151,6 +212,15 @@
   <input id="settings-slider" type="range" min="1000" max="40000" step="500" value="24000">
   <button id="settings-apply">Apply (reloads)</button>
   <button id="settings-cancel">Cancel</button>
+</div>
+<button id="presets-btn" title="Fluid preset">💧</button>
+<div id="presets-panel">
+  <div class="label">Fluid preset</div>
+  <button class="preset-btn" data-preset="water">Water<span class="preset-desc">balanced, splashy</span></button>
+  <button class="preset-btn" data-preset="honey">Honey<span class="preset-desc">slow, sticky, very viscous</span></button>
+  <button class="preset-btn" data-preset="syrup">Maple syrup<span class="preset-desc">medium viscous</span></button>
+  <button class="preset-btn" data-preset="mercury">Mercury<span class="preset-desc">dense, bouncy, inviscid</span></button>
+  <button id="presets-close">Close</button>
 </div>
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button><button id="reset-btn">Reset particles</button></div>
 
@@ -185,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v50 (2026-05-11 — N=24000 default + radius 0.020 (no more gaps))';
+const APP_VERSION = 'mpm-v51 (2026-05-11 — fluid presets (water/honey/syrup/mercury) + collapsible debug)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -212,30 +282,73 @@ const N = readParticleCount();
 // In v46 _natRho was declared before N which triggered a TDZ
 // ReferenceError on script load, leaving the Tap-to-begin button inert.
 const _natRho = N * 1.0 / 4.0;
-const SIM_TUNE = {
-  // v49: BACK to v47's softer K. v48's 2x stiffer pressure made the fluid
-  // feel springy/snappy rather than viscous — the user preferred v47's
-  // softer, more blob-like behaviour. K = _natRho*50 → sound speed 7.07,
-  // CFL margin 2.12x. Compressibility is what gives the visual "thick
-  // liquid" feel.
-  pressureK: _natRho * 50,
+
+// v51: fluid styles. Each preset overrides the live-tunable subset of
+// SIM_TUNE — pressureK / damping / restitution / wallFriction / viscosity /
+// maxAccel — no reload required because simBuf is rewritten every frame.
+// Fields not in `tune` (restDensity, particleMass, eos) stay shared so
+// the EOS shape and per-particle mass don't shift between presets.
+const FLUID_PRESETS = [
+  {
+    key: 'water', label: 'Water',
+    tune: {
+      pressureK: _natRho * 50, velDamping: 0.998, restitution: 0.20,
+      wallFriction: 0.95, viscosity: 0.03, maxAccel: 50.0,
+    },
+  },
+  {
+    key: 'honey', label: 'Honey',
+    tune: {
+      // Soft K + heavy damping + sticky walls + very high XSPH viscosity.
+      pressureK: _natRho * 30, velDamping: 0.985, restitution: 0.05,
+      wallFriction: 0.75, viscosity: 0.20, maxAccel: 25.0,
+    },
+  },
+  {
+    key: 'syrup', label: 'Maple syrup',
+    tune: {
+      pressureK: _natRho * 40, velDamping: 0.993, restitution: 0.10,
+      wallFriction: 0.85, viscosity: 0.10, maxAccel: 40.0,
+    },
+  },
+  {
+    key: 'mercury', label: 'Mercury',
+    tune: {
+      // Stiffer K (still inside CFL — c=8.94, margin 1.68x), almost-zero
+      // viscosity, nearly-free slip, big bounce. Reads as a dense metal.
+      pressureK: _natRho * 80, velDamping: 0.9995, restitution: 0.40,
+      wallFriction: 0.99, viscosity: 0.002, maxAccel: 120.0,
+    },
+  },
+];
+function findPreset(key) {
+  for (const p of FLUID_PRESETS) { if (p.key === key) return p; }
+  return null;
+}
+const DEFAULT_PRESET = 'water';
+
+const SIM_TUNE = Object.assign({
+  // Fields shared across all presets.
   restDensity: _natRho,
   particleMass: 1.0,
-  velDamping: 0.998,
-  restitution: 0.20,
-  // v49: back to v47's 50. With softer K the pressure accel never gets
-  // huge, so the cap matters less; we keep it as a safety rail for
-  // briefly-overcompressed cells.
-  maxAccel: 50.0,
-  // v48 addition retained — slight tangential damp at the glass adds
-  // weight to sloshing without locking the fluid in place.
-  wallFriction: 0.95,
-  // v49: bumped 0.01 → 0.03. With softer K, the XSPH C-matrix decay does
-  // more of the visual "viscous" work — splashes pull cohesive strings
-  // rather than shedding sharp affine spin.
-  viscosity: 0.03,
   eos: 'linear',
-};
+}, findPreset(DEFAULT_PRESET).tune);
+// applyPreset swaps the live tunables and (best-effort) updates UI bits
+// that may not exist yet. Safe to call from anywhere in the script.
+function applyPreset(key) {
+  const p = findPreset(key);
+  if (!p) return;
+  for (const k in p.tune) { SIM_TUNE[k] = p.tune[k]; }
+  if (typeof state !== 'undefined') {
+    state.preset = p.key;
+    state.presetLabel = p.label;
+  }
+  if (typeof updateDebug === 'function') updateDebug();
+  const btns = document.querySelectorAll('.preset-btn');
+  for (const b of btns) {
+    b.classList.toggle('active', b.getAttribute('data-preset') === key);
+  }
+}
 const BOX_HALF = 1.0;
 const GRID_SIZE = 32;
 const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;
@@ -266,6 +379,7 @@ const state = {
   target: { x: 0, y: -9.8, z: 0 },
   fps: 0, steps: 0,
   initError: null, gpuError: null,
+  preset: DEFAULT_PRESET, presetLabel: findPreset(DEFAULT_PRESET).label,
 };
 
 const DEG = Math.PI / 180;
@@ -322,6 +436,38 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
     url.searchParams.set('n', String(v));
     url.searchParams.set('t', String(Date.now()));
     window.location.href = url.toString();
+  });
+})();
+
+// Presets panel: droplet button → list of fluid styles. Tapping a preset
+// hot-swaps the SIM_TUNE values (no reload required, simBuf is rewritten
+// every frame). Active preset stays highlighted.
+(function () {
+  const btn = document.getElementById('presets-btn');
+  const panel = document.getElementById('presets-panel');
+  const closeBtn = document.getElementById('presets-close');
+  btn.addEventListener('click', function () { panel.classList.toggle('open'); });
+  closeBtn.addEventListener('click', function () { panel.classList.remove('open'); });
+  for (const b of document.querySelectorAll('.preset-btn')) {
+    b.addEventListener('click', function () {
+      applyPreset(b.getAttribute('data-preset'));
+      panel.classList.remove('open');
+    });
+  }
+  // Highlight whichever preset matches the initial SIM_TUNE (water by default).
+  applyPreset(state.preset);
+})();
+
+// Collapsible debug strip: tap the strip to expand/collapse. Starts
+// collapsed so the simulation occupies the screen; user expands when they
+// want numbers or the copy/reset buttons.
+(function () {
+  const debugEl = document.getElementById('debug');
+  const textEl = document.getElementById('debug-text');
+  debugEl.classList.add('collapsed');
+  textEl.addEventListener('click', function () {
+    debugEl.classList.toggle('collapsed');
+    updateDebug();
   });
 })();
 
@@ -1259,7 +1405,19 @@ function updateDebug() {
   // Pressure-wave CFL: c = sqrt(K/rho0), required dt < cellSize/c.
   const soundC = Math.sqrt(SIM_TUNE.pressureK / SIM_TUNE.restDensity);
   const cflDt = CELL_SIZE / soundC;
+  const debugEl = debugTextEl.parentElement;
+  const collapsed = debugEl && debugEl.classList.contains('collapsed');
+  if (collapsed) {
+    // One-line summary. Tap to expand.
+    debugTextEl.textContent =
+      (state.presetLabel || '—') +
+      '  ·  fps ' + state.fps.toFixed(0) +
+      '  ·  ' + N + 'p' +
+      (state.gpuError ? '  ·  GPU ERR' : '');
+    return;
+  }
   debugTextEl.textContent =
+    'preset: ' + (state.presetLabel || state.preset) + '   (tap to collapse)\n' +
     'fps: ' + state.fps.toFixed(1) + '   particles: ' + N + '   grid: ' + GRID_SIZE + '³   steps: ' + state.steps + '\n' +
     'gyro: ' + state.gyroPermission + '   β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '   evt: ' + state.events + '\n' +
     'gravity x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) + '\n' +
@@ -1286,6 +1444,7 @@ copyBtn.addEventListener('click', function () {
   const report = [
     '=== Water Box MPM debug ===',
     'version: ' + APP_VERSION,
+    'preset:  ' + (state.presetLabel || state.preset),
     'fps: ' + state.fps.toFixed(1),
     'particles: ' + N,
     'grid: ' + GRID_SIZE + '^3 = ' + NUM_CELLS + ' cells',

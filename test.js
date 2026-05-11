@@ -1029,6 +1029,32 @@
       }
     });
 
+    test('gpu-mpm v73: thickness texture is blurred (separable H+V) before composite', () => {
+      // v53 added thickness; the composite sampled it raw. v73 inserts
+      // a 2-pass separable gaussian on the thickness texture to remove
+      // per-cell density variation that read as a grid of dimples on
+      // the surface through Beer's law.
+      const src = readMpmScript();
+      assert(src.indexOf('WGSL_THICKNESS_BLUR') >= 0,
+        'WGSL_THICKNESS_BLUR shader source missing');
+      assert(src.indexOf('thicknessBlurH') >= 0 && src.indexOf('thicknessBlurV') >= 0,
+        'thicknessBlurH/V pipelines not created');
+      assert(src.indexOf('thicknessH') >= 0 && src.indexOf('thicknessV') >= 0,
+        'thicknessH/thicknessV ping-pong textures not created');
+      // compositeBindGroup must sample the BLURRED thickness, not the raw one.
+      // Heuristic: the binding 2 entry of compositeBindGroup uses thicknessV.
+      const compIdx = src.indexOf('compositePipeline.getBindGroupLayout(0)');
+      assert(compIdx >= 0, 'compositeBindGroup not found');
+      const bgSlice = src.slice(compIdx, compIdx + 400);
+      assert(bgSlice.indexOf('thicknessV.createView()') >= 0,
+        'composite must sample thicknessV (blurred), not the raw thicknessTex');
+      // Frame loop must dispatch both blur passes.
+      assert(src.indexOf('p.setPipeline(thicknessBlurH)') >= 0,
+        'thicknessBlurH never dispatched in frame loop');
+      assert(src.indexOf('p.setPipeline(thicknessBlurV)') >= 0,
+        'thicknessBlurV never dispatched in frame loop');
+    });
+
     test('gpu-mpm v59: refraction wiring — backgroundTex pass + composite samples it', () => {
       const src = readMpmScript();
       // backgroundTex texture exists and is set up.

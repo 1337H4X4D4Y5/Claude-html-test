@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v72 (2026-05-11 — soften K, wider blur, softer thicknessScale)';
+const APP_VERSION = 'mpm-v73 (2026-05-11 — blur the thickness texture (kills grid-of-dimples))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1060,6 +1060,49 @@ fn fs_v(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
 }
 `;
 
+// v73: separable gaussian blur for the r16float thickness texture. Used
+// before composite samples it, to smooth out the per-cell density
+// variation that otherwise reads as a grid of dimples through Beer's
+// law absorption. Independent of the bilateral DEPTH blur because that
+// only smooths surface position, not internal thickness.
+const WGSL_THICKNESS_BLUR = `
+@group(0) @binding(0) var src: texture_2d<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 3.0, -1.0), vec2<f32>(-1.0,  3.0)
+  );
+  return vec4<f32>(p[vi], 0.0, 1.0);
+}
+
+fn tblur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
+  let R: i32 = 14;
+  let sigma2_inv: f32 = 1.0 / 60.0;
+  var sum: f32 = textureLoad(src, coord, 0).r;
+  var totalW: f32 = 1.0;
+  for (var i: i32 = 1; i <= R; i = i + 1) {
+    let w = exp(-f32(i * i) * sigma2_inv);
+    let sR = textureLoad(src, coord + dir * i, 0).r;
+    let sL = textureLoad(src, coord - dir * i, 0).r;
+    sum = sum + (sR + sL) * w;
+    totalW = totalW + 2.0 * w;
+  }
+  return sum / totalW;
+}
+
+@fragment
+fn fs_h(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let v = tblur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(1, 0));
+  return vec4<f32>(v, 0.0, 0.0, 1.0);
+}
+@fragment
+fn fs_v(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let v = tblur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(0, 1));
+  return vec4<f32>(v, 0.0, 0.0, 1.0);
+}
+`;
+
 const WGSL_COMPOSITE = `
 struct CompositeParams {
   near: f32, far: f32, fAspect: f32, fVert: f32,
@@ -1421,6 +1464,21 @@ async function initAndRun() {
     depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'always' },
   });
 
+  // v73: separable colour blur for the r16float thickness texture.
+  const thicknessBlurModule = device.createShaderModule({ code: WGSL_THICKNESS_BLUR });
+  const thicknessBlurH = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: thicknessBlurModule, entryPoint: 'vs_main' },
+    fragment: { module: thicknessBlurModule, entryPoint: 'fs_h', targets: [{ format: THICKNESS_FORMAT }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const thicknessBlurV = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: thicknessBlurModule, entryPoint: 'vs_main' },
+    fragment: { module: thicknessBlurModule, entryPoint: 'fs_v', targets: [{ format: THICKNESS_FORMAT }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+
   const compositeModule = device.createShaderModule({ code: WGSL_COMPOSITE });
   const compositePipeline = device.createRenderPipeline({
     layout: 'auto',
@@ -1466,9 +1524,15 @@ async function initAndRun() {
   });
 
   // Depth + thickness + background textures and ping-pong bind groups
-  // for the SSF passes.
-  let depthRaw = null, depthH = null, depthV = null, thicknessTex = null, backgroundTex = null;
+  // for the SSF passes. v73: thicknessTex now goes through a 2-pass
+  // separable blur (thicknessH then thicknessV) before the composite
+  // samples it — kills the grid-of-dimples artifact that came from
+  // per-cell density variation read through Beer's law.
+  let depthRaw = null, depthH = null, depthV = null;
+  let thicknessTex = null, thicknessH = null, thicknessV = null;
+  let backgroundTex = null;
   let compositeBindGroup = null, blurH1 = null, blurV1 = null, blurH2 = null, blurV2 = null;
+  let thickBlurHBind = null, thickBlurVBind = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
     const w = canvas.width, h = canvas.height;
@@ -1477,6 +1541,8 @@ async function initAndRun() {
     if (depthH) depthH.destroy();
     if (depthV) depthV.destroy();
     if (thicknessTex) thicknessTex.destroy();
+    if (thicknessH) thicknessH.destroy();
+    if (thicknessV) thicknessV.destroy();
     if (backgroundTex) backgroundTex.destroy();
     const opts = {
       size: { width: w, height: h },
@@ -1486,11 +1552,14 @@ async function initAndRun() {
     depthRaw = device.createTexture(opts);
     depthH = device.createTexture(opts);
     depthV = device.createTexture(opts);
-    thicknessTex = device.createTexture({
+    const thicknessOpts = {
       size: { width: w, height: h },
       format: THICKNESS_FORMAT,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    });
+    };
+    thicknessTex = device.createTexture(thicknessOpts);
+    thicknessH = device.createTexture(thicknessOpts);
+    thicknessV = device.createTexture(thicknessOpts);
     // v59: the background texture holds the box wireframe + clear colour.
     // Rendered each frame before the fluid composite, then sampled
     // (warped by surface normal) by the composite for refraction.
@@ -1503,12 +1572,21 @@ async function initAndRun() {
     blurV1 = device.createBindGroup({ layout: blurV.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthH.createView() }] });
     blurH2 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthV.createView() }] });
     blurV2 = device.createBindGroup({ layout: blurV.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthH.createView() }] });
+    // v73 thickness blur bind groups: raw -> thicknessH (H pass) -> thicknessV (V pass).
+    thickBlurHBind = device.createBindGroup({
+      layout: thicknessBlurH.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: thicknessTex.createView() }],
+    });
+    thickBlurVBind = device.createBindGroup({
+      layout: thicknessBlurV.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: thicknessH.createView() }],
+    });
     compositeBindGroup = device.createBindGroup({
       layout: compositePipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: depthV.createView() },
         { binding: 1, resource: { buffer: compositeParamsBuf } },
-        { binding: 2, resource: thicknessTex.createView() },
+        { binding: 2, resource: thicknessV.createView() },   // <-- BLURRED
         { binding: 3, resource: backgroundTex.createView() },
       ],
     });
@@ -1714,6 +1792,31 @@ async function initAndRun() {
       });
       p.setPipeline(thicknessPipeline); p.setBindGroup(0, thicknessBindGroup);
       p.draw(6, N); p.end();
+    }
+    // v73: blur the thickness texture. Horizontal then vertical, both
+    // gaussian (R=14, sigma~7.7 px) — kills the per-cell density bumps
+    // that Beer's law was amplifying into a visible dimple grid.
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: thicknessH.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(thicknessBlurH); p.setBindGroup(0, thickBlurHBind);
+      p.draw(3, 1); p.end();
+    }
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: thicknessV.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(thicknessBlurV); p.setBindGroup(0, thickBlurVBind);
+      p.draw(3, 1); p.end();
     }
     // Depth.
     {

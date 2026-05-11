@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v81</span>
+    <span class="tag">v82</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v81 adds bloom — composite now renders to a texture, a 4-pass post-process pipeline (bright extract → H blur → V blur → combine) adds cinematic sparkle around specular highlights and sky-reflection edges.</div>
+  <div class="desc">MLS-MPM on the GPU. v82 adds a procedural white-tile backdrop behind the fluid, and curvature-based caustics — bright spots where the surface's normal-gradient (dpdx/dpdy) indicates light focusing. The bloom pass amplifies the brightest caustic spots into sparkles.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
@@ -112,7 +112,7 @@
 <a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
-    <span class="tag">57</span>
+    <span class="tag">58</span>
   </div>
   <div class="desc">Run the full simulation test suite in the browser. CPU sim stability + gpu-mpm regression checks (TDZ, error banner, SimParams / CompositeParams uniform layouts, CFL margin, wall-friction + viscosity, preset menu, thickness pass, WGSL reserved-word scanner).</div>
 </a>

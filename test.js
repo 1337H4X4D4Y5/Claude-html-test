@@ -1154,6 +1154,25 @@
       assert(combineIdx >= 0, 'combinePipeline never used in frame loop');
     });
 
+    test('gpu-mpm v82: tile backdrop + caustics wired', () => {
+      const src = readMpmScript();
+      assert(src.indexOf('WGSL_BACKDROP') >= 0, 'WGSL_BACKDROP shader missing');
+      assert(src.indexOf('backdropPipeline') >= 0, 'backdropPipeline not created');
+      // Background pass must draw the backdrop AND lines.
+      assert(src.indexOf('p.setPipeline(backdropPipeline)') >= 0,
+        'backdropPipeline never dispatched in frame loop');
+      // Composite must compute screen-space caustics from normal curvature.
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.indexOf('dpdx(n)') >= 0 || compositeSrc.indexOf('dpdx(n,') >= 0,
+        'composite must compute dpdx(n) for caustics');
+      assert(compositeSrc.indexOf('dpdy(n)') >= 0 || compositeSrc.indexOf('dpdy(n,') >= 0,
+        'composite must compute dpdy(n) for caustics');
+      assert(compositeSrc.indexOf('causticIntensity') >= 0,
+        'composite must produce a causticIntensity term');
+    });
+
     test('gpu-mpm v79: composite uses fractal noise to perturb surface normal', () => {
       const src = readMpmScript();
       const compIdx = src.indexOf('const WGSL_COMPOSITE');

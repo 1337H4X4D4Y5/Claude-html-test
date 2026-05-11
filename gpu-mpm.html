@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v81 (2026-05-11 — bloom on specular highlights (cinematic sparkle))';
+const APP_VERSION = 'mpm-v82 (2026-05-11 — white tile backdrop + curvature-based caustics)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1286,11 +1286,24 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let cR = clamp(coord + warpR, vec2<i32>(0), resMax);
   let cG = clamp(coord + warpG, vec2<i32>(0), resMax);
   let cB = clamp(coord + warpB, vec2<i32>(0), resMax);
-  let bg = vec3<f32>(
+  var bg = vec3<f32>(
     textureLoad(backgroundTex, cR, 0).r,
     textureLoad(backgroundTex, cG, 0).g,
     textureLoad(backgroundTex, cB, 0).b
   );
+
+  // v82: screen-space caustics. Real caustics are where refracted light
+  // rays converge on a back plane. We approximate using surface
+  // curvature — high curvature regions bend light strongly, and the
+  // light intensity on the back-plane is proportional to that bending.
+  // Use dpdx/dpdy of n (post-fBm-perturb) — the noisy normal makes the
+  // caustics speckly and animated, which is what real water produces.
+  let dnx = dpdx(n);
+  let dny = dpdy(n);
+  let curvature = length(dnx) + length(dny);
+  let causticIntensity = clamp(curvature * 28.0, 0.0, 2.5);
+  let causticTint = vec3<f32>(1.00, 0.96, 0.84);
+  bg = bg + causticTint * (causticIntensity * causticIntensity) * 0.6;
 
   // Body model (v60+): uniform-opacity lerp between absorbed background
   // and lit baseColor, so baseColor keeps its hue at any thickness.
@@ -1309,6 +1322,45 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   // 0.55 -> 0.95 — makes the wet sparkle pop.
   let outColor = mix(transmitted, sky, fresnel) + vec3<f32>(1.0, 0.97, 0.92) * spec * 0.95;
   return vec4<f32>(outColor, 1.0);
+}
+`;
+
+// v82: procedural white-tile backdrop drawn into backgroundTex BEFORE the
+// wireframe. Visible through fluid via refraction, and the source of
+// caustic patterns in the composite shader. Pure fragment shader — no
+// uniforms, the tile pattern is keyed to screen pixels so the tile
+// scale is resolution-stable.
+const WGSL_BACKDROP = `
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 3.0, -1.0), vec2<f32>(-1.0,  3.0)
+  );
+  return vec4<f32>(p[vi], 0.0, 1.0);
+}
+
+fn hashTile(p: vec2<f32>) -> f32 {
+  return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  // Tile size in pixels. 60 px reads as a "bathroom tile" scale on a
+  // typical phone screen.
+  let tileSize: f32 = 60.0;
+  let groutPx: f32 = 1.5;
+  let uv = frag.xy / tileSize;
+  let cellLocal = abs(fract(uv) - 0.5) * 2.0;       // 0 at centre, 1 at edge
+  let edgeDist = max(cellLocal.x, cellLocal.y);
+  let groutThresh = 1.0 - groutPx / (tileSize * 0.5);
+  let isGrout = step(groutThresh, edgeDist);
+  let tileId = floor(uv);
+  let h = hashTile(tileId);
+  let baseShade = 0.86 + h * 0.10;                  // off-white, slight variation
+  let groutShade = 0.55;
+  let shade = mix(baseShade, groutShade, isGrout);
+  // Very slight cool tint.
+  return vec4<f32>(shade, shade, shade * 0.96, 1.0);
 }
 `;
 
@@ -1722,6 +1774,16 @@ async function initAndRun() {
   bloomBuf[3] = 0;
   device.queue.writeBuffer(bloomParamsBuf, 0, bloomBuf);
 
+  // v82: white-tile backdrop pipeline (no bind group; pattern is pure
+  // frag-coord-based procedural).
+  const backdropModule = device.createShaderModule({ code: WGSL_BACKDROP });
+  const backdropPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: backdropModule, entryPoint: 'vs_main' },
+    fragment: { module: backdropModule, entryPoint: 'fs_main', targets: [{ format: format }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+
   const linesModule = device.createShaderModule({ code: WGSL_LINES });
   const linesPipeline = device.createRenderPipeline({
     layout: 'auto',
@@ -2056,18 +2118,23 @@ async function initAndRun() {
     device.queue.writeBuffer(compositeParamsBuf, 0, compBuf);
 
     const enc2 = device.createCommandEncoder();
-    // v59: background pass — clear + box wireframe lines into backgroundTex.
-    // The composite shader samples this with a normal-warped UV to produce
-    // refraction; it also blits straight through where there's no fluid,
-    // so this is the only place the wireframe is drawn.
+    // Background pass (v59 + v82): procedural white-tile backdrop first,
+    // then box wireframe on top. The composite shader samples this with a
+    // normal-warped UV for refraction; it also blits straight through
+    // where there's no fluid. The tile pattern is the backdrop the
+    // caustics will play across.
     {
       const p = enc2.beginRenderPass({
         colorAttachments: [{
           view: backgroundTex.createView(),
-          clearValue: { r: 0.02, g: 0.025, b: 0.06, a: 1 },
+          clearValue: { r: 0.86, g: 0.86, b: 0.83, a: 1 },
           loadOp: 'clear', storeOp: 'store',
         }],
       });
+      // v82: full-screen tile pattern.
+      p.setPipeline(backdropPipeline);
+      p.draw(3, 1);
+      // Wireframe over the tiles.
       p.setPipeline(linesPipeline); p.setBindGroup(0, linesBindGroup);
       p.setVertexBuffer(0, cubeEdgeBuf); p.draw(24, 1);
       p.end();

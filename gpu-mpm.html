@@ -185,7 +185,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v48 (2026-05-11 — stiffer fluid + wall friction + XSPH viscosity)';
+const APP_VERSION = 'mpm-v49 (2026-05-11 — softer pressure (v47 feel) + heavier XSPH + smaller particles)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -210,33 +210,38 @@ const N = readParticleCount();
 // ReferenceError on script load, leaving the Tap-to-begin button inert.
 const _natRho = N * 1.0 / 4.0;
 const SIM_TUNE = {
-  // Stiffness (v48): doubled from v47's _natRho*50 — the CFL margin at v47
-  // was 2.12x, plenty of headroom. K=1M gives sound speed c=10, dtCFL=
-  // cellSize/c=0.00625, vs our substep cap 1/240=0.00417 → margin 1.50x.
-  pressureK: _natRho * 100,
+  // v49: BACK to v47's softer K. v48's 2x stiffer pressure made the fluid
+  // feel springy/snappy rather than viscous — the user preferred v47's
+  // softer, more blob-like behaviour. K = _natRho*50 → sound speed 7.07,
+  // CFL margin 2.12x. Compressibility is what gives the visual "thick
+  // liquid" feel.
+  pressureK: _natRho * 50,
   restDensity: _natRho,
   particleMass: 1.0,
   velDamping: 0.998,
   restitution: 0.20,
-  // Raised v47 → v48 (50 → 200): with stiffer K the natural pressure accel
-  // is larger; capping too aggressively was wasting the new stiffness.
-  // 200 is still well under the CFL accel ceiling (~3600 with our dt).
-  maxAccel: 200.0,
-  // v48: tangential velocity multiplier in boundary cells. 1.0 = free-slip
-  // (frictionless), 0.0 = no-slip (water sticks to glass). 0.92 per substep
-  // is moderate partial-slip — water gains weight against the walls.
-  wallFriction: 0.92,
-  // v48: APIC C-matrix decay per substep. 0 = inviscid (jitter / fingers
-  // off the surface), higher = more viscous / cohesive (splashes drag
-  // strings of water with them). 0.01 → 'water with a hint of cohesion'.
-  viscosity: 0.01,
+  // v49: back to v47's 50. With softer K the pressure accel never gets
+  // huge, so the cap matters less; we keep it as a safety rail for
+  // briefly-overcompressed cells.
+  maxAccel: 50.0,
+  // v48 addition retained — slight tangential damp at the glass adds
+  // weight to sloshing without locking the fluid in place.
+  wallFriction: 0.95,
+  // v49: bumped 0.01 → 0.03. With softer K, the XSPH C-matrix decay does
+  // more of the visual "viscous" work — splashes pull cohesive strings
+  // rather than shedding sharp affine spin.
+  viscosity: 0.03,
   eos: 'linear',
 };
 const BOX_HALF = 1.0;
 const GRID_SIZE = 32;
 const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;
 const CELL_SIZE = (2 * BOX_HALF) / GRID_SIZE;
-const PARTICLE_RADIUS = 0.025;
+// v49: 0.025 → 0.014. With the screen-space-fluid bilateral blur the
+// per-particle disc only needs to be big enough to overlap its neighbours;
+// shrinking it gives a sharper, more water-like surface and lets more
+// particles read as one continuous body instead of visible spheres.
+const PARTICLE_RADIUS = 0.014;
 // Fixed-point scale for atomicAdd into i32 storage. iOS WebGPU has no
 // atomic<f32>, so each float value is encoded as round(v * SCALE) and
 // decoded after the P2G pass by dividing back.

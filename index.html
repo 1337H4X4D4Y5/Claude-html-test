@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v48</span>
+    <span class="tag">v49</span>
   </div>
-  <div class="desc">MLS-MPM + linear pressure on the GPU. v48 doubles pressure stiffness (less compressible), adds tangential wall friction (weighty sloshing), and XSPH-style C-matrix viscosity (cohesive splashes). Default 8000 particles; slider on the gear icon.</div>
+  <div class="desc">MLS-MPM on the GPU. v49 reverts v48's stiffer pressure (which felt springy, not viscous) back to v47's softer K, keeps the wall friction, and bumps XSPH viscosity 3× for cohesive splashes. Particles shrunk so the surface reads as continuous water.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

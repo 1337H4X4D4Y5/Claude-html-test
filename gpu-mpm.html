@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v82 (2026-05-11 — white tile backdrop + curvature-based caustics)';
+const APP_VERSION = 'mpm-v83 (2026-05-11 — fix vertical streaks (caustics use nSmooth, darker wireframe))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1292,18 +1292,18 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     textureLoad(backgroundTex, cB, 0).b
   );
 
-  // v82: screen-space caustics. Real caustics are where refracted light
-  // rays converge on a back plane. We approximate using surface
-  // curvature — high curvature regions bend light strongly, and the
-  // light intensity on the back-plane is proportional to that bending.
-  // Use dpdx/dpdy of n (post-fBm-perturb) — the noisy normal makes the
-  // caustics speckly and animated, which is what real water produces.
-  let dnx = dpdx(n);
-  let dny = dpdy(n);
+  // v83: screen-space caustics. Use dpdx/dpdy of nSmooth (the SSF
+  // surface normal, pre-fBm-perturb). The fBm noise has huge per-pixel
+  // derivatives, so v82 computed curvature ~maxed everywhere → caustics
+  // fired on every pixel → bloom turned the whole fluid into vertical
+  // streaks. The TRUE surface curvature (broad swells, wall slopes)
+  // lives in nSmooth and is what physically focuses light.
+  let dnx = dpdx(nSmooth);
+  let dny = dpdy(nSmooth);
   let curvature = length(dnx) + length(dny);
-  let causticIntensity = clamp(curvature * 28.0, 0.0, 2.5);
+  let causticIntensity = clamp(curvature * 8.0, 0.0, 1.5);
   let causticTint = vec3<f32>(1.00, 0.96, 0.84);
-  bg = bg + causticTint * (causticIntensity * causticIntensity) * 0.6;
+  bg = bg + causticTint * (causticIntensity * causticIntensity) * 0.5;
 
   // Body model (v60+): uniform-opacity lerp between absorbed background
   // and lit baseColor, so baseColor keeps its hue at any thickness.
@@ -1476,7 +1476,10 @@ fn vs_main(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
 }
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-  return vec4<f32>(0.78, 0.7, 1.0, 0.7);
+  // v83: dark slate so the wireframe reads against the white tile
+  // backdrop. Slight alpha so it doesn't black out the grout colour
+  // it crosses.
+  return vec4<f32>(0.12, 0.14, 0.20, 0.85);
 }
 `;
 

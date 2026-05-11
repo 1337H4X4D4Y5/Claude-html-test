@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v82</span>
+    <span class="tag">v83</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v82 adds a procedural white-tile backdrop behind the fluid, and curvature-based caustics — bright spots where the surface's normal-gradient (dpdx/dpdy) indicates light focusing. The bloom pass amplifies the brightest caustic spots into sparkles.</div>
+  <div class="desc">MLS-MPM on the GPU. v83 fixes v82's hot vertical streaks (caustics were derived from the noisy fBm-perturbed normal; switched to the smooth SSF normal) and darkens the wireframe so the pool walls show against the white tile backdrop.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

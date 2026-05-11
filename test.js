@@ -1165,10 +1165,13 @@
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
       const compEnd = src.indexOf('`;', compIdx);
       const compositeSrc = src.slice(compIdx, compEnd);
-      assert(compositeSrc.indexOf('dpdx(n)') >= 0 || compositeSrc.indexOf('dpdx(n,') >= 0,
-        'composite must compute dpdx(n) for caustics');
-      assert(compositeSrc.indexOf('dpdy(n)') >= 0 || compositeSrc.indexOf('dpdy(n,') >= 0,
-        'composite must compute dpdy(n) for caustics');
+      // v83: caustics moved from dpdx(n) (fBm-perturbed) to dpdx(nSmooth)
+      // because the noisy normal had huge per-pixel derivatives → caustics
+      // fired everywhere and bloom turned the fluid into vertical streaks.
+      assert(compositeSrc.indexOf('dpdx(nSmooth)') >= 0 || compositeSrc.indexOf('dpdx(n)') >= 0,
+        'composite must compute dpdx of a surface normal for caustics');
+      assert(compositeSrc.indexOf('dpdy(nSmooth)') >= 0 || compositeSrc.indexOf('dpdy(n)') >= 0,
+        'composite must compute dpdy of a surface normal for caustics');
       assert(compositeSrc.indexOf('causticIntensity') >= 0,
         'composite must produce a causticIntensity term');
     });

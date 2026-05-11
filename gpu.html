@@ -143,31 +143,32 @@
 <div id="settings-panel">
   <div class="label">Particles</div>
   <div class="count" id="settings-count">4000</div>
-  <input id="settings-slider" type="range" min="500" max="60000" step="500" value="6000">
+  <input id="settings-slider" type="range" min="500" max="60000" step="500" value="26500">
   <button id="settings-apply">Apply (reloads)</button>
   <button id="settings-cancel">Cancel</button>
 </div>
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'gpu-v33 (2026-05-11 — screen-space fluid surface)';
+const APP_VERSION = 'gpu-v34 (2026-05-11 — bilateral depth blur, smoother)';
 
 // Particle count is configurable via the in-page settings panel which
 // reloads with ?n=NNNN. Clamped to a range that we know is stable.
 function readParticleCount() {
   const m = location.search.match(/[?&]n=(\d+)/);
-  if (!m) return 6000;
-  return Math.max(200, Math.min(60000, parseInt(m[1], 10) || 6000));
+  if (!m) return 26500;  // user's stable 60-fps max
+  return Math.max(200, Math.min(60000, parseInt(m[1], 10) || 26500));
 }
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
 const N = readParticleCount();    // particle count (from ?n= URL param)
 const BOX_HALF = 1.0;             // simulation box half-extent (matches glass cube)
-// Sprite radius shrinks like 1/cbrt(N) so 'volume' per particle stays roughly
-// constant: with 8x more particles each one is half the radius. Tuned so
-// N=4000 gives ~0.05 (the v30 size) and very high N stays visible at >=0.018.
-const PARTICLE_RADIUS = Math.max(0.018, Math.min(0.10, 0.79 / Math.cbrt(N)));
+// Sprite radius shrinks like 1/cbrt(N). Smaller than v33: at the user's
+// preferred N=26500 it's ~0.018 vs v33's ~0.027, which gives the bilateral
+// blur a denser depth field to smooth and removes the visible 'bubble'
+// silhouettes from individual particles.
+const PARTICLE_RADIUS = Math.max(0.012, Math.min(0.08, 0.55 / Math.cbrt(N)));
 const INTERACT_RADIUS = 0.13;     // SPH neighbour-search radius
 // Per-particle additive contribution scales inversely with N so the
 // brightness of an N-particle stack stays roughly constant regardless of
@@ -513,6 +514,59 @@ fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
 }
 `;
 
+// Bilateral depth blur. Two entry points: fs_h does a horizontal pass,
+// fs_v does a vertical pass. Run them sequentially with separate source/
+// target depth textures and the per-particle bumps smooth out, but the
+// silhouette of the fluid (where depth jumps to background) is preserved
+// because the depth-difference filter rejects neighbours across the edge.
+const WGSL_BLUR = `
+@group(0) @binding(0) var srcDepth: texture_depth_2d;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 3.0, -1.0),
+    vec2<f32>(-1.0,  3.0)
+  );
+  return vec4<f32>(p[vi], 0.0, 1.0);
+}
+
+fn blur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
+  let center = textureLoad(srcDepth, coord, 0);
+  if (center >= 0.99999) { return 1.0; }
+  let R: i32 = 8;
+  let depthThresh: f32 = 0.012;
+  let sigma2_inv: f32 = 1.0 / 24.0;     // gaussian fall-off scale (~sigma=3.5)
+  var sum: f32 = center;
+  var totalW: f32 = 1.0;
+  for (var i: i32 = 1; i <= R; i = i + 1) {
+    let w = exp(-f32(i * i) * sigma2_inv);
+    let cR = coord + dir * i;
+    let sR = textureLoad(srcDepth, cR, 0);
+    if (sR < 0.99999 && abs(sR - center) < depthThresh) {
+      sum = sum + sR * w; totalW = totalW + w;
+    }
+    let cL = coord - dir * i;
+    let sL = textureLoad(srcDepth, cL, 0);
+    if (sL < 0.99999 && abs(sL - center) < depthThresh) {
+      sum = sum + sL * w; totalW = totalW + w;
+    }
+  }
+  return sum / totalW;
+}
+
+@fragment
+fn fs_h(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
+  return blur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(1, 0));
+}
+
+@fragment
+fn fs_v(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
+  return blur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(0, 1));
+}
+`;
+
 // Fullscreen composite. Samples the depth texture, reconstructs view-space
 // position, derives a surface normal from screen-space position derivatives,
 // shades the result with Lambert + Fresnel + Blinn-Phong specular.
@@ -575,15 +629,18 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let halfDir = normalize(viewDir + lightDir);
 
   let diffuse = max(0.0, dot(n, lightDir));
-  let spec = pow(max(0.0, dot(n, halfDir)), 48.0);
-  // Schlick-ish Fresnel: edges reflect more.
+  // Tighter specular: less smeared, more highlight-like.
+  let spec = pow(max(0.0, dot(n, halfDir)), 96.0);
+  // Softer Fresnel exponent (2 instead of 4) so silhouette edges aren't
+  // as harsh — gives a body-of-water feel rather than 'bubbles'.
   let nv = max(0.0, dot(n, viewDir));
-  let fresnel = pow(1.0 - nv, 4.0);
+  let fresnel = pow(1.0 - nv, 2.0);
 
-  let deep   = vec3<f32>(0.06, 0.22, 0.48);
-  let shallow = vec3<f32>(0.55, 0.85, 1.00);
-  let waterCol = mix(deep, shallow, fresnel);
-  let lit = waterCol * (0.25 + 0.75 * diffuse) + vec3<f32>(0.92, 0.97, 1.0) * spec;
+  let deep    = vec3<f32>(0.04, 0.17, 0.40);
+  let shallow = vec3<f32>(0.38, 0.72, 0.96);
+  let waterCol = mix(deep, shallow, fresnel * 0.65);
+  let ambient = vec3<f32>(0.10, 0.16, 0.24);
+  let lit = ambient + waterCol * (0.30 + 0.70 * diffuse) + vec3<f32>(0.92, 0.97, 1.0) * spec * 0.85;
   return vec4<f32>(lit, 1.0);
 }
 `;
@@ -761,23 +818,62 @@ async function initAndRun() {
     },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
   });
-  // depthTex + compositeBindGroup are recreated whenever the canvas resizes.
-  let depthTex = null;
-  let compositeBindGroup = null;
+  // --- SSF bilateral blur pipelines (separable H + V) ---
+  const blurModule = device.createShaderModule({ code: WGSL_BLUR });
+  const blurH = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: blurModule, entryPoint: 'vs_main' },
+    fragment: { module: blurModule, entryPoint: 'fs_h', targets: [] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: {
+      format: 'depth32float',
+      depthWriteEnabled: true,
+      depthCompare: 'always',
+    },
+  });
+  const blurV = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: blurModule, entryPoint: 'vs_main' },
+    fragment: { module: blurModule, entryPoint: 'fs_v', targets: [] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: {
+      format: 'depth32float',
+      depthWriteEnabled: true,
+      depthCompare: 'always',
+    },
+  });
+
+  // Three depth textures: raw particle depth, after-H blur, after-V blur.
+  // We sample N-1 and render to N each pass.
+  let depthRaw = null, depthH = null, depthV = null;
+  let compositeBindGroup = null, blurHBindGroup = null, blurVBindGroup = null;
   let lastDepthW = 0, lastDepthH = 0;
   function ensureDepthTex() {
     const w = canvas.width, h = canvas.height;
-    if (w === lastDepthW && h === lastDepthH && depthTex) return;
-    if (depthTex) depthTex.destroy();
-    depthTex = device.createTexture({
+    if (w === lastDepthW && h === lastDepthH && depthRaw) return;
+    if (depthRaw) depthRaw.destroy();
+    if (depthH) depthH.destroy();
+    if (depthV) depthV.destroy();
+    const opts = {
       size: { width: w, height: h },
       format: 'depth32float',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    };
+    depthRaw = device.createTexture(opts);
+    depthH = device.createTexture(opts);
+    depthV = device.createTexture(opts);
+    blurHBindGroup = device.createBindGroup({
+      layout: blurH.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: depthRaw.createView() }],
+    });
+    blurVBindGroup = device.createBindGroup({
+      layout: blurV.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: depthH.createView() }],
     });
     compositeBindGroup = device.createBindGroup({
       layout: compositePipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: depthTex.createView() },
+        { binding: 0, resource: depthV.createView() },
         { binding: 1, resource: { buffer: compositeParamsBuf } },
       ],
     });
@@ -960,43 +1056,70 @@ async function initAndRun() {
     compBuf[9] = 0;
     device.queue.writeBuffer(compositeParamsBuf, 0, compBuf);
 
-    // PASS A: render particles to depth-only attachment (sphere-front depth).
+    // PASS A: render particles to depthRaw with sphere-front depth.
     const enc2 = device.createCommandEncoder();
     {
-      const passA = enc2.beginRenderPass({
+      const p = enc2.beginRenderPass({
         colorAttachments: [],
         depthStencilAttachment: {
-          view: depthTex.createView(),
+          view: depthRaw.createView(),
           depthClearValue: 1.0,
-          depthLoadOp: 'clear',
-          depthStoreOp: 'store',
+          depthLoadOp: 'clear', depthStoreOp: 'store',
         },
       });
-      passA.setPipeline(depthPipeline);
-      passA.setBindGroup(0, depthBindGroup);
-      passA.draw(6, N);
-      passA.end();
+      p.setPipeline(depthPipeline);
+      p.setBindGroup(0, depthBindGroup);
+      p.draw(6, N);
+      p.end();
     }
-
-    // PASS B: composite to canvas. Fullscreen triangle samples the depth
-    // texture and shades the reconstructed surface. Wireframe drawn after.
+    // PASS B1: bilateral blur (horizontal). depthRaw → depthH.
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [],
+        depthStencilAttachment: {
+          view: depthH.createView(),
+          depthClearValue: 1.0,
+          depthLoadOp: 'clear', depthStoreOp: 'store',
+        },
+      });
+      p.setPipeline(blurH);
+      p.setBindGroup(0, blurHBindGroup);
+      p.draw(3, 1);
+      p.end();
+    }
+    // PASS B2: bilateral blur (vertical). depthH → depthV.
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [],
+        depthStencilAttachment: {
+          view: depthV.createView(),
+          depthClearValue: 1.0,
+          depthLoadOp: 'clear', depthStoreOp: 'store',
+        },
+      });
+      p.setPipeline(blurV);
+      p.setBindGroup(0, blurVBindGroup);
+      p.draw(3, 1);
+      p.end();
+    }
+    // PASS C: composite shaded surface + wireframe to canvas.
     const view = ctx.getCurrentTexture().createView();
     {
-      const passB = enc2.beginRenderPass({
+      const p = enc2.beginRenderPass({
         colorAttachments: [{
           view: view,
           clearValue: { r: 0.02, g: 0.035, b: 0.07, a: 1 },
           loadOp: 'clear', storeOp: 'store',
         }],
       });
-      passB.setPipeline(compositePipeline);
-      passB.setBindGroup(0, compositeBindGroup);
-      passB.draw(3, 1);
-      passB.setPipeline(linesPipeline);
-      passB.setBindGroup(0, linesBindGroup);
-      passB.setVertexBuffer(0, cubeEdgeBuf);
-      passB.draw(24, 1);
-      passB.end();
+      p.setPipeline(compositePipeline);
+      p.setBindGroup(0, compositeBindGroup);
+      p.draw(3, 1);
+      p.setPipeline(linesPipeline);
+      p.setBindGroup(0, linesBindGroup);
+      p.setVertexBuffer(0, cubeEdgeBuf);
+      p.draw(24, 1);
+      p.end();
     }
     device.queue.submit([enc2.finish()]);
 

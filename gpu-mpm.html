@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v87 (2026-05-11 — proper caustic curves (noise level-set, not diagonal stripes))';
+const APP_VERSION = 'mpm-v88 (2026-05-11 — kill vertical shimmer streaks (drop front wall, lower ripple+bloom))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1279,7 +1279,12 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let upWorld = vec3<f32>(0.0, 1.0, 0.0);
   let tBase = normalize(cross(nSmooth, upWorld) + vec3<f32>(0.0001, 0.0, 0.0));
   let bBase = cross(nSmooth, tBase);
-  let rippleStrength = 0.45;
+  // v88: 0.45 -> 0.18. The previous strength let the normal swing ±30°,
+  // which made Fresnel + specular flicker per pixel; the bloom V blur
+  // then smeared those flickers into vertical streaks (the "shimmer"
+  // artifact the user reported). Smaller perturbation gives finer
+  // ripples without flicker.
+  let rippleStrength = 0.18;
   let n = normalize(nSmooth + (tBase * gX + bBase * gZ) * rippleStrength);
 
   let viewDir = -normalize(viewPos);
@@ -1846,11 +1851,12 @@ async function initAndRun() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   // Write once — threshold and intensity are constants for now.
-  // threshold 0.7 catches only the brightest highlights (specular,
-  // sky-edge); intensity 0.6 is moderate sparkle without overcooking.
+  // v88: intensity 0.6 -> 0.35. Lower intensity means the V blur
+  // doesn't smear bright pixel flicker into long vertical streaks.
+  // Specular highlights still bloom visibly, just with less halo.
   const bloomBuf = new Float32Array(BLOOM_PARAMS_SIZE / 4);
   bloomBuf[0] = 0.7;   // threshold
-  bloomBuf[1] = 0.6;   // intensity
+  bloomBuf[1] = 0.35;  // intensity
   bloomBuf[2] = 0;
   bloomBuf[3] = 0;
   device.queue.writeBuffer(bloomParamsBuf, 0, bloomBuf);
@@ -1901,10 +1907,12 @@ async function initAndRun() {
     entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
   });
 
-  // v86: 4 translucent side walls (left, right, back, front). Each is a
-  // quad rendered as 2 triangles, 18 vertices per wall, 24 vertices
-  // total. Bottom face omitted because fluid usually covers it; front
-  // face included so the box reads as a closed glass tank when empty.
+  // v86/v88: translucent side walls. v86 added all 4 vertical faces;
+  // v88 drops the FRONT face — it sat between camera and fluid and
+  // veiled everything, plus its translucent value combined with
+  // refracted-bg sampling produced the vertical-streak shimmer the
+  // user reported. The remaining 3 walls (left, right, back) read as
+  // a glass tank looking IN through the open front.
   const cubeFaces = new Float32Array([
     // Left wall (x = -X)
     -X,-Y,-Z,  -X, Y,-Z,  -X, Y, Z,
@@ -1915,9 +1923,6 @@ async function initAndRun() {
     // Back wall (z = -Z)
     -X,-Y,-Z,   X, Y,-Z,   X,-Y,-Z,
     -X,-Y,-Z,  -X, Y,-Z,   X, Y,-Z,
-    // Front wall (z = +Z)
-    -X,-Y, Z,   X,-Y, Z,   X, Y, Z,
-    -X,-Y, Z,   X, Y, Z,  -X, Y, Z,
   ]);
   const cubeFaceBuf = device.createBuffer({
     size: cubeFaces.byteLength,
@@ -2278,9 +2283,11 @@ async function initAndRun() {
       // v82: full-screen tile pattern.
       p.setPipeline(backdropPipeline);
       p.draw(3, 1);
-      // v86: translucent box side walls (4 quads, 24 verts).
+      // v86/v88: 3 translucent box side walls (left, right, back) —
+      // 18 vertices. Front face dropped in v88 because it caused
+      // visible veiling + shimmer artifacts.
       p.setPipeline(boxfacesPipeline); p.setBindGroup(0, boxfacesBindGroup);
-      p.setVertexBuffer(0, cubeFaceBuf); p.draw(24, 1);
+      p.setVertexBuffer(0, cubeFaceBuf); p.draw(18, 1);
       // Wireframe over the walls.
       p.setPipeline(linesPipeline); p.setBindGroup(0, linesBindGroup);
       p.setVertexBuffer(0, cubeEdgeBuf); p.draw(24, 1);

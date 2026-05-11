@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v87</span>
+    <span class="tag">v88</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v87 fixes the caustic pattern — previous version produced diagonal stripes. Now uses noise level-sets to generate thin bright wavy curves with intersections, the real pool-floor look.</div>
+  <div class="desc">MLS-MPM on the GPU. v88 kills the vertical shimmer streaks: drops the front box wall (was veiling the fluid), lowers fBm ripple strength (less normal flicker), and reduces bloom intensity (less V-blur smearing).</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

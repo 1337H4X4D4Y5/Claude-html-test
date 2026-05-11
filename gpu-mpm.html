@@ -82,15 +82,54 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: pre;
   }
-  #copy-btn {
+  #copy-btn, #reset-btn {
     appearance: none; -webkit-appearance: none; border: none;
     display: block; width: 100%; min-height: 38px; margin-top: 6px;
     border-radius: 8px;
-    background: rgba(160,90,255,0.30); color: #fff;
+    color: #fff;
     font-size: 13px; font-weight: 600;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
+  #copy-btn { background: rgba(160,90,255,0.30); }
+  #reset-btn { background: rgba(220,140,80,0.30); }
+  #settings-btn {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 38px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    width: 34px; height: 34px; border: none; border-radius: 17px;
+    background: rgba(160,90,255,0.22);
+    color: #efe6ff; font-size: 18px; font-weight: 600;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    z-index: 9;
+  }
+  #settings-panel {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 80px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    width: 250px;
+    padding: 14px 16px;
+    border-radius: 12px;
+    background: rgba(28,18,55,0.96);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: #e8f1ff;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    z-index: 11; display: none;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  }
+  #settings-panel.open { display: block; }
+  #settings-panel .label { font-size: 11px; opacity: 0.65; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.8px; }
+  #settings-panel .count { font-size: 17px; font-weight: 600; margin-bottom: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #settings-panel input[type=range] { width: 100%; }
+  #settings-apply, #settings-cancel {
+    appearance: none; -webkit-appearance: none; border: none;
+    display: block; width: 100%; margin-top: 8px; min-height: 36px;
+    border-radius: 8px; color: #fff; font-size: 13px; font-weight: 600;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  #settings-apply { background: linear-gradient(135deg, #a05aff, #5028a0); }
+  #settings-cancel { background: rgba(255,255,255,0.06); margin-top: 6px; min-height: 30px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -105,27 +144,48 @@
 </div>
 <div id="fps"></div>
 <div id="version"></div>
-<div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
+<button id="settings-btn" title="Settings">⚙</button>
+<div id="settings-panel">
+  <div class="label">Particles</div>
+  <div class="count" id="settings-count">26500</div>
+  <input id="settings-slider" type="range" min="1000" max="60000" step="500" value="26500">
+  <button id="settings-apply">Apply (reloads)</button>
+  <button id="settings-cancel">Cancel</button>
+</div>
+<div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button><button id="reset-btn">Reset particles</button></div>
 
 <script>
-const APP_VERSION = 'mpm-v43 (2026-05-11 — tunables in debug strip)';
+const APP_VERSION = 'mpm-v44 (2026-05-11 — N slider + reset + denser default)';
 
 // All MPM tunables live in one place. Surfaced in the on-screen debug
 // strip and the copy-debug report so we can iterate from screenshots.
 // CFL pressure-wave constraint: dt < cellSize / sqrt(pressureK / restDensity).
+// restDensity scales with N so the EOS balances gravity at modest
+// compression no matter what particle count is loaded:
+//   rho0 ~ (N * particleMass) / (filled volume = 4 cubic units)
+//   K    ~ rho0 * g * H / compression  ~ rho0 * 50
+const _natRho = N * 1.0 / 4.0;
 const SIM_TUNE = {
-  pressureK: 80000.0,    // linear EOS stiffness — main fluid 'springiness'
-  restDensity: 2000.0,   // mass per unit volume at rest (8000 particles m=1 in lower half = 2000)
-  particleMass: 1.0,     // arbitrary unit, mostly cancels
-  velDamping: 0.998,     // per-substep global drag on particle velocity
-  restitution: 0.20,     // wall bounce coefficient at the safety clamp
-  maxAccel: 50.0,        // cap on pressure-gradient acceleration (~5x gravity)
-  eos: 'linear',         // label only; the WGSL fixes the actual curve
+  pressureK: _natRho * 50,
+  restDensity: _natRho,
+  particleMass: 1.0,
+  velDamping: 0.998,
+  restitution: 0.20,
+  maxAccel: 50.0,
+  eos: 'linear',
 };
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
-const N = 8000;
+// Particle count is configurable via the in-page settings panel which
+// reloads with ?n=NNNN. Default chosen to be ~1 particle per cell of a
+// 32³ grid (matches MPM best practice).
+function readParticleCount() {
+  const m = location.search.match(/[?&]n=(\d+)/);
+  if (!m) return 26500;
+  return Math.max(500, Math.min(60000, parseInt(m[1], 10) || 26500));
+}
+const N = readParticleCount();
 const BOX_HALF = 1.0;
 const GRID_SIZE = 32;
 const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;
@@ -186,6 +246,29 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
   e.preventDefault();
   window.location.href = './?t=' + Date.now();
 });
+
+// Settings panel: gear → slider → Apply reloads with ?n=NNNN.
+(function () {
+  const btn = document.getElementById('settings-btn');
+  const panel = document.getElementById('settings-panel');
+  const slider = document.getElementById('settings-slider');
+  const countLabel = document.getElementById('settings-count');
+  const applyBtn = document.getElementById('settings-apply');
+  const cancelBtn = document.getElementById('settings-cancel');
+  slider.value = String(N);
+  countLabel.textContent = N;
+  slider.addEventListener('input', function () { countLabel.textContent = slider.value; });
+  btn.addEventListener('click', function () { panel.classList.toggle('open'); });
+  cancelBtn.addEventListener('click', function () { panel.classList.remove('open'); });
+  applyBtn.addEventListener('click', function () {
+    const v = parseInt(slider.value, 10);
+    if (!v || v === N) { panel.classList.remove('open'); return; }
+    const url = new URL(window.location.href);
+    url.searchParams.set('n', String(v));
+    url.searchParams.set('t', String(Date.now()));
+    window.location.href = url.toString();
+  });
+})();
 
 startBtn.addEventListener('click', async function () {
   try {
@@ -669,18 +752,22 @@ async function initAndRun() {
   const posData = new Float32Array(N * 4);
   const velData = new Float32Array(N * 4);
   // Seed: random positions in the lower slab, small random velocities.
-  let rng = 17 >>> 0;
-  function rand() { rng = (Math.imul(rng, 1103515245) + 12345) & 0x7fffffff; return rng / 0x7fffffff; }
-  for (let i = 0; i < N; i++) {
-    posData[i * 4 + 0] = (rand() * 2 - 1) * (BOX_HALF * 0.7);
-    posData[i * 4 + 1] = -BOX_HALF * 0.6 + rand() * BOX_HALF * 0.6;
-    posData[i * 4 + 2] = (rand() * 2 - 1) * (BOX_HALF * 0.7);
-    posData[i * 4 + 3] = 0;
-    velData[i * 4 + 0] = (rand() - 0.5) * 0.3;
-    velData[i * 4 + 1] = (rand() - 0.5) * 0.3;
-    velData[i * 4 + 2] = (rand() - 0.5) * 0.3;
-    velData[i * 4 + 3] = 0;
+  // Reusable so the reset button can re-scramble.
+  function seedParticles(seed) {
+    let rng = (seed >>> 0) || 17;
+    function rand() { rng = (Math.imul(rng, 1103515245) + 12345) & 0x7fffffff; return rng / 0x7fffffff; }
+    for (let i = 0; i < N; i++) {
+      posData[i * 4 + 0] = (rand() * 2 - 1) * (BOX_HALF * 0.7);
+      posData[i * 4 + 1] = -BOX_HALF * 0.6 + rand() * BOX_HALF * 0.6;
+      posData[i * 4 + 2] = (rand() * 2 - 1) * (BOX_HALF * 0.7);
+      posData[i * 4 + 3] = 0;
+      velData[i * 4 + 0] = (rand() - 0.5) * 0.3;
+      velData[i * 4 + 1] = (rand() - 0.5) * 0.3;
+      velData[i * 4 + 2] = (rand() - 0.5) * 0.3;
+      velData[i * 4 + 3] = 0;
+    }
   }
+  seedParticles(17);
   const posBuf = device.createBuffer({
     size: posData.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -709,7 +796,18 @@ async function initAndRun() {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
   // Initialise to zero so first frame has no velocity gradient.
-  device.queue.writeBuffer(cMatBuf, 0, new Float32Array(N * 12));
+  const zeroC = new Float32Array(N * 12);
+  device.queue.writeBuffer(cMatBuf, 0, zeroC);
+
+  // Wire up the reset button. Re-seeds particles with a new RNG, then
+  // also zeros the C matrix so they start from rest.
+  document.getElementById('reset-btn').addEventListener('click', function () {
+    seedParticles(Math.floor(Math.random() * 1e6) + 1);
+    device.queue.writeBuffer(posBuf, 0, posData);
+    device.queue.writeBuffer(velBuf, 0, velData);
+    device.queue.writeBuffer(cMatBuf, 0, zeroC);
+    state.steps = 0;
+  });
 
   // Sim uniform buffer.
   const SIM_PARAMS_SIZE = 64;   // vec3 + 9 f32 + 2 pad = 12 floats + 4 pad

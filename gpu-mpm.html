@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v66 (2026-05-11 — water restitution = 0 (no bounce))';
+const APP_VERSION = 'mpm-v67 (2026-05-11 — water settles instead of perpetually sloshing)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -350,13 +350,13 @@ const FLUID_PRESETS = [
   {
     key: 'water', label: 'Water',
     tune: {
-      // v66: restitution = 0 — real water doesn't bounce off glass at all,
-      // it just stops there. Splashy look comes from pressure response +
-      // free-surface velocity transfer, not from elastic wall rebound.
-      // Slight bump to velDamping helps energy dissipate and the surface
-      // settle to flat without persistent ripples.
-      pressureKMul: 50, velDamping: 0.997, restitution: 0.0,
-      wallFriction: 0.97, viscosity: 0.005, maxAccel: 50.0,
+      // v67: water wasn't settling — pressure oscillations bounced inside
+      // the box faster than damping could kill them. Soften K, increase
+      // per-step damping, slightly stickier walls. Each individual change
+      // is small (still well below the "goopy" honey preset) but together
+      // they damp the residual sloshing within ~2 seconds.
+      pressureKMul: 35, velDamping: 0.993, restitution: 0.0,
+      wallFriction: 0.93, viscosity: 0.008, maxAccel: 40.0,
       baseColorR: 0.45, baseColorG: 0.78, baseColorB: 0.92,
       absorptionR: 5.0, absorptionG: 2.5, absorptionB: 0.8,
       // v59: screen-space refraction strength in pixels.

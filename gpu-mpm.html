@@ -148,14 +148,14 @@
 <div id="settings-panel">
   <div class="label">Particles</div>
   <div class="count" id="settings-count">26500</div>
-  <input id="settings-slider" type="range" min="1000" max="60000" step="500" value="26500">
+  <input id="settings-slider" type="range" min="1000" max="40000" step="500" value="8000">
   <button id="settings-apply">Apply (reloads)</button>
   <button id="settings-cancel">Cancel</button>
 </div>
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button><button id="reset-btn">Reset particles</button></div>
 
 <script>
-const APP_VERSION = 'mpm-v44 (2026-05-11 — N slider + reset + denser default)';
+const APP_VERSION = 'mpm-v45 (2026-05-11 — safer default N, better error log)';
 
 // All MPM tunables live in one place. Surfaced in the on-screen debug
 // strip and the copy-debug report so we can iterate from screenshots.
@@ -177,13 +177,14 @@ const SIM_TUNE = {
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
-// Particle count is configurable via the in-page settings panel which
-// reloads with ?n=NNNN. Default chosen to be ~1 particle per cell of a
-// 32³ grid (matches MPM best practice).
+// Default conservative — 8000 is what we confirmed working at v43. Slider
+// can push it higher if your GPU is happy. iPhone memory ceiling for the
+// combined pos+vel+C+grid buffers seems to bite somewhere past ~16k on the
+// v44 build (overlay tap stopped responding for the user at N=26 500).
 function readParticleCount() {
   const m = location.search.match(/[?&]n=(\d+)/);
-  if (!m) return 26500;
-  return Math.max(500, Math.min(60000, parseInt(m[1], 10) || 26500));
+  if (!m) return 8000;
+  return Math.max(500, Math.min(40000, parseInt(m[1], 10) || 8000));
 }
 const N = readParticleCount();
 const BOX_HALF = 1.0;
@@ -270,7 +271,14 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
   });
 })();
 
+// Surface init progress on the overlay so a silent hang is visible.
+function setOverlayMsg(text, fail) {
+  overlayMsg.className = fail ? 'fail' : '';
+  overlayMsg.textContent = text || '';
+}
+
 startBtn.addEventListener('click', async function () {
+  setOverlayMsg('requesting motion permission…');
   try {
     if (typeof DeviceOrientationEvent !== 'undefined' &&
         typeof DeviceOrientationEvent.requestPermission === 'function') {
@@ -284,14 +292,14 @@ startBtn.addEventListener('click', async function () {
   } catch (err) {
     state.gyroPermission = 'error: ' + (err.message || err);
   }
+  setOverlayMsg('starting GPU sim with ' + N + ' particles…');
   try {
     await initAndRun();
     overlay.style.display = 'none';
   } catch (err) {
     console.error(err);
     state.initError = err.message || String(err);
-    overlayMsg.className = 'fail';
-    overlayMsg.textContent = 'WebGPU init failed: ' + state.initError;
+    setOverlayMsg('WebGPU init failed: ' + state.initError, true);
   }
 });
 
@@ -737,9 +745,12 @@ async function initAndRun() {
   });
 
   if (!navigator.gpu) throw new Error('navigator.gpu missing');
+  setOverlayMsg('requesting adapter…');
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('no adapter');
+  setOverlayMsg('requesting device…');
   const device = await adapter.requestDevice();
+  setOverlayMsg('allocating buffers…');
   device.addEventListener('uncapturederror', function (event) {
     const msg = event.error && event.error.message ? event.error.message : String(event.error);
     state.gpuError = (state.gpuError ? state.gpuError + ' | ' : '') + msg;
@@ -789,6 +800,7 @@ async function initAndRun() {
     size: NUM_CELLS * 16,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
+  setOverlayMsg('allocating particle buffers (' + N + ')…');
   // Per-particle affine velocity gradient C (3x3 matrix). WGSL mat3x3
   // storage layout is 48 bytes (3 columns of vec3 padded to vec4).
   const cMatBuf = device.createBuffer({
@@ -829,6 +841,7 @@ async function initAndRun() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
+  setOverlayMsg('compiling compute shaders…');
   // Compute pipelines (one bind-group layout shared by all four kernels).
   const computeModule = device.createShaderModule({ code: WGSL_COMPUTE });
   const computeLayout = device.createBindGroupLayout({
@@ -872,6 +885,7 @@ async function initAndRun() {
     ],
   });
 
+  setOverlayMsg('compiling render shaders…');
   // Render pipelines (same as gpu.html).
   const depthModule = device.createShaderModule({ code: WGSL_DEPTH });
   const depthPipeline = device.createRenderPipeline({

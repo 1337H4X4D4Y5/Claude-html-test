@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v53</span>
+    <span class="tag">v54</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v53 upgrades the renderer: additive thickness pass + Beer's-law per-channel absorption (deep parts tint blue, edges stay clear) + procedural sky reflection by Fresnel. Looks like real water now.</div>
+  <div class="desc">MLS-MPM on the GPU. v54 fixes a WGSL reserved-word bug that broke v53's composite shader on iOS Safari. Renderer: thickness pass + Beer's-law per-channel absorption + Fresnel sky reflection. Looks like real water now.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>
@@ -112,9 +112,9 @@
 <a class="card diag" id="link-tests" href="./test.html">
   <div class="row">
     <span class="name">Unit tests</span>
-    <span class="tag">49</span>
+    <span class="tag">50</span>
   </div>
-  <div class="desc">Run the full simulation test suite in the browser. CPU sim stability + gpu-mpm regression checks (TDZ, error banner, SimParams / CompositeParams uniform layouts, CFL margin, wall-friction + viscosity wiring, preset menu, thickness pass + Beer's law).</div>
+  <div class="desc">Run the full simulation test suite in the browser. CPU sim stability + gpu-mpm regression checks (TDZ, error banner, SimParams / CompositeParams uniform layouts, CFL margin, wall-friction + viscosity, preset menu, thickness pass, WGSL reserved-word scanner).</div>
 </a>
 
 <a class="card diag" id="link-webgpu" href="./webgpu-check.html">

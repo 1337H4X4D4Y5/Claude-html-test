@@ -993,6 +993,38 @@
         'thicknessPipeline render pass does not draw(6, N)');
     });
 
+    test('gpu-mpm v54: no WGSL reserved words used as let/var identifiers', () => {
+      // iOS Safari WGSL strictly rejects let/var names that match any
+      // reserved word from the spec. v53 shipped with `let final = ...`
+      // which compiled fine in some browsers but errored out on iOS Safari
+      // ("Expected an Identifier, but got a ReservedWord"). Scan every
+      // WGSL_* template literal for let/var <reservedWord>.
+      const src = readMpmScript();
+      const reserved = [
+        // Most likely to be mistakenly used as variable names.
+        'final', 'class', 'enum', 'new', 'null', 'this', 'super', 'match',
+        'mut', 'become', 'template', 'typename', 'where', 'with', 'yield',
+        'async', 'await', 'union', 'unless', 'until', 'move', 'from',
+        'crate', 'private', 'public', 'protected', 'static', 'try', 'throw',
+        'catch', 'finally', 'register', 'sizeof', 'typeof', 'instanceof',
+        'delete', 'inline', 'export', 'extern', 'extends', 'implements',
+        'interface', 'package', 'volatile', 'virtual', 'auto', 'goto',
+      ];
+      const blocks = [];
+      const re = /const\s+(WGSL_\w+)\s*=\s*`([\s\S]*?)`/g;
+      let m;
+      while ((m = re.exec(src))) blocks.push({ name: m[1], body: m[2] });
+      assert(blocks.length >= 4, 'expected >=4 WGSL_ blocks (compute, depth, thickness, blur, composite, lines), got ' + blocks.length);
+      for (const block of blocks) {
+        for (const word of reserved) {
+          // Match `let final` / `var final` (not field names like 'final:').
+          const pat = new RegExp('\\b(?:let|var)\\s+' + word + '\\b', 'g');
+          const hit = pat.exec(block.body);
+          assert(!hit, block.name + ' uses reserved word "' + word + '" as a let/var identifier');
+        }
+      }
+    });
+
     test('gpu-mpm v53: composite shader uses thickness + Beer\'s law + sky reflection', () => {
       const src = readMpmScript();
       // Pull the WGSL_COMPOSITE template literal body.

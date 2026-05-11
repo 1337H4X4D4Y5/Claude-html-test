@@ -255,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v53 (2026-05-11 — thickness pass + Beer\'s law absorption + sky reflection)';
+const APP_VERSION = 'mpm-v54 (2026-05-11 — fix WGSL reserved-word `final` in composite shader)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1027,8 +1027,9 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   // Composite: diffuse-lit transmitted colour blended toward sky reflection
   // by Fresnel, plus a tight specular highlight.
   let lit = waterTint * (0.30 + 0.70 * diffuse);
-  let final = mix(lit, sky, fresnel) + vec3<f32>(0.95, 0.98, 1.0) * spec * 0.55;
-  return vec4<f32>(final, 1.0);
+  // 'final' is a WGSL reserved word — use outColor instead.
+  let outColor = mix(lit, sky, fresnel) + vec3<f32>(0.95, 0.98, 1.0) * spec * 0.55;
+  return vec4<f32>(outColor, 1.0);
 }
 `;
 

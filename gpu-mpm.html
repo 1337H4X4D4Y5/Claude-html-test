@@ -255,7 +255,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v59 (2026-05-11 — screen-space refraction through background)';
+const APP_VERSION = 'mpm-v60 (2026-05-11 — iPhone 15 Pro Max box dimensions + fix green water)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -273,17 +273,35 @@ function readParticleCount() {
 }
 const N = readParticleCount();
 
+// v60: iPhone 15 Pro Max aspect (159.9 x 76.7 x 8.25 mm) ≈ 1 : 2.083 : 0.108.
+// Normalising height to BOX_HALF_Y = 1.0:
+//   BOX_HALF_X = 0.480  (width)
+//   BOX_HALF_Y = 1.000  (height — longest)
+//   BOX_HALF_Z = 0.052  (depth — thinnest)
+// Declared HERE (above _natRho) because _natRho reads them; v60 originally
+// declared them later and tripped the same TDZ pattern fixed in v47 for N.
+const BOX_HALF_X = 0.480;
+const BOX_HALF_Y = 1.000;
+const BOX_HALF_Z = 0.052;
+const GRID_HALF = Math.max(BOX_HALF_X, BOX_HALF_Y, BOX_HALF_Z);
+const GRID_SIZE = 48;
+const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;
+const CELL_SIZE = (2 * GRID_HALF) / GRID_SIZE;
+
 // All MPM tunables live in one place. Surfaced in the on-screen debug
 // strip and the copy-debug report so we can iterate from screenshots.
 // CFL pressure-wave constraint: dt < cellSize / sqrt(pressureK / restDensity).
 // restDensity scales with N so the EOS balances gravity at modest
 // compression no matter what particle count is loaded:
-//   rho0 ~ (N * particleMass) / (filled volume = 4 cubic units)
-//   K    ~ rho0 * 100 (gives c = 10, CFL margin ~1.5x at dt = 1/240)
-// IMPORTANT: this block reads N, so it must run *after* `const N = ...`.
-// In v46 _natRho was declared before N which triggered a TDZ
-// ReferenceError on script load, leaving the Tap-to-begin button inert.
-const _natRho = N * 1.0 / 4.0;
+//   rho0 ~ (N * particleMass) / (filled volume)
+//   filled volume ~ box_volume / 2  (fluid fills the lower half at rest)
+// v60: box is now an iPhone aspect prism. filled_vol = 4 * BOX_HALF_X *
+// BOX_HALF_Y * BOX_HALF_Z (= total/2). For the default 0.48 × 1.0 × 0.052
+// box that's 0.0998 — ~40× smaller than the old 4-cube fill volume, so
+// _natRho is ~40× larger but pressureK and restDensity scale together
+// → sound speed c = sqrt(K/rho0) is unchanged, CFL margin unchanged.
+const FILL_VOLUME = 4 * BOX_HALF_X * BOX_HALF_Y * BOX_HALF_Z;
+const _natRho = N * 1.0 / FILL_VOLUME;
 
 // v51: fluid styles. Each preset overrides the live-tunable subset of
 // SIM_TUNE — pressureK / damping / restitution / wallFriction / viscosity /
@@ -373,15 +391,10 @@ function applyPreset(key) {
     b.classList.toggle('active', b.getAttribute('data-preset') === key);
   }
 }
-const BOX_HALF = 1.0;
-// v52: 32 → 48. 3.375x more cells (32^3=32768 → 48^3=110592). cs_clearGrid
-// and cs_grid scale with cell count; P2G/G2P stay particle-bound. CellSize
-// shrinks 0.0625 → 0.04167, tightening CFL margin (water 2.12x → 1.41x,
-// mercury 1.68x → 1.12x — still > 1.05). Pays off as sharper surface
-// features and less numerical viscosity from grid averaging.
-const GRID_SIZE = 48;
-const NUM_CELLS = GRID_SIZE * GRID_SIZE * GRID_SIZE;
-const CELL_SIZE = (2 * BOX_HALF) / GRID_SIZE;
+// (Box + grid constants now declared above, next to readParticleCount, so
+// _natRho can read BOX_HALF_X without TDZ. v52: 32 → 48 grid, 3.375x more
+// cells (32^3=32768 → 48^3=110592). cs_clearGrid and cs_grid scale with
+// cell count; P2G/G2P stay particle-bound.)
 // v50: 0.014 → 0.020. At v49's N=8000 and r=0.014, average inter-particle
 // distance (~0.079) was ~5.6x the radius and you could see daylight between
 // particles. New default is N=24000 (spacing ~0.055) with radius 0.020 →
@@ -547,10 +560,17 @@ startBtn.addEventListener('click', async function () {
 //                  affine C matrix) for sharper fluid feel.
 // ===========================================================================
 const WGSL_COMPUTE = `
+// v60: boxHalfX/Y/Z + gridHalf replaced the scalar boxHalf so the box
+// can be a non-cubic prism (iPhone aspect). gridHalf is the largest of
+// the three; the cubic grid is sized for gridHalf, and box bounds are
+// used for wall BCs and particle clamping.
 struct SimParams {
   gravity: vec3<f32>,
   dt: f32,
-  boxHalf: f32,
+  boxHalfX: f32,
+  boxHalfY: f32,
+  boxHalfZ: f32,
+  gridHalf: f32,
   cellSize: f32,
   invCellSize: f32,
   fixedPoint: f32,
@@ -642,7 +662,8 @@ fn cs_p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   let p = pos[i].xyz;
   let v = vel[i].xyz;
   let C = Cmat[i];
-  let h = P.boxHalf;
+  // v60: grid is cubic spanning ±gridHalf; box bounds are inside this.
+  let h = P.gridHalf;
   let inv = P.invCellSize;
   let gp = (p + vec3<f32>(h)) * inv;
   let base = vec3<i32>(floor(gp - vec3<f32>(0.5)));
@@ -729,18 +750,22 @@ fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (aMag > P.maxAccel) { accel = accel * (P.maxAccel / aMag); }
   v = v + accel * P.dt;
 
-  // Wall boundary: clamp normal velocity at the outer ring of cells, then
-  // damp tangential velocity by wallFriction (partial-slip BC). Free-slip
-  // (friction=1) leaves the fluid sliding frictionlessly along the glass;
-  // no-slip (friction=0) freezes it. Real water against glass is closer to
-  // no-slip — 0.92/substep gives a strong but not instant grab.
-  let edge: u32 = 1u;
-  let atXmin = ix <= edge;
-  let atXmax = ix >= GRID_SIZE - 1u - edge;
-  let atYmin = iy <= edge;
-  let atYmax = iy >= GRID_SIZE - 1u - edge;
-  let atZmin = iz <= edge;
-  let atZmax = iz >= GRID_SIZE - 1u - edge;
+  // Wall boundary: clamp normal velocity for cells on the inside face of
+  // the box walls, then damp tangential velocity by wallFriction
+  // (partial-slip BC). v60: walls are at ±boxHalfX/Y/Z which may be
+  // strictly inside the cubic grid, so detect by world position rather
+  // than grid edge index. The "boundary band" is one cell thick — the
+  // cell whose centre is just inside the wall.
+  let cellWorldX = (f32(ix) + 0.5) * P.cellSize - P.gridHalf;
+  let cellWorldY = (f32(iy) + 0.5) * P.cellSize - P.gridHalf;
+  let cellWorldZ = (f32(iz) + 0.5) * P.cellSize - P.gridHalf;
+  let band = P.cellSize * 1.5;
+  let atXmin = cellWorldX < -P.boxHalfX + band;
+  let atXmax = cellWorldX >  P.boxHalfX - band;
+  let atYmin = cellWorldY < -P.boxHalfY + band;
+  let atYmax = cellWorldY >  P.boxHalfY - band;
+  let atZmin = cellWorldZ < -P.boxHalfZ + band;
+  let atZmax = cellWorldZ >  P.boxHalfZ - band;
   if (atXmin && v.x < 0.0) { v.x = 0.0; }
   if (atXmax && v.x > 0.0) { v.x = 0.0; }
   if (atYmin && v.y < 0.0) { v.y = 0.0; }
@@ -762,7 +787,8 @@ fn cs_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= N) { return; }
   var p = pos[i].xyz;
-  let h = P.boxHalf;
+  // v60: grid mapping uses gridHalf (cubic grid); wall clamps use boxHalf*.
+  let h = P.gridHalf;
   let inv = P.invCellSize;
   let gp = (p + vec3<f32>(h)) * inv;
   let base = vec3<i32>(floor(gp - vec3<f32>(0.5)));
@@ -808,13 +834,16 @@ fn cs_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Apply small global damping and advect.
   newV = newV * P.velDamping;
   p = p + newV * P.dt;
-  let limit = h - 0.01;
-  if (p.x < -limit) { p.x = -limit; newV.x = -newV.x * P.restitution; }
-  if (p.x >  limit) { p.x =  limit; newV.x = -newV.x * P.restitution; }
-  if (p.y < -limit) { p.y = -limit; newV.y = -newV.y * P.restitution; }
-  if (p.y >  limit) { p.y =  limit; newV.y = -newV.y * P.restitution; }
-  if (p.z < -limit) { p.z = -limit; newV.z = -newV.z * P.restitution; }
-  if (p.z >  limit) { p.z =  limit; newV.z = -newV.z * P.restitution; }
+  // v60: per-axis box bounds (iPhone aspect — much thinner in z than y).
+  let limitX = P.boxHalfX - 0.01;
+  let limitY = P.boxHalfY - 0.01;
+  let limitZ = P.boxHalfZ - 0.01;
+  if (p.x < -limitX) { p.x = -limitX; newV.x = -newV.x * P.restitution; }
+  if (p.x >  limitX) { p.x =  limitX; newV.x = -newV.x * P.restitution; }
+  if (p.y < -limitY) { p.y = -limitY; newV.y = -newV.y * P.restitution; }
+  if (p.y >  limitY) { p.y =  limitY; newV.y = -newV.y * P.restitution; }
+  if (p.z < -limitZ) { p.z = -limitZ; newV.z = -newV.z * P.restitution; }
+  if (p.z >  limitZ) { p.z =  limitZ; newV.z = -newV.z * P.restitution; }
 
   pos[i] = vec4<f32>(p, 0.0);
   vel[i] = vec4<f32>(newV, 0.0);
@@ -1055,15 +1084,20 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let bgY = clamp(coord.y + warpY, 0, i32(P.resolutionY) - 1);
   let bg = textureLoad(backgroundTex, vec2<i32>(bgX, bgY), 0).rgb;
 
-  // Per-preset base colour. With refraction the body model is:
-  //   transmitted = bg * absorption       (background light through fluid)
-  //              + baseColor * (1 - absorption)   (scattered fluid colour)
-  // Thin fluid -> bg dominates (transparent). Thick fluid -> baseColor
-  // dominates (opaque). Mercury's high uniform absorption blocks bg
-  // almost entirely so its baseColor (silver) reads as a metal body.
+  // Per-preset base colour. v60: switched from component-wise mixing to
+  // a uniform-opacity lerp because the previous formula
+  //   bg*absorption + baseColor*(1 - absorption)
+  // multiplied baseColor by (1 - absorption) per channel — i.e. by the
+  // *absorbed* (short-lived) channels — which biased the visible body
+  // toward those channels. For water (red dies first), that pulled the
+  // body toward red+green ≈ green. The fix: blend bg vs baseColor with a
+  // single scalar so baseColor keeps its hue.
   let baseColor = vec3<f32>(P.baseColorR, P.baseColorG, P.baseColorB);
   let litBase = baseColor * (0.30 + 0.70 * diffuse);
-  let transmitted = bg * absorption + litBase * (1.0 - absorption);
+  let avgAbsorb = (absorption.r + absorption.g + absorption.b) * (1.0 / 3.0);
+  let opacity = 1.0 - avgAbsorb;
+  let absorbedBg = bg * absorption;
+  let transmitted = mix(absorbedBg, litBase, opacity);
 
   // Sky reflection sampled by the reflected view ray. In view space the
   // camera looks down -Z and "up" is +Y; reflectedV.y picks the right
@@ -1129,9 +1163,11 @@ async function initAndRun() {
     let rng = (seed >>> 0) || 17;
     function rand() { rng = (Math.imul(rng, 1103515245) + 12345) & 0x7fffffff; return rng / 0x7fffffff; }
     for (let i = 0; i < N; i++) {
-      posData[i * 4 + 0] = (rand() * 2 - 1) * (BOX_HALF * 0.7);
-      posData[i * 4 + 1] = -BOX_HALF * 0.6 + rand() * BOX_HALF * 0.6;
-      posData[i * 4 + 2] = (rand() * 2 - 1) * (BOX_HALF * 0.7);
+      // v60: seed in the lower half of the iPhone-aspect box, slightly
+      // inside the walls. Fill ~60% of the height starting from the floor.
+      posData[i * 4 + 0] = (rand() * 2 - 1) * (BOX_HALF_X * 0.85);
+      posData[i * 4 + 1] = -BOX_HALF_Y * 0.85 + rand() * BOX_HALF_Y * 0.60;
+      posData[i * 4 + 2] = (rand() * 2 - 1) * (BOX_HALF_Z * 0.85);
       posData[i * 4 + 3] = 0;
       velData[i * 4 + 0] = (rand() - 0.5) * 0.3;
       velData[i * 4 + 1] = (rand() - 0.5) * 0.3;
@@ -1183,7 +1219,8 @@ async function initAndRun() {
   });
 
   // Sim uniform buffer.
-  const SIM_PARAMS_SIZE = 64;   // vec3(16) + 12 f32(48) = 64 bytes exactly
+  // v60: bumped 64 -> 80 to fit boxHalfX/Y/Z + gridHalf (was a single boxHalf).
+  const SIM_PARAMS_SIZE = 80;
   const simParamsBuf = device.createBuffer({
     size: SIM_PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -1336,10 +1373,12 @@ async function initAndRun() {
     },
     primitive: { topology: 'line-list' },
   });
+  // v60: rectangular wireframe sized to the iPhone aspect box.
+  const X = BOX_HALF_X, Y = BOX_HALF_Y, Z = BOX_HALF_Z;
   const cubeEdges = new Float32Array([
-    -1,-1,-1,  1,-1,-1,    1,-1,-1,  1, 1,-1,    1, 1,-1, -1, 1,-1,   -1, 1,-1, -1,-1,-1,
-    -1,-1, 1,  1,-1, 1,    1,-1, 1,  1, 1, 1,    1, 1, 1, -1, 1, 1,   -1, 1, 1, -1,-1, 1,
-    -1,-1,-1, -1,-1, 1,    1,-1,-1,  1,-1, 1,    1, 1,-1,  1, 1, 1,   -1, 1,-1, -1, 1, 1
+    -X,-Y,-Z,   X,-Y,-Z,     X,-Y,-Z,   X, Y,-Z,     X, Y,-Z,  -X, Y,-Z,    -X, Y,-Z,  -X,-Y,-Z,
+    -X,-Y, Z,   X,-Y, Z,     X,-Y, Z,   X, Y, Z,     X, Y, Z,  -X, Y, Z,    -X, Y, Z,  -X,-Y, Z,
+    -X,-Y,-Z,  -X,-Y, Z,     X,-Y,-Z,   X,-Y, Z,     X, Y,-Z,   X, Y, Z,    -X, Y,-Z,  -X, Y, Z
   ]);
   const cubeEdgeBuf = device.createBuffer({
     size: cubeEdges.byteLength,
@@ -1471,20 +1510,25 @@ async function initAndRun() {
     simBuf[1] = state.gravity.y;
     simBuf[2] = state.gravity.z;
     simBuf[3] = stepDt;          // packs into vec3 slack
-    simBuf[4] = BOX_HALF;
-    simBuf[5] = CELL_SIZE;
-    simBuf[6] = 1.0 / CELL_SIZE;
-    simBuf[7] = FIXED_POINT;
+    // v60: per-axis box half-extents + cubic-grid half-extent.
+    simBuf[4] = BOX_HALF_X;
+    simBuf[5] = BOX_HALF_Y;
+    simBuf[6] = BOX_HALF_Z;
+    simBuf[7] = GRID_HALF;
+    simBuf[8] = CELL_SIZE;
+    simBuf[9] = 1.0 / CELL_SIZE;
+    simBuf[10] = FIXED_POINT;
     // All tunables sourced from SIM_TUNE so the debug strip can show
     // exactly which values the GPU is using each frame.
-    simBuf[8]  = SIM_TUNE.particleMass;
-    simBuf[9]  = SIM_TUNE.velDamping;
-    simBuf[10] = SIM_TUNE.restitution;
-    simBuf[11] = SIM_TUNE.pressureK;
-    simBuf[12] = SIM_TUNE.restDensity;
-    simBuf[13] = SIM_TUNE.maxAccel;
-    simBuf[14] = SIM_TUNE.wallFriction;  // v48
-    simBuf[15] = SIM_TUNE.viscosity;     // v48
+    simBuf[11] = SIM_TUNE.particleMass;
+    simBuf[12] = SIM_TUNE.velDamping;
+    simBuf[13] = SIM_TUNE.restitution;
+    simBuf[14] = SIM_TUNE.pressureK;
+    simBuf[15] = SIM_TUNE.restDensity;
+    simBuf[16] = SIM_TUNE.maxAccel;
+    simBuf[17] = SIM_TUNE.wallFriction;
+    simBuf[18] = SIM_TUNE.viscosity;
+    simBuf[19] = 0;
     device.queue.writeBuffer(simParamsBuf, 0, simBuf);
 
     const cellGroups = Math.ceil(NUM_CELLS / 64);

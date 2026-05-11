@@ -108,7 +108,20 @@
 <div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button></div>
 
 <script>
-const APP_VERSION = 'mpm-v42 (2026-05-11 — linear EOS + accel clamp)';
+const APP_VERSION = 'mpm-v43 (2026-05-11 — tunables in debug strip)';
+
+// All MPM tunables live in one place. Surfaced in the on-screen debug
+// strip and the copy-debug report so we can iterate from screenshots.
+// CFL pressure-wave constraint: dt < cellSize / sqrt(pressureK / restDensity).
+const SIM_TUNE = {
+  pressureK: 80000.0,    // linear EOS stiffness — main fluid 'springiness'
+  restDensity: 2000.0,   // mass per unit volume at rest (8000 particles m=1 in lower half = 2000)
+  particleMass: 1.0,     // arbitrary unit, mostly cancels
+  velDamping: 0.998,     // per-substep global drag on particle velocity
+  restitution: 0.20,     // wall bounce coefficient at the safety clamp
+  maxAccel: 50.0,        // cap on pressure-gradient acceleration (~5x gravity)
+  eos: 'linear',         // label only; the WGSL fixes the actual curve
+};
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -224,8 +237,9 @@ struct SimParams {
   particleMass: f32,
   velDamping: f32,
   restitution: f32,
-  pressureK: f32,    // EOS stiffness (Tait water)
+  pressureK: f32,
   restDensity: f32,
+  maxAccel: f32,
 };
 
 const N: u32 = ${N}u;
@@ -386,12 +400,11 @@ fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cellVolume = P.cellSize * P.cellSize * P.cellSize;
   let rho = mass / cellVolume;
   var accel = -gradP / rho;
-  // Clamp to ~5x gravity. Without this, a single under-resolved cell
-  // can briefly read a huge density spike and fire its neighbours
-  // hundreds of m/s away (= v41 disaster).
-  let maxAccel: f32 = 50.0;
+  // Clamp pressure acceleration to P.maxAccel — surfaced as a tunable
+  // because a single under-resolved cell can briefly read a huge
+  // density spike and fire its neighbours away (v41 wall-blast bug).
   let aMag = length(accel);
-  if (aMag > maxAccel) { accel = accel * (maxAccel / aMag); }
+  if (aMag > P.maxAccel) { accel = accel * (P.maxAccel / aMag); }
   v = v + accel * P.dt;
 
   // Wall boundary: clamp normal velocity at the outer ring of cells.
@@ -942,17 +955,14 @@ async function initAndRun() {
     simBuf[5] = CELL_SIZE;
     simBuf[6] = 1.0 / CELL_SIZE;
     simBuf[7] = FIXED_POINT;
-    simBuf[8] = 1.0;              // particleMass (cancels out)
-    simBuf[9] = 0.998;            // velDamping
-    simBuf[10] = 0.20;            // wall restitution
-    // 8000 particles m=1 nominally fill the lower half of the 2x2x2 box,
-    // so the natural rest density is 8000/4 = 2000 mass per unit volume.
-    // Linear EOS: P = K * (rho/rho0 - 1). For ~20% compression at the
-    // bottom of a 1-deep column under g=9.8 we need
-    //   P_bottom = rho0 * g * H = 19600
-    //   K        = P_bottom / 0.2 ~ 100000
-    simBuf[11] = 80000.0;         // pressureK (linear)
-    simBuf[12] = 2000.0;          // restDensity
+    // All tunables sourced from SIM_TUNE so the debug strip can show
+    // exactly which values the GPU is using each frame.
+    simBuf[8]  = SIM_TUNE.particleMass;
+    simBuf[9]  = SIM_TUNE.velDamping;
+    simBuf[10] = SIM_TUNE.restitution;
+    simBuf[11] = SIM_TUNE.pressureK;
+    simBuf[12] = SIM_TUNE.restDensity;
+    simBuf[13] = SIM_TUNE.maxAccel;
     device.queue.writeBuffer(simParamsBuf, 0, simBuf);
 
     const cellGroups = Math.ceil(NUM_CELLS / 64);
@@ -1054,30 +1064,63 @@ function fmt(v) {
   return s.padStart(6, ' ');
 }
 function updateDebug() {
+  // Pressure-wave CFL: c = sqrt(K/rho0), required dt < cellSize/c.
+  const soundC = Math.sqrt(SIM_TUNE.pressureK / SIM_TUNE.restDensity);
+  const cflDt = CELL_SIZE / soundC;
   debugTextEl.textContent =
     'fps: ' + state.fps.toFixed(1) + '   particles: ' + N + '   grid: ' + GRID_SIZE + '³   steps: ' + state.steps + '\n' +
-    'gyro: ' + state.gyroPermission + '   events: ' + state.events + '   β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '\n' +
-    'gravity x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) +
+    'gyro: ' + state.gyroPermission + '   β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '   evt: ' + state.events + '\n' +
+    'gravity x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) + '\n' +
+    'EOS=' + SIM_TUNE.eos +
+      '  K=' + SIM_TUNE.pressureK +
+      '  ρ₀=' + SIM_TUNE.restDensity +
+      '  m=' + SIM_TUNE.particleMass + '\n' +
+    'damp=' + SIM_TUNE.velDamping.toFixed(4) +
+      '  rest=' + SIM_TUNE.restitution.toFixed(2) +
+      '  aMax=' + SIM_TUNE.maxAccel +
+      '  cell=' + CELL_SIZE.toFixed(4) + '\n' +
+    'CFL: c=' + soundC.toFixed(2) + '  dtCFL=' + cflDt.toFixed(4) +
+      '  ourDt≤1/240=' + (1/240).toFixed(4) +
+      '  margin=' + (cflDt / (1/240)).toFixed(1) + 'x' +
     (state.gpuError ? '\nGPU ERR: ' + state.gpuError : '');
 }
 updateDebug();
 
 copyBtn.addEventListener('click', function () {
+  const soundC = Math.sqrt(SIM_TUNE.pressureK / SIM_TUNE.restDensity);
+  const cflDt = CELL_SIZE / soundC;
   const report = [
     '=== Water Box MPM debug ===',
     'version: ' + APP_VERSION,
     'fps: ' + state.fps.toFixed(1),
     'particles: ' + N,
     'grid: ' + GRID_SIZE + '^3 = ' + NUM_CELLS + ' cells',
+    'cellSize: ' + CELL_SIZE.toFixed(5),
     'steps: ' + state.steps,
     '',
-    'gyro permission: ' + state.gyroPermission,
-    'orientation events: ' + state.events,
+    '--- gyro ---',
+    'permission: ' + state.gyroPermission,
+    'events: ' + state.events,
     'beta:  ' + state.beta.toFixed(3),
     'gamma: ' + state.gamma.toFixed(3),
     'gravity x: ' + state.gravity.x.toFixed(3),
     'gravity y: ' + state.gravity.y.toFixed(3),
     'gravity z: ' + state.gravity.z.toFixed(3),
+    '',
+    '--- tunable constants ---',
+    'EOS:           ' + SIM_TUNE.eos,
+    'pressureK:     ' + SIM_TUNE.pressureK,
+    'restDensity:   ' + SIM_TUNE.restDensity,
+    'particleMass:  ' + SIM_TUNE.particleMass,
+    'velDamping:    ' + SIM_TUNE.velDamping,
+    'restitution:   ' + SIM_TUNE.restitution,
+    'maxAccel:      ' + SIM_TUNE.maxAccel,
+    '',
+    '--- derived / CFL ---',
+    'sound speed c = sqrt(K/ρ₀) = ' + soundC.toFixed(3),
+    'CFL dt < cellSize/c       = ' + cflDt.toFixed(5),
+    'substep dt cap (1/240)    = ' + (1/240).toFixed(5),
+    'CFL margin                = ' + (cflDt / (1/240)).toFixed(2) + 'x',
     '',
     'init error: ' + (state.initError || 'none'),
     'gpu error:  ' + (state.gpuError || 'none'),

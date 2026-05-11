@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v42</span>
+    <span class="tag">v43</span>
   </div>
-  <div class="desc">MLS-MPM + linear pressure on the GPU. Quadratic B-spline, affine C matrix, central-difference pressure gradient, max-accel clamp. Tuned so hydrostatic pressure at the column base balances gravity at modest compression.</div>
+  <div class="desc">MLS-MPM + linear pressure on the GPU. Quadratic B-spline, affine C matrix, central-difference pressure gradient. All tunable constants (K, ρ₀, damping, restitution, max accel) surfaced on the debug strip with CFL margin info for iterative tuning.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

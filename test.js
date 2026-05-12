@@ -1418,6 +1418,50 @@
         'Phases-panel toggle button must be wired in JS');
     });
 
+    test('gpu-mpm v127: deck-30 translucent shadow pipeline + backdrop projection', () => {
+      // Per slide 30: render fluid from sun's POV → light depth map →
+      // backdrop projects floor pixels into light NDC, attenuates the
+      // tile colour where sun rays traverse fluid before reaching the
+      // floor.
+      const src = readMpmScript();
+      assert(src.indexOf('const WGSL_LIGHT_DEPTH') >= 0,
+        'WGSL_LIGHT_DEPTH shader must be declared (light-space depth pass)');
+      const ldIdx = src.indexOf('const WGSL_LIGHT_DEPTH');
+      const ldEnd = src.indexOf('`;', ldIdx);
+      const ldSrc = src.slice(ldIdx, ldEnd);
+      assert(ldSrc.indexOf('viewProj') >= 0 && ldSrc.indexOf('sunRight') >= 0 && ldSrc.indexOf('sunUp') >= 0,
+        'WGSL_LIGHT_DEPTH must take viewProj + sunRight + sunUp uniform fields');
+      // Pipeline + texture + uniform wired.
+      assert(src.indexOf('lightDepthPipeline') >= 0, 'lightDepthPipeline must be created');
+      assert(src.indexOf('lightDepthTex') >= 0, 'lightDepthTex must be created');
+      assert(src.indexOf('lightRenderParamsBuf') >= 0,
+        'lightRenderParamsBuf uniform must be created and written each frame');
+      assert(src.indexOf('writeBuffer(lightRenderParamsBuf') >= 0,
+        'lightRenderParamsBuf must be written per frame');
+      // Conditional dispatch.
+      assert(src.match(/if\s*\(\s*state\.toggles\.translucentShadow\s*\)/) !== null,
+        'light-depth pass must be JS-conditional on state.toggles.translucentShadow');
+      // Backdrop shader now takes a uniform + texture binding for the
+      // shadow projection.
+      const bdIdx = src.indexOf('const WGSL_BACKDROP');
+      const bdEnd = src.indexOf('`;', bdIdx);
+      const bdSrc = src.slice(bdIdx, bdEnd);
+      assert(bdSrc.indexOf('struct BackdropParams') >= 0,
+        'WGSL_BACKDROP must declare BackdropParams uniform struct');
+      assert(bdSrc.indexOf('lightDepthTex') >= 0,
+        'WGSL_BACKDROP must bind lightDepthTex for shadow lookup');
+      assert(bdSrc.indexOf('shadowOn') >= 0 && bdSrc.indexOf('shadowAttenuation') >= 0,
+        'BackdropParams must include shadowOn + shadowAttenuation fields');
+      assert(bdSrc.indexOf('lightClip') >= 0 || bdSrc.indexOf('lightVP_0') >= 0,
+        'WGSL_BACKDROP must transform floor positions to light clip space');
+      // UI chip + preset.
+      const html = readMpmHtml();
+      assert(html.indexOf('data-toggle="translucentShadow"') >= 0,
+        'UI must include a touch button with data-toggle="translucentShadow"');
+      assert(html.indexOf('data-preset="shadow_cast"') >= 0,
+        'UI must include a "Shadow cast" preset chip');
+    });
+
     test('gpu-mpm v125: deck-38 flow-noise pass + composite perturbation', () => {
       // The deck (slide 38, "Adding Surface Detail") says: render
       // spheres again, sample 3D noise in object-space, store in a

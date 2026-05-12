@@ -329,6 +329,7 @@
     <button class="preset" data-preset="raw_depth">Raw depth</button>
     <button class="preset" data-preset="deck_thickness">Deck thickness</button>
     <button class="preset" data-preset="flow_detail">Flow detail</button>
+    <button class="preset" data-preset="shadow_cast">Shadow cast</button>
   </div>
   <div id="phases-bulk">
     <button class="bulk" data-bulk="on">All on</button>
@@ -340,6 +341,7 @@
   <button class="phase" data-toggle="caustics">Caustics — ray-traced sun</button>
   <button class="phase" data-toggle="additiveThickness">Additive thickness (deck-25)</button>
   <button class="phase" data-toggle="flowNoise">Flow noise (deck-38)</button>
+  <button class="phase" data-toggle="translucentShadow">Translucent shadow (deck-30)</button>
   <h4>Body shading</h4>
   <button class="phase" data-toggle="beerLambert">Beer-Lambert absorption</button>
   <button class="phase" data-toggle="subsurface">Subsurface scatter</button>
@@ -394,7 +396,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v126 (2026-05-12 — fix: phases button (now labelled FX) moved from top: 76px to 118px — was overlapping the 💧 presets button at 78px on iPhone, hiding the toggle panel entirely. Plus white "FX" text replaces the 🎚 emoji.)';
+const APP_VERSION = 'mpm-v127 (2026-05-12 — deck-30 translucent shadows: fluid sphere imposters rendered from sun POV → light depth map → backdrop projects floor pixels into light NDC and attenuates the tile colour where sun rays traverse fluid. Tap "Translucent shadow (deck-30)" or "Shadow cast" preset.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -666,6 +668,8 @@ const state = {
                               //       true  = deck-25 additive sprite splat
     flowNoise:         false, // v125: deck-38 surface detail via 3D noise
                               //       sampled at particle world centres.
+    translucentShadow: false, // v127: deck-30 shadow on the floor cast
+                              //       by fluid sampled from the sun's POV.
   },
 };
 (function loadTogglesFromStorage() {
@@ -684,7 +688,7 @@ const TOGGLE_PRESETS = {
   minimalist:   { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: false, refraction: true,  fresnel: true,  spec: false, iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
   caustics:     { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: false, refraction: true,  fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: true,  additiveThickness: false },
   mirror:       { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: false, fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false },
-  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false, additiveThickness: false, flowNoise: false },
+  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false, additiveThickness: false, flowNoise: false, translucentShadow: false },
   body_only:    { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: true,  refraction: false, fresnel: false, spec: false, iblAmbient: true,  cubemapReflect: false, toneMap: true,  additiveThickness: false },
   glassy_mirror:{ smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: true,  fresnel: true,  spec: true,  iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
   // v124: deck-faithful preset — additive-sprite thickness on top of
@@ -694,7 +698,10 @@ const TOGGLE_PRESETS = {
   // v125: deck-38 surface-detail preset — flow noise on top of the
   // reference render so the user can see the noise-driven flow detail
   // immediately. Same Reference look + flowNoise = true.
-  flow_detail:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: true  },
+  flow_detail:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: true,  translucentShadow: false },
+  // v127: deck-30 translucent shadow preset — fluid casts a sun-projected
+  // dark patch on the box floor. Combined with the rest of Reference.
+  shadow_cast:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: false, translucentShadow: true  },
 };
 
 const DEG = Math.PI / 180;
@@ -1330,6 +1337,62 @@ fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
   let d = -viewZ;
   if (d <= near) { return 0.0; }
   return (1.0 - near / d) * far / (far - near);
+}
+`;
+
+// v127: deck-30 translucent shadows. "Since fluid is translucent, we
+// expect it to cast coloured shadows. Solution - render fluid surface
+// again (using same technique), but from light's point of view.
+// Generate depth (shadow) map and color map (thickness). Project onto
+// receivers (surface and ground plane)."
+//
+// We render the particle sphere imposters with an orthographic
+// projection from the SUN direction. The "front depth" texture stores
+// the closest fluid surface as seen from the sun; the backdrop later
+// reverses this projection per floor pixel — if the floor pixel is
+// further from the sun than the fluid's front depth, sunlight has to
+// travel through fluid to reach it, so the floor is in shadow.
+const WGSL_LIGHT_DEPTH = `
+struct LightRender {
+  viewProj: mat4x4<f32>,
+  sunRight: vec3<f32>, particleSize: f32,
+  sunUp: vec3<f32>,    _pad: f32,
+};
+
+@group(0) @binding(0) var<storage, read> pos: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> L: LightRender;
+
+struct VOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32,
+           @builtin(instance_index) ii: u32) -> VOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0)
+  );
+  let q = quad[vi];
+  let center = pos[ii].xyz;
+  // Billboard the imposter in LIGHT space, not camera space.
+  let wp = center + (L.sunRight * q.x + L.sunUp * q.y) * L.particleSize;
+  var out: VOut;
+  out.position = L.viewProj * vec4<f32>(wp, 1.0);
+  out.uv = q;
+  return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
+  // Disc test — same as camera-view depth pass. We don't bother with the
+  // sphere-imposter Z offset because the shadow projection is
+  // orthographic and we only care about which floor pixels are
+  // occluded; the imposter quad's z is good enough.
+  let r2 = dot(in.uv, in.uv);
+  if (r2 > 1.0) { discard; }
+  return in.position.z;
 }
 `;
 
@@ -2089,12 +2152,27 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 }
 `;
 
-// v82: procedural white-tile backdrop drawn into backgroundTex BEFORE the
-// wireframe. Visible through fluid via refraction, and the source of
-// caustic patterns in the composite shader. Pure fragment shader — no
-// uniforms, the tile pattern is keyed to screen pixels so the tile
-// scale is resolution-stable.
+// v82/v127: procedural white-tile backdrop drawn into backgroundTex
+// BEFORE the wireframe. Visible through fluid via refraction.
+// v127 extends it with deck-30 translucent shadow projection: per
+// floor-pixel, ray-trace from camera to the floor plane, transform to
+// light NDC, sample the light-space front depth, attenuate the tile
+// colour where sun rays would have to traverse fluid to reach the
+// floor. Gated by T.translucentShadow so toggle-off is a no-op.
 const WGSL_BACKDROP = `
+struct BackdropParams {
+  // Camera math for floor-pixel reconstruction (matches CompositeParams).
+  near: f32, far: f32, fAspect: f32, fVert: f32,
+  resolutionX: f32, resolutionY: f32, boxHalfX: f32, boxHalfY: f32,
+  boxHalfZ: f32, fitD: f32, shadowOn: f32, shadowAttenuation: f32,
+  // Light projection — 16 floats / 64 bytes / column-major.
+  lightVP_0: vec4<f32>, lightVP_1: vec4<f32>,
+  lightVP_2: vec4<f32>, lightVP_3: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> B: BackdropParams;
+@group(0) @binding(1) var lightDepthTex: texture_depth_2d;
+
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
   var p = array<vec2<f32>, 3>(
@@ -2109,22 +2187,72 @@ fn hashTile(p: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-  // Tile size in pixels. 60 px reads as a "bathroom tile" scale on a
-  // typical phone screen.
+  // ---- Tile pattern (unchanged from v82) ----
   let tileSize: f32 = 60.0;
   let groutPx: f32 = 1.5;
   let uv = frag.xy / tileSize;
-  let cellLocal = abs(fract(uv) - 0.5) * 2.0;       // 0 at centre, 1 at edge
+  let cellLocal = abs(fract(uv) - 0.5) * 2.0;
   let edgeDist = max(cellLocal.x, cellLocal.y);
   let groutThresh = 1.0 - groutPx / (tileSize * 0.5);
   let isGrout = step(groutThresh, edgeDist);
   let tileId = floor(uv);
   let h = hashTile(tileId);
-  let baseShade = 0.86 + h * 0.10;                  // off-white, slight variation
+  let baseShade = 0.86 + h * 0.10;
   let groutShade = 0.55;
   let shade = mix(baseShade, groutShade, isGrout);
-  // Very slight cool tint.
-  return vec4<f32>(shade, shade, shade * 0.96, 1.0);
+  var col = vec3<f32>(shade, shade, shade * 0.96);
+
+  // ---- v127 deck-30 shadow attenuation on the floor ----
+  if (B.shadowOn > 0.5) {
+    // Camera ray from the pixel: (ndcX/fAspect, ndcY/fVert, -1) in
+    // world space (our identity-rotation camera). Find the floor
+    // intersection at world y = -boxHalfY. Camera sits at (0,0,fitD)
+    // looking in -z; for ndcY<0 the ray goes downward and hits the
+    // floor.
+    let ndcX = (frag.x / B.resolutionX) * 2.0 - 1.0;
+    let ndcY = 1.0 - (frag.y / B.resolutionY) * 2.0;
+    let rayX = ndcX / B.fAspect;
+    let rayY = ndcY / B.fVert;
+    // Ray dir (un-normalized) = (rayX, rayY, -1). Camera world Y is 0.
+    // Floor intersection: 0 + t * rayY = -boxHalfY ⇒ t = -boxHalfY / rayY.
+    // Need t > 0 ⇒ rayY < 0.
+    if (rayY < -0.01) {
+      let t = -B.boxHalfY / rayY;
+      let floorX = 0.0 + t * rayX;
+      let floorZ = B.fitD + t * (-1.0);
+      // Only inside the box footprint receives shadow.
+      if (abs(floorX) < B.boxHalfX && abs(floorZ) < B.boxHalfZ) {
+        // Transform floor world point to light NDC.
+        let world = vec4<f32>(floorX, -B.boxHalfY, floorZ, 1.0);
+        let lightClip = vec4<f32>(
+          dot(B.lightVP_0, world),
+          dot(B.lightVP_1, world),
+          dot(B.lightVP_2, world),
+          dot(B.lightVP_3, world)
+        );
+        let lndc = lightClip.xyz / max(lightClip.w, 1e-6);
+        // lndc ∈ [-1,1] for x/y; [0,1] for z in WebGPU NDC. Convert
+        // to texture coords.
+        let lu = (lndc.x * 0.5 + 0.5);
+        let lv = (1.0 - (lndc.y * 0.5 + 0.5));
+        let lz = lndc.z;
+        if (lu >= 0.0 && lu <= 1.0 && lv >= 0.0 && lv <= 1.0) {
+          let texDim = textureDimensions(lightDepthTex);
+          let lxi = i32(lu * f32(texDim.x));
+          let lyi = i32(lv * f32(texDim.y));
+          let frontLightZ = textureLoad(lightDepthTex, vec2<i32>(lxi, lyi), 0);
+          // If fluid is between sun and floor, the floor pixel's z in
+          // light space is GREATER (farther from sun) than the fluid's
+          // front depth. Apply the attenuation.
+          if (lz > frontLightZ + 0.001) {
+            col = col * B.shadowAttenuation;
+          }
+        }
+      }
+    }
+  }
+
+  return vec4<f32>(col, 1.0);
 }
 `;
 
@@ -2390,6 +2518,51 @@ async function initAndRun() {
       { binding: 1, resource: { buffer: renderParamsBuf } },
     ],
   });
+
+  // v127: light-space depth pipeline. Particle imposters rendered into
+  // a fixed-size light-view depth texture (sun's POV, orthographic).
+  // Used by the backdrop to determine which floor pixels are occluded
+  // by fluid and should be Beer-Lambert-attenuated.
+  const lightDepthModule = device.createShaderModule({ code: WGSL_LIGHT_DEPTH });
+  const lightDepthPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: lightDepthModule, entryPoint: 'vs_main' },
+    fragment: { module: lightDepthModule, entryPoint: 'fs_main', targets: [] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less' },
+  });
+  // LightRender: mat4 (64 bytes) + sunRight+particleSize (16) + sunUp+pad (16) = 96 bytes.
+  const LIGHT_RENDER_PARAMS_SIZE = 96;
+  const lightRenderParamsBuf = device.createBuffer({
+    size: LIGHT_RENDER_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const lightRenderScratch = new Float32Array(LIGHT_RENDER_PARAMS_SIZE / 4);
+  const lightDepthBindGroup = device.createBindGroup({
+    layout: lightDepthPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: posBuf } },
+      { binding: 1, resource: { buffer: lightRenderParamsBuf } },
+    ],
+  });
+  // Fixed-size light depth texture. 512² is enough to resolve shadow
+  // edges on a phone-sized screen without bloating GPU memory.
+  const LIGHT_SHADOW_SIZE = 512;
+  const lightDepthTex = device.createTexture({
+    size: { width: LIGHT_SHADOW_SIZE, height: LIGHT_SHADOW_SIZE },
+    format: 'depth32float',
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+  });
+
+  // v127: BackdropParams uniform — 96 bytes (12 floats + 16-float mat).
+  //   near, far, fAspect, fVert, resX, resY, boxHalfX, boxHalfY,
+  //   boxHalfZ, fitD, shadowOn, shadowAttenuation, + lightVP[4×4]
+  const BACKDROP_PARAMS_SIZE = 112;
+  const backdropParamsBuf = device.createBuffer({
+    size: BACKDROP_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const backdropScratch = new Float32Array(BACKDROP_PARAMS_SIZE / 4);
 
   // v124: deck-25 additive-sprite thickness pipeline. Half-res r16float
   // target with additive blending, no depth test (deck explicitly says
@@ -2688,6 +2861,15 @@ async function initAndRun() {
     vertex: { module: backdropModule, entryPoint: 'vs_main' },
     fragment: { module: backdropModule, entryPoint: 'fs_main', targets: [{ format: format }] },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  // v127: backdrop now reads BackdropParams + lightDepthTex for the
+  // shadow projection.
+  const backdropBindGroup = device.createBindGroup({
+    layout: backdropPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: backdropParamsBuf } },
+      { binding: 1, resource: lightDepthTex.createView() },
+    ],
   });
 
   const linesModule = device.createShaderModule({ code: WGSL_LINES });
@@ -3189,6 +3371,90 @@ async function initAndRun() {
     for (let i = 10; i < 16; i++) togBuf[i] = 0;
     device.queue.writeBuffer(togglesParamsBuf, 0, togBuf);
 
+    // v127: light view-projection matrix for the shadow pass + backdrop.
+    // Sun direction in world space (matches composite keylight). Light
+    // "camera" is placed along the sun vector well outside the box,
+    // looking back toward origin. Orthographic projection sized to
+    // cover the box bounding sphere. Column-major mat4 (WebGPU std140).
+    const sunW = [0.35, 0.80, 0.50];
+    const sLen = Math.hypot(sunW[0], sunW[1], sunW[2]);
+    const sN = [sunW[0]/sLen, sunW[1]/sLen, sunW[2]/sLen];
+    // View matrix (look-at from sunEye toward origin).
+    const eyeDist = 5.0;
+    const eye = [sN[0]*eyeDist, sN[1]*eyeDist, sN[2]*eyeDist];
+    // Camera forward = origin - eye, normalized = -sN.
+    const fwd = [-sN[0], -sN[1], -sN[2]];
+    // Up reference: world Y unless the sun is nearly vertical, then world Z.
+    const upRef = Math.abs(fwd[1]) > 0.95 ? [0,0,1] : [0,1,0];
+    // right = normalize(cross(upRef, fwd))
+    let rx = upRef[1]*fwd[2] - upRef[2]*fwd[1];
+    let ry = upRef[2]*fwd[0] - upRef[0]*fwd[2];
+    let rz = upRef[0]*fwd[1] - upRef[1]*fwd[0];
+    let rl = Math.hypot(rx,ry,rz) || 1; rx/=rl; ry/=rl; rz/=rl;
+    // up = cross(fwd, right)
+    const ux = fwd[1]*rz - fwd[2]*ry;
+    const uy = fwd[2]*rx - fwd[0]*rz;
+    const uz = fwd[0]*ry - fwd[1]*rx;
+    // View matrix (column-major): rows are basis, translation = -dot(basis, eye).
+    const viewLight = [
+      rx, ux, -fwd[0], 0,
+      ry, uy, -fwd[1], 0,
+      rz, uz, -fwd[2], 0,
+      -(rx*eye[0]+ry*eye[1]+rz*eye[2]),
+      -(ux*eye[0]+uy*eye[1]+uz*eye[2]),
+      (fwd[0]*eye[0]+fwd[1]*eye[1]+fwd[2]*eye[2]),
+      1
+    ];
+    // Orthographic extent: bounding-sphere radius around the box.
+    const extent = Math.sqrt(BOX_HALF_X*BOX_HALF_X + BOX_HALF_Y*BOX_HALF_Y + BOX_HALF_Z*BOX_HALF_Z) * 1.2;
+    const lnear = 0.1, lfar = 30.0;
+    // WebGPU NDC: z in [0,1]. Ortho matrix maps [near, far] → [0, 1].
+    const orthoLight = [
+      1/extent, 0, 0, 0,
+      0, 1/extent, 0, 0,
+      0, 0, 1/(lnear-lfar), 0,
+      0, 0, lnear/(lnear-lfar), 1
+    ];
+    // lightVP = orthoLight × viewLight (column-major mul: C = A B → result entries row-by-row)
+    function mul4(A, B) {
+      const C = new Array(16);
+      for (let c = 0; c < 4; c++) {
+        for (let r = 0; r < 4; r++) {
+          let s = 0;
+          for (let k = 0; k < 4; k++) s += A[k*4 + r] * B[c*4 + k];
+          C[c*4 + r] = s;
+        }
+      }
+      return C;
+    }
+    const lightVP = mul4(orthoLight, viewLight);
+
+    // Light render uniform (for the depth pass).
+    const lrBuf = lightRenderScratch;
+    for (let i = 0; i < 16; i++) lrBuf[i] = lightVP[i];
+    lrBuf[16] = rx; lrBuf[17] = ux; lrBuf[18] = -fwd[0]; lrBuf[19] = PARTICLE_RADIUS;
+    // Hmm — vec3 padding rules: sunRight at offset 16f, particleSize at 19f.
+    // sunUp at 20f, _pad at 23f.
+    // Wait, we need world-space billboard basis for the imposter, which
+    // is the light view's right and up vectors in WORLD space.
+    // Right in world is just (rx, ry, rz); up in world is (ux, uy, uz).
+    lrBuf[16] = rx; lrBuf[17] = ry; lrBuf[18] = rz; lrBuf[19] = PARTICLE_RADIUS;
+    lrBuf[20] = ux; lrBuf[21] = uy; lrBuf[22] = uz; lrBuf[23] = 0;
+    device.queue.writeBuffer(lightRenderParamsBuf, 0, lrBuf);
+
+    // Backdrop uniform — projection helpers + light VP + shadow toggle.
+    const bdBuf = backdropScratch;
+    bdBuf[0] = 0.1; bdBuf[1] = 100;
+    bdBuf[2] = f / aspect; bdBuf[3] = f;
+    bdBuf[4] = canvas.width; bdBuf[5] = canvas.height;
+    bdBuf[6] = BOX_HALF_X; bdBuf[7] = BOX_HALF_Y;
+    bdBuf[8] = BOX_HALF_Z; bdBuf[9] = CAM_FIT_D;
+    bdBuf[10] = state.toggles.translucentShadow ? 1.0 : 0.0;
+    bdBuf[11] = 0.55; // shadowAttenuation: 0.55× tile colour under fluid
+    // light VP starts at float 12 (byte 48). Row-by-row column-major.
+    for (let i = 0; i < 16; i++) bdBuf[12 + i] = lightVP[i];
+    device.queue.writeBuffer(backdropParamsBuf, 0, bdBuf);
+
     // v108: caustic-pass uniform. Sun direction shares the composite
     // keylight so the focused light comes from the same place the
     // Fresnel reflection sees it. refractRatio = n_air / n_water.
@@ -3211,6 +3477,22 @@ async function initAndRun() {
     device.queue.writeBuffer(causticParamsBuf, 0, causticBuf);
 
     const enc2 = device.createCommandEncoder();
+    // v127: deck-30 light-space depth pass — renders fluid sphere
+    // imposters from the sun's POV into a fixed-size depth texture.
+    // The backdrop pass then projects floor pixels back into light NDC
+    // to determine which are occluded. Conditional on the toggle so
+    // skipping costs nothing.
+    if (state.toggles.translucentShadow) {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [],
+        depthStencilAttachment: {
+          view: lightDepthTex.createView(),
+          depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store',
+        },
+      });
+      p.setPipeline(lightDepthPipeline); p.setBindGroup(0, lightDepthBindGroup);
+      p.draw(6, N); p.end();
+    }
     // Background pass (v59 + v82): procedural white-tile backdrop first,
     // then box wireframe on top. The composite shader samples this with a
     // normal-warped UV for refraction; it also blits straight through
@@ -3224,8 +3506,11 @@ async function initAndRun() {
           loadOp: 'clear', storeOp: 'store',
         }],
       });
-      // v82: full-screen tile pattern.
+      // v82/v127: full-screen tile pattern + deck-30 shadow attenuation
+      // when state.toggles.translucentShadow is on. The backdrop shader
+      // does the floor → light NDC projection itself.
       p.setPipeline(backdropPipeline);
+      p.setBindGroup(0, backdropBindGroup);
       p.draw(3, 1);
       // v86/v88: 3 translucent box side walls (left, right, back) —
       // 18 vertices. Front face dropped in v88 because it caused

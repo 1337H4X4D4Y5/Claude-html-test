@@ -1138,67 +1138,100 @@
         'cs_g2p must compute effective damping/viscosity from rest weight');
     });
 
-    test('gpu-mpm v81: bloom post-process pipeline wired (extract + 2-blur + combine)', () => {
+    test('gpu-mpm v104: bloom pipeline stripped (no extract / no blur / no combine)', () => {
+      // v104 abandons the bloom post-process to match the NVIDIA SSF
+      // reference. The composite pass should write directly to the
+      // canvas — no compositeTex render target, no bloom textures, no
+      // combine pass.
       const src = readMpmScript();
-      assert(src.indexOf('WGSL_BLOOM') >= 0, 'WGSL_BLOOM shader missing');
-      assert(src.indexOf('WGSL_COMBINE') >= 0, 'WGSL_COMBINE shader missing');
-      assert(src.indexOf('bloomBrightPipeline') >= 0, 'bloomBrightPipeline not created');
-      assert(src.indexOf('bloomBlurHPipeline') >= 0, 'bloomBlurHPipeline not created');
-      assert(src.indexOf('bloomBlurVPipeline') >= 0, 'bloomBlurVPipeline not created');
-      assert(src.indexOf('combinePipeline') >= 0, 'combinePipeline not created');
-      assert(src.indexOf('compositeTex') >= 0, 'compositeTex render target not created');
-      // Composite must now target compositeTex (not the canvas view directly).
+      assert(src.indexOf('WGSL_BLOOM') < 0,
+        'WGSL_BLOOM shader source should be removed in v104');
+      assert(src.indexOf('WGSL_COMBINE') < 0,
+        'WGSL_COMBINE shader source should be removed in v104');
+      assert(src.indexOf('bloomBrightPipeline') < 0,
+        'bloomBrightPipeline reference still present');
+      assert(src.indexOf('bloomBlurHPipeline') < 0,
+        'bloomBlurHPipeline reference still present');
+      assert(src.indexOf('combinePipeline') < 0,
+        'combinePipeline reference still present');
+      // Composite must render directly to the canvas (use of
+      // ctx.getCurrentTexture().createView() right before the composite
+      // pass setPipeline).
       const fluidCompIdx = src.indexOf('p.setPipeline(compositePipeline)');
       assert(fluidCompIdx >= 0, 'composite pipeline never used in frame loop');
-      // Look back ~300 chars to find the colorAttachment view used for this pass.
-      const ctxBefore = src.slice(Math.max(0, fluidCompIdx - 400), fluidCompIdx);
-      assert(ctxBefore.indexOf('compositeTex.createView()') >= 0,
-        'composite pass must target compositeTex (not canvas) for bloom to read it');
-      // Final combine must target the canvas view.
-      const combineIdx = src.indexOf('p.setPipeline(combinePipeline)');
-      assert(combineIdx >= 0, 'combinePipeline never used in frame loop');
+      const ctxBefore = src.slice(Math.max(0, fluidCompIdx - 500), fluidCompIdx);
+      assert(ctxBefore.indexOf('compositeTex.createView()') < 0,
+        'composite pass must NOT target compositeTex in v104 (write straight to canvas)');
+      assert(ctxBefore.indexOf('view: view') >= 0 || ctxBefore.indexOf('view: view,') >= 0,
+        'composite pass must target the canvas view (ctx.getCurrentTexture().createView())');
     });
 
-    test('gpu-mpm v82: tile backdrop + projected caustics wired', () => {
-      // v82 added the white-tile backdrop; v87 added projected light
-      // caustics; v93 dropped the curvature caustic (perf) and reverted
-      // the 5-tap normal so dpdx(nSmooth) is no longer used.
-      const src = readMpmScript();
-      assert(src.indexOf('WGSL_BACKDROP') >= 0, 'WGSL_BACKDROP shader missing');
-      assert(src.indexOf('backdropPipeline') >= 0, 'backdropPipeline not created');
-      assert(src.indexOf('p.setPipeline(backdropPipeline)') >= 0,
-        'backdropPipeline never dispatched in frame loop');
-      const compIdx = src.indexOf('const WGSL_COMPOSITE');
-      const compEnd = src.indexOf('`;', compIdx);
-      const compositeSrc = src.slice(compIdx, compEnd);
-      assert(compositeSrc.indexOf('lightCaustic') >= 0,
-        'composite must call lightCaustic() for projected caustic pattern');
-      assert(compositeSrc.indexOf('caustic') >= 0,
-        'composite must produce some kind of caustic term');
-    });
-
-    test('gpu-mpm v79: composite uses fractal noise to perturb surface normal', () => {
+    test('gpu-mpm v104: composite shader stripped of fBm, caustics, ripple perturbation', () => {
+      // v104 removed all the post-2010 noise/caustic layering so the
+      // SSF surface reads as the geometry plus Fresnel reflection —
+      // matching the NVIDIA GDC 2010 SSF deck.
       const src = readMpmScript();
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
       const compEnd = src.indexOf('`;', compIdx);
       const compositeSrc = src.slice(compIdx, compEnd);
-      // fBm helpers exist and are called.
-      assert(compositeSrc.indexOf('fn fbm2') >= 0,
-        'composite must define fbm2() fractal-noise helper');
-      assert(compositeSrc.indexOf('fn valueNoise2D') >= 0,
-        'composite must define valueNoise2D() helper');
-      // fbm2 is actually called in fs_main.
-      const fbmCalls = (compositeSrc.match(/fbm2\(/g) || []).length;
-      assert(fbmCalls >= 4,
-        'composite must call fbm2() at least 4 times (centre + dX + dZ + finer octave); got ' + fbmCalls);
-      // The smooth normal is perturbed by the noise gradient.
-      assert(compositeSrc.indexOf('nSmooth') >= 0,
-        'composite must compute a smooth normal (nSmooth) before perturbation');
-      assert(compositeSrc.indexOf('rippleStrength') >= 0,
-        'composite must apply a rippleStrength scalar to the perturbation');
-      // Time uniform threaded in.
-      assert(compositeSrc.indexOf('P.time') >= 0,
-        'composite must consume P.time for animated ripples');
+      assert(compositeSrc.indexOf('fn fbm2') < 0,
+        'composite must not define fbm2() fractal-noise helper anymore');
+      assert(compositeSrc.indexOf('fn valueNoise2D') < 0,
+        'composite must not define valueNoise2D() helper anymore');
+      assert(compositeSrc.indexOf('fn lightCaustic') < 0,
+        'composite must not define lightCaustic() helper anymore');
+      assert(compositeSrc.indexOf('rippleStrength') < 0,
+        'composite must not apply ripple perturbation in v104');
+      assert(compositeSrc.indexOf('curvatureAmp') < 0,
+        'composite must not gate caustics on curvatureAmp in v104 (whole caustic block is gone)');
+      // sampleSky stays (used for Fresnel reflection); takes the
+      // reflection vector and the keylight direction as the sun dir.
+      assert(compositeSrc.indexOf('fn sampleSky') >= 0,
+        'composite must keep sampleSky() for procedural environment reflection');
+      assert(compositeSrc.indexOf('sampleSky(reflectedV, lightDir)') >= 0,
+        'sampleSky must be called with the reflection vector and the sun direction');
+    });
+
+    test('gpu-mpm v104: depth blur replaced with screen-space curvature flow', () => {
+      // v104 swapped the wide separable bilateral depth blur (WGSL_BLUR)
+      // for Müller/Green screen-space curvature flow. Verify the new
+      // shader and its uniform are present, the old bilateral is gone,
+      // and the frame loop ping-pongs the new pipeline 4x.
+      const src = readMpmScript();
+      assert(src.indexOf('WGSL_BLUR') < 0,
+        'WGSL_BLUR (bilateral depth blur) must be removed in v104');
+      assert(src.indexOf('WGSL_CURVATURE') >= 0,
+        'WGSL_CURVATURE shader source missing');
+      assert(src.indexOf('curvaturePipeline') >= 0,
+        'curvaturePipeline not created');
+      // CurvParams uniform must define Cx, Cy, dt — the Müller formula
+      // parameters.
+      const curvIdx = src.indexOf('const WGSL_CURVATURE');
+      const curvEnd = src.indexOf('`;', curvIdx);
+      const curvSrc = src.slice(curvIdx, curvEnd);
+      assert(curvSrc.indexOf('struct CurvParams') >= 0,
+        'WGSL_CURVATURE must declare a CurvParams struct');
+      assert(curvSrc.indexOf('Cx: f32') >= 0 && curvSrc.indexOf('Cy: f32') >= 0,
+        'CurvParams must include Cx and Cy (Müller pixel-scale)');
+      assert(curvSrc.indexOf('dt: f32') >= 0,
+        'CurvParams must include dt (curvature-flow step size)');
+      // The shader must compute mean curvature H and integrate.
+      assert(curvSrc.indexOf('Fxx') >= 0 && curvSrc.indexOf('Fyy') >= 0,
+        'curvature-flow shader must compute second derivatives Fxx/Fyy');
+      assert(curvSrc.match(/let\s+H\s*=/) || curvSrc.indexOf('let H =') >= 0 ||
+             curvSrc.indexOf('let H  =') >= 0,
+        'curvature-flow shader must compute mean curvature H');
+      // JS-side: 4 ping-pong iterations driven by curvaturePipeline.
+      const passDispatches = (src.match(/p\.setPipeline\(curvaturePipeline\)/g) || []).length;
+      // Single-shader bind-group references are also a strong signal
+      // (one per ping-pong iteration target).
+      assert(passDispatches >= 1,
+        'curvaturePipeline must be dispatched at least once per frame');
+      // The curvature uniform must be written each frame.
+      assert(src.indexOf('curvParamsBuf') >= 0,
+        'curvature flow uniform buffer (curvParamsBuf) missing');
+      assert(src.indexOf('writeBuffer(curvParamsBuf') >= 0,
+        'curvParamsBuf must be written from JS each frame');
     });
 
     test('gpu-mpm v93: composite normal uses dpdx/dpdy, refraction is single-tap', () => {

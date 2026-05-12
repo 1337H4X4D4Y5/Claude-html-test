@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v103</span>
+    <span class="tag">v104</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v103 perf: cs_clearGrid + cs_grid 3D-dispatched only over the box's active cell range — saves ~80% of cell-kernel thread invocations (cubic grid is mostly empty around the iPhone-aspect box).</div>
+  <div class="desc">MLS-MPM on the GPU. v104 rendering: chasing the NVIDIA GDC 2010 SSF deck — screen-space curvature flow replaces the wide bilateral depth blur (Müller/Green), and fBm noise + procedural caustics + bloom are all stripped. Procedural sky with a sun disk drives Fresnel reflection.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

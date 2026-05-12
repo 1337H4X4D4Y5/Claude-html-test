@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v103 (2026-05-11 — active-cell dispatch (5x fewer cell-kernel threads))';
+const APP_VERSION = 'mpm-v104 (2026-05-12 — NVIDIA SSF: curvature-flow depth, stripped fBm/caustics/bloom, sun-disk sky for Fresnel)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1077,8 +1077,22 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 }
 `;
 
-const WGSL_BLUR = `
+// v104: replaced the wide separable bilateral depth blur with screen-space
+// curvature flow (Müller 2007 / Green NVIDIA GDC 2010). One iteration moves
+// each linearized depth sample along the surface normal toward its mean-
+// curvature centre — smooths jitter without flattening crests, troughs, or
+// the silhouette. Ping-ponged 4 times in the frame loop. Vastly cheaper
+// than the v103 R=32 bilateral (9 reads/iter × 4 iters = 36 reads, vs
+// 4 passes × 65 reads = 260 reads) AND it preserves real surface features
+// the bilateral smeared into "dimples."
+const WGSL_CURVATURE = `
+struct CurvParams {
+  resolutionX: f32, resolutionY: f32, Cx: f32, Cy: f32,
+  near: f32, far: f32, dt: f32, _pad: f32,
+};
+
 @group(0) @binding(0) var srcDepth: texture_depth_2d;
+@group(0) @binding(1) var<uniform> P: CurvParams;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -1088,44 +1102,63 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
   return vec4<f32>(p[vi], 0.0, 1.0);
 }
 
-fn blur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
-  let center = textureLoad(srcDepth, coord, 0);
-  if (center >= 0.99999) { return 1.0; }
-  // v80: R 20 -> 26 + depthThresh 0.025 -> 0.05 (anti-dimple).
-  // v96: R 26 -> 32 + depthThresh 0.05 -> 0.07 — wall-adjacent particle
-  // columns showed residual per-particle bumps because the bilateral
-  // didn't reach far enough INTO the fluid mass at the silhouette edge.
-  // (v102 tried R=24 sigma=200; reverted at v103 — user reported FPS
-  // regression in the sample but it was likely gyro/scene variance, the
-  // change was logically a small win. Reverted for safety.)
-  let R: i32 = 32;
-  let depthThresh: f32 = 0.07;
-  let sigma2_inv: f32 = 1.0 / 340.0;
-  var sum: f32 = center;
-  var totalW: f32 = 1.0;
-  for (var i: i32 = 1; i <= R; i = i + 1) {
-    let w = exp(-f32(i * i) * sigma2_inv);
-    let cR = coord + dir * i;
-    let sR = textureLoad(srcDepth, cR, 0);
-    if (sR < 0.99999 && abs(sR - center) < depthThresh) {
-      sum = sum + sR * w; totalW = totalW + w;
-    }
-    let cL = coord - dir * i;
-    let sL = textureLoad(srcDepth, cL, 0);
-    if (sL < 0.99999 && abs(sL - center) < depthThresh) {
-      sum = sum + sL * w; totalW = totalW + w;
-    }
-  }
-  return sum / totalW;
+fn linearizeNDC(zn: f32) -> f32 {
+  return P.near * P.far / (zn * (P.far - P.near) - P.far);
+}
+
+fn neighborView(coord: vec2<i32>, center: f32) -> f32 {
+  let zr = textureLoad(srcDepth, coord, 0);
+  if (zr >= 0.99999) { return center; }
+  return linearizeNDC(zr);
 }
 
 @fragment
-fn fs_h(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
-  return blur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(1, 0));
-}
-@fragment
-fn fs_v(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
-  return blur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(0, 1));
+fn fs_main(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
+  let coord = vec2<i32>(i32(frag.x), i32(frag.y));
+  let zN = textureLoad(srcDepth, coord, 0);
+  if (zN >= 0.99999) { return 1.0; }
+
+  let z = linearizeNDC(zN);
+
+  // 8-tap neighborhood, linearized to view-space. Silhouette = clamp to
+  // centre (one-sided extrapolation — standard SSF curvature-flow trick).
+  let zL  = neighborView(coord + vec2<i32>(-1,  0), z);
+  let zR  = neighborView(coord + vec2<i32>( 1,  0), z);
+  let zU  = neighborView(coord + vec2<i32>( 0, -1), z);
+  let zD  = neighborView(coord + vec2<i32>( 0,  1), z);
+  let zLU = neighborView(coord + vec2<i32>(-1, -1), z);
+  let zRU = neighborView(coord + vec2<i32>( 1, -1), z);
+  let zLD = neighborView(coord + vec2<i32>(-1,  1), z);
+  let zRD = neighborView(coord + vec2<i32>( 1,  1), z);
+
+  // Pixel-space derivatives (Cx, Cy supply the physical scale).
+  let Fx  = 0.5 * (zR - zL);
+  let Fy  = 0.5 * (zD - zU);
+  let Fxx = zR - 2.0 * z + zL;
+  let Fyy = zD - 2.0 * z + zU;
+
+  // Müller's screen-space mean-curvature formula.
+  //   D   = Cy² Fx² + Cx² Fy² + Cx²Cy² z²
+  //   Dx  = 2 Cy² Fx Fxx + 2 Cx²Cy² z Fx
+  //   Dy  = 2 Cx² Fy Fyy + 2 Cx²Cy² z Fy
+  //   2H  = (Cy Fxx · D − ½ Cy Fx · Dx + Cx Fyy · D − ½ Cx Fy · Dy) / D^(3/2)
+  // ∂z/∂t = H, integrated with explicit Euler at step dt.
+  let Cx  = P.Cx;
+  let Cy  = P.Cy;
+  let Cx2 = Cx * Cx;
+  let Cy2 = Cy * Cy;
+  let CC2 = Cx2 * Cy2;
+  let D   = Cy2 * Fx * Fx + Cx2 * Fy * Fy + CC2 * z * z;
+  let Dx  = 2.0 * Cy2 * Fx * Fxx + 2.0 * CC2 * z * Fx;
+  let Dy  = 2.0 * Cx2 * Fy * Fyy + 2.0 * CC2 * z * Fy;
+  let H   = (Cy * Fxx * D - 0.5 * Cy * Fx * Dx
+           + Cx * Fyy * D - 0.5 * Cx * Fy * Dy) / max(1e-6, pow(D, 1.5));
+
+  let zNew = z + P.dt * H;
+
+  // View-space → NDC.   z_ndc = far/(far−near) + (near·far)/((far−near)·z_view)
+  let zOut = P.far / (P.far - P.near) + (P.near * P.far) / ((P.far - P.near) * zNew);
+  return clamp(zOut, 0.0, 0.99998);
 }
 `;
 
@@ -1206,88 +1239,27 @@ fn viewPosFromDepth(fragXY: vec2<f32>, depth: f32) -> vec3<f32> {
   return vec3<f32>(viewX, viewY, viewZ);
 }
 
-// v79: fractal noise for fine surface detail. The SSF rendering pipeline
-// can only express features at scales the bilateral blur preserves — too
-// coarse for water ripples. We add a procedural fBm (fractal Brownian
-// motion) field whose gradient perturbs the surface normal at render
-// time. Visually equivalent to a much higher-resolution simulation grid
-// but at near-zero cost; the ripples are animated, not just static
-// detail.
-fn hash21(p: vec2<f32>) -> f32 {
-  let h = dot(p, vec2<f32>(127.1, 311.7));
-  return fract(sin(h) * 43758.5453);
-}
-fn valueNoise2D(p: vec2<f32>) -> f32 {
-  let i = floor(p);
-  let f = fract(p);
-  let a = hash21(i);
-  let b = hash21(i + vec2<f32>(1.0, 0.0));
-  let c = hash21(i + vec2<f32>(0.0, 1.0));
-  let d = hash21(i + vec2<f32>(1.0, 1.0));
-  let u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-// v93 perf: 4 -> 2 octaves. fbm2 is called many times per pixel (once
-// for ripple gradient + 4 calls in lightCaustic = 5 evaluations per
-// fragment, each previously running 4 noise samples = 20 valueNoise2D
-// per pixel). Two octaves drops that to 10 samples per pixel. The
-// resulting noise is slightly less rich but the surface ripples + caustic
-// lines still look fine — high-frequency detail is masked anyway by the
-// fragment-scale resolution of the SSF surface.
-fn fbm2(p: vec2<f32>, t: f32) -> f32 {
-  var v: f32 = 0.0;
-  var amp: f32 = 0.6;
-  var pos: vec2<f32> = p + vec2<f32>(t * 0.20, t * 0.13);
-  for (var i: i32 = 0; i < 2; i = i + 1) {
-    v = v + amp * valueNoise2D(pos);
-    pos = pos * 2.13 + vec2<f32>(1.7, 5.3);
-    amp = amp * 0.5;
-  }
-  return v;
-}
-
-// v87: projected light caustics, rewritten. Previous version computed
-// sin(q.x + q.y) which produces diagonal stripes — wrong. Real
-// caustics are the LEVEL SET of a smooth field: the curves where some
-// smoothly-varying quantity equals a constant. Through fBm noise, the
-// 0.5-level-set is a tangle of wavy bright curves that intersect at
-// bright nodes — exactly the underwater pool-floor look.
-//
-//   1. Iteratively warp UV space so the noise flows like turbulent water.
-//   2. Sample fBm (4 octaves) at the warped UV.
-//   3. Distance-to-0.5 gives the caustic "skeleton".
-//   4. Animated by P.time drift inside fbm2.
-fn lightCaustic(p: vec2<f32>, t: f32) -> f32 {
-  var q = p;
-  // Two warp iterations — different freqs/phases per axis so the warp
-  // is anisotropic and the resulting caustic isn't grid-aligned.
-  q = vec2<f32>(
-    q.x + sin(q.y * 1.5 + t * 0.41) * 0.40,
-    q.y + cos(q.x * 1.7 + t * 0.53) * 0.40,
-  );
-  q = vec2<f32>(
-    q.x + sin(q.y * 2.7 + t * 0.31) * 0.22,
-    q.y + cos(q.x * 2.9 + t * 0.37) * 0.22,
-  );
-  // Sample the multi-octave noise. fbm2 already animates with t internally.
-  let n = fbm2(q * 0.55, t * 0.25);
-  // Two level sets at 0.5 and 0.62 — gives doubled-up caustic curves
-  // that look like real sunlight on a pool floor.
-  let l1 = 1.0 - smoothstep(0.0, 0.05, abs(n - 0.50));
-  let l2 = 1.0 - smoothstep(0.0, 0.04, abs(n - 0.62));
-  return clamp(l1 + l2 * 0.6, 0.0, 1.0);
-}
-
-// Procedural three-stop sky gradient (view-space Y). Used by the Fresnel
-// reflection on the water surface so the highlight roll-off looks like
-// the room reflected in real water instead of a constant blue rim.
-fn sampleSky(dir: vec3<f32>) -> vec3<f32> {
-  let zenith  = vec3<f32>(0.55, 0.72, 1.00);
-  let horizon = vec3<f32>(0.45, 0.58, 0.78);
-  let ground  = vec3<f32>(0.10, 0.14, 0.22);
-  let downT = smoothstep(-0.4, 0.0, dir.y);
-  let upT   = smoothstep( 0.0, 0.6, dir.y);
-  return mix(ground, mix(horizon, zenith, upT), downT);
+// v104: procedural sky environment — acts as the cubemap the NVIDIA
+// SSF deck samples with the reflection vector. Three-stop vertical
+// gradient (ground → horizon → zenith) plus a sun disk + glow in the
+// keylight direction, so Fresnel highlights read as "reflected sun on
+// water" instead of a flat blue rim. Everything is procedural, no
+// texture upload, ALU is cheap.
+fn sampleSky(dir: vec3<f32>, sunDir: vec3<f32>) -> vec3<f32> {
+  let zenith  = vec3<f32>(0.45, 0.65, 0.95);
+  let horizon = vec3<f32>(0.78, 0.85, 0.95);
+  let ground  = vec3<f32>(0.16, 0.18, 0.22);
+  let dn = normalize(dir);
+  let downT = smoothstep(-0.35, 0.0,  dn.y);
+  let upT   = smoothstep( 0.0,  0.55, dn.y);
+  var col = mix(ground, mix(horizon, zenith, upT), downT);
+  // Sun disk + soft halo in the (reflected) sun direction.
+  let sunDot = max(0.0, dot(dn, normalize(sunDir)));
+  let sunCore = smoothstep(0.9965, 1.0, sunDot);
+  let sunGlow = pow(sunDot, 90.0);
+  col = col + sunCore * vec3<f32>(2.6, 2.3, 1.8)
+            + sunGlow * vec3<f32>(0.55, 0.48, 0.38);
+  return col;
 }
 
 @fragment
@@ -1299,60 +1271,21 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   }
 
   let viewPos = viewPosFromDepth(frag.xy, depth);
-  // v93: revert v76's 5-tap normal back to dpdx/dpdy. The 5-tap version
-  // saved silhouette quality at the cost of 4 extra depth textureLoads
-  // per fluid pixel. With the wider v80 bilateral blur (R=26, depthThresh
-  // 0.05) the depth field is smooth enough that dpdx/dpdy normals look
-  // fine, and the v89 thinClamp masks Fresnel/spec at silhouettes anyway.
-  let nSmooth = normalize(cross(dpdy(viewPos), dpdx(viewPos)));
-
-  // v79: fractal ripple perturbation. Sample fBm at horizontal (X,Z) of
-  // the surface point, take the gradient via finite differences, project
-  // onto the tangent plane of nSmooth, and add to the normal. Two octaves
-  // mixed at different scales = surface looks like it has both broad
-  // swells and fine wavelets, animated continuously.
-  let noiseUV = vec2<f32>(viewPos.x, -viewPos.z) * 22.0;
-  let t = P.time;
-  let fC = fbm2(noiseUV, t * 0.4);
-  let fX = fbm2(noiseUV + vec2<f32>(0.5, 0.0), t * 0.4);
-  let fZ = fbm2(noiseUV + vec2<f32>(0.0, 0.5), t * 0.4);
-  // 2nd octave at higher frequency for fine ripple detail.
-  let hC = fbm2(noiseUV * 3.7 + vec2<f32>(11.0, 7.0), t * 0.7);
-  let hX = fbm2(noiseUV * 3.7 + vec2<f32>(11.5, 7.0), t * 0.7);
-  let hZ = fbm2(noiseUV * 3.7 + vec2<f32>(11.0, 7.5), t * 0.7);
-  let gX = (fX - fC) * 1.0 + (hX - hC) * 0.5;
-  let gZ = (fZ - fC) * 1.0 + (hZ - hC) * 0.5;
-  // Tangent-plane perturbation. Build a tangent basis around nSmooth so
-  // the ripple lies in the actual surface (not a fixed world plane),
-  // which keeps the effect coherent on tilted/wavy surfaces.
-  let upWorld = vec3<f32>(0.0, 1.0, 0.0);
-  let tBase = normalize(cross(nSmooth, upWorld) + vec3<f32>(0.0001, 0.0, 0.0));
-  let bBase = cross(nSmooth, tBase);
-  // v88: 0.45 -> 0.18. The previous strength let the normal swing ±30°,
-  // which made Fresnel + specular flicker per pixel; the bloom V blur
-  // then smeared those flickers into vertical streaks (the "shimmer"
-  // artifact the user reported). Smaller perturbation gives finer
-  // ripples without flicker.
-  let rippleStrength = 0.18;
-  let n = normalize(nSmooth + (tBase * gX + bBase * gZ) * rippleStrength);
+  // v104: curvature-flow-smoothed depth means dpdx/dpdy already gives a
+  // clean normal — no procedural ripple needed. The geometry IS the
+  // surface detail.
+  let n = normalize(cross(dpdy(viewPos), dpdx(viewPos)));
 
   let viewDir = -normalize(viewPos);
   let lightDir = normalize(vec3<f32>(P.lightDirX, P.lightDirY, P.lightDirZ));
   let halfDir = normalize(viewDir + lightDir);
 
   let diffuse = max(0.0, dot(n, lightDir));
-  // v76: tighter, brighter Blinn-Phong specular for the wet glass look.
   let spec = pow(max(0.0, dot(n, halfDir)), 160.0);
   let nv = max(0.0, dot(n, viewDir));
-  // v76: pow 4 -> pow 5. Real water has a near-mirror-like rim at very
-  // grazing angles; sharper falloff makes the surface read as wet glass.
   let fresnel = pow(1.0 - nv, 5.0);
 
-  // Beer's law absorption from the blurred thickness texture (v73).
-  // v101 perf: thickness is now half-res; sample at coord/2. Nearest
-  // upsample is fine since thickness is gaussian-blurred (the highest-
-  // frequency detail of the half-res signal is already below the
-  // canvas-pixel scale).
+  // Beer-Lambert absorption from blurred thickness (half-res, nearest up).
   let thicknessRaw = textureLoad(thicknessTex, coord / 2, 0).r;
   let thickness = thicknessRaw * P.thicknessScale;
   let absorption = vec3<f32>(
@@ -1361,50 +1294,21 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     exp(-P.absorptionB * thickness)
   );
 
-  // v89: dampen the Fresnel + specular at thin water. v88 cured most
-  // shimmer but the fluid silhouette still produced bright icicle
-  // streaks because the wavy top edge has glancing-angle pixels that
-  // fire Fresnel + spec → bloom V-blur smears them downward. Tying
-  // both to thinClamp (= 0 at zero thickness, 1 at full body)
-  // gracefully fades the highlights at the silhouette.
+  // Thin-water mask: silhouette pixels have ≈ 0 thickness, would otherwise
+  // fire glancing-angle Fresnel/spec.
   let thinClamp = clamp(thicknessRaw * 4.0, 0.0, 1.0);
   let fresnelMasked = fresnel * thinClamp;
   let specMasked    = spec    * thinClamp;
 
-  // v93 perf: dropped chromatic refraction (was 3 backgroundTex samples,
-  // now 1). The prismatic fringe was subtle at chroma=0.025 anyway, and
-  // 3 -> 1 texture reads is a meaningful per-pixel saving on a large
-  // canvas. Refraction warp still scaled by thinClamp so thin water at
-  // the silhouette doesn't yank the lookup off-screen.
+  // Single-tap refraction; warp the background sample by the projected
+  // normal scaled by thinClamp so the silhouette doesn't yank off-screen.
   let strength = P.refractStrength * thinClamp;
   let resMax = vec2<i32>(i32(P.resolutionX) - 1, i32(P.resolutionY) - 1);
   let warp = vec2<i32>(i32(n.x * strength), i32(-n.y * strength));
   let bgCoord = clamp(coord + warp, vec2<i32>(0), resMax);
-  var bg = textureLoad(backgroundTex, bgCoord, 0).rgb;
+  let bg = textureLoad(backgroundTex, bgCoord, 0).rgb;
 
-  // v97: caustics now driven BY the surface, not just procedural texture.
-  // Compute local curvature from dpdx/dpdy of nSmooth — high curvature
-  // means the surface is bending light strongly, low means flat (no
-  // caustics on calm water). Multiply the procedural pattern by this
-  // curvatureAmp so the lightCaustic shape only shows up where the
-  // actual water surface is focusing rays.
-
-  // Curvature → "is light focusing here?" gate
-  let dnx = dpdx(nSmooth);
-  let dny = dpdy(nSmooth);
-  let curvature = length(dnx) + length(dny);
-  let curvatureAmp = clamp(curvature * 12.0, 0.0, 1.0);
-
-  // Procedural pattern → "what shape does the caustic take?"
-  let causticUV = vec2<f32>(viewPos.x, -viewPos.z) * 6.0;
-  let lc = lightCaustic(causticUV, P.time);
-  let causticColor = vec3<f32>(0.55, 0.50, 0.38);
-  // v97: gate the caustic by actual surface curvature — flat water gets
-  // no caustic, wavy water gets the full pattern at curvature peaks.
-  bg = bg + lc * curvatureAmp * causticColor;
-
-  // Body model (v60+): uniform-opacity lerp between absorbed background
-  // and lit baseColor, so baseColor keeps its hue at any thickness.
+  // Body: lerp absorbed background → lit base colour by opacity.
   let baseColor = vec3<f32>(P.baseColorR, P.baseColorG, P.baseColorB);
   let litBase = baseColor * (0.30 + 0.70 * diffuse);
   let avgAbsorb = (absorption.r + absorption.g + absorption.b) * (1.0 / 3.0);
@@ -1412,14 +1316,14 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let absorbedBg = bg * absorption;
   let transmitted = mix(absorbedBg, litBase, opacity);
 
-  // Sky reflection sampled by reflected view ray.
+  // Environment reflection (Fresnel). Procedural sky cubemap, sampled
+  // by the reflected view direction. Sun direction shares the keylight
+  // so the Fresnel highlight reads as a real sun reflection.
   let reflectedV = reflect(-viewDir, n);
-  let sky = sampleSky(reflectedV);
+  let sky = sampleSky(reflectedV, lightDir);
 
-  // v89: use the thinClamp-masked Fresnel and spec so silhouette pixels
-  // (thin water at the wavy top edge) no longer fire bright highlights
-  // that the bloom V-blur smears into downward "icicle" streaks.
-  let outColor = mix(transmitted, sky, fresnelMasked) + vec3<f32>(1.0, 0.97, 0.92) * specMasked * 0.95;
+  let outColor = mix(transmitted, sky, fresnelMasked)
+               + vec3<f32>(1.0, 0.97, 0.92) * specMasked * 0.95;
   return vec4<f32>(outColor, 1.0);
 }
 `;
@@ -1463,114 +1367,11 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 }
 `;
 
-// v81: bloom post-process. Bright pixels (specular glints, sky-reflected
-// highlights) get extracted to a side texture, blurred with a wide
-// gaussian, then added back onto the canvas with controllable intensity.
-// The result is a cinematic sparkle on the wet surface; the cost is
-// 4 small full-screen passes per frame.
-const WGSL_BLOOM = `
-struct BloomParams {
-  threshold: f32,
-  intensity: f32,
-  _pad0: f32,
-  _pad1: f32,
-};
-
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> P: BloomParams;
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
-  var p = array<vec2<f32>, 3>(
-    vec2<f32>(-1.0, -1.0), vec2<f32>( 3.0, -1.0), vec2<f32>(-1.0,  3.0)
-  );
-  return vec4<f32>(p[vi], 0.0, 1.0);
-}
-
-// Soft-knee bright extract: only pixels whose luminance exceeds
-// P.threshold contribute, and the contribution rises quadratically with
-// the excess so very-bright highlights bloom much harder than mildly
-// bright ones (matches real-world bloom from camera optics).
-// v84: bright extract reads 2x2 source pixels and averages, since the
-// target texture is half-res. Each half-res pixel summarises 4 full-res
-// pixels — cheap, mildly anti-aliased downsample.
-@fragment
-fn fs_bright(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-  let coord = vec2<i32>(i32(frag.x) * 2, i32(frag.y) * 2);
-  let c00 = textureLoad(src, coord, 0).rgb;
-  let c10 = textureLoad(src, coord + vec2<i32>(1, 0), 0).rgb;
-  let c01 = textureLoad(src, coord + vec2<i32>(0, 1), 0).rgb;
-  let c11 = textureLoad(src, coord + vec2<i32>(1, 1), 0).rgb;
-  let c = (c00 + c10 + c01 + c11) * 0.25;
-  let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-  let excess = max(0.0, lum - P.threshold);
-  let weight = excess * excess / (lum + 0.001);
-  return vec4<f32>(c * weight, 1.0);
-}
-
-// Separable gaussian blur for the bloom texture. R=12 sigma=6 gives a
-// soft glow that spans 25 pixels — enough for visible bloom without
-// being so wide it crosses the screen.
-fn bloomBlur1D(coord: vec2<i32>, dir: vec2<i32>) -> vec3<f32> {
-  let R: i32 = 12;
-  let sigma2_inv: f32 = 1.0 / 50.0;
-  var sum: vec3<f32> = textureLoad(src, coord, 0).rgb;
-  var totalW: f32 = 1.0;
-  for (var i: i32 = 1; i <= R; i = i + 1) {
-    let w = exp(-f32(i * i) * sigma2_inv);
-    let l = textureLoad(src, coord - dir * i, 0).rgb;
-    let r = textureLoad(src, coord + dir * i, 0).rgb;
-    sum = sum + (l + r) * w;
-    totalW = totalW + 2.0 * w;
-  }
-  return sum / totalW;
-}
-
-@fragment
-fn fs_blurH(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-  let c = bloomBlur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(1, 0));
-  return vec4<f32>(c, 1.0);
-}
-@fragment
-fn fs_blurV(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-  let c = bloomBlur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(0, 1));
-  return vec4<f32>(c, 1.0);
-}
-`;
-
-// v81: final combine — reads the un-bloomed composite and the bloomed
-// bright pixels, adds them on the canvas. Intensity-scaled so the user
-// can dial bloom strength without rebuilding the pipeline.
-const WGSL_COMBINE = `
-struct BloomParams {
-  threshold: f32,
-  intensity: f32,
-  _pad0: f32,
-  _pad1: f32,
-};
-
-@group(0) @binding(0) var compositeTex: texture_2d<f32>;
-@group(0) @binding(1) var bloomTex: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> P: BloomParams;
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
-  var p = array<vec2<f32>, 3>(
-    vec2<f32>(-1.0, -1.0), vec2<f32>( 3.0, -1.0), vec2<f32>(-1.0,  3.0)
-  );
-  return vec4<f32>(p[vi], 0.0, 1.0);
-}
-
-@fragment
-fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-  let coord = vec2<i32>(i32(frag.x), i32(frag.y));
-  let c = textureLoad(compositeTex, coord, 0).rgb;
-  // v84: bloom is half-resolution. Read with nearest upsample (coord/2);
-  // the bloom signal is already blurred so nearest is visually fine.
-  let b = textureLoad(bloomTex, coord / 2, 0).rgb;
-  return vec4<f32>(c + b * P.intensity, 1.0);
-}
-`;
+// v104: bloom post-process removed. The NVIDIA SSF reference deck does
+// not bloom — it relies on Fresnel + cubemap reflection + tight specular
+// to sell the wet-glass look. Removing bloom saves 4 full-screen passes
+// per frame and stops the V-blur smearing silhouette flicker into
+// vertical streaks.
 
 // v86: translucent glass-wall panels rendered between the tile backdrop
 // and the wireframe edges. Gives the box VISIBLE side walls instead of
@@ -1835,21 +1636,23 @@ async function initAndRun() {
     ],
   });
 
-  const blurModule = device.createShaderModule({ code: WGSL_BLUR });
-  const blurH = device.createRenderPipeline({
+  // v104: screen-space curvature flow replaces the wide separable bilateral
+  // depth blur. Single non-separable pipeline, ping-ponged 4 times.
+  const curvatureModule = device.createShaderModule({ code: WGSL_CURVATURE });
+  const curvaturePipeline = device.createRenderPipeline({
     layout: 'auto',
-    vertex: { module: blurModule, entryPoint: 'vs_main' },
-    fragment: { module: blurModule, entryPoint: 'fs_h', targets: [] },
+    vertex: { module: curvatureModule, entryPoint: 'vs_main' },
+    fragment: { module: curvatureModule, entryPoint: 'fs_main', targets: [] },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'always' },
   });
-  const blurV = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: { module: blurModule, entryPoint: 'vs_main' },
-    fragment: { module: blurModule, entryPoint: 'fs_v', targets: [] },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
-    depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'always' },
+  // CurvParams: resX, resY, Cx, Cy, near, far, dt, _pad (32 bytes / 8 floats).
+  const CURV_PARAMS_SIZE = 32;
+  const curvParamsBuf = device.createBuffer({
+    size: CURV_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
+  const curvBufScratch = new Float32Array(CURV_PARAMS_SIZE / 4);
 
   // v73: separable colour blur for the r16float thickness texture.
   const thicknessBlurModule = device.createShaderModule({ code: WGSL_THICKNESS_BLUR });
@@ -1874,49 +1677,8 @@ async function initAndRun() {
     primitive: { topology: 'triangle-list', cullMode: 'none' },
   });
 
-  // v81: bloom post-process pipelines.
-  const bloomModule = device.createShaderModule({ code: WGSL_BLOOM });
-  const bloomBrightPipeline = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: { module: bloomModule, entryPoint: 'vs_main' },
-    fragment: { module: bloomModule, entryPoint: 'fs_bright', targets: [{ format: format }] },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
-  });
-  const bloomBlurHPipeline = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: { module: bloomModule, entryPoint: 'vs_main' },
-    fragment: { module: bloomModule, entryPoint: 'fs_blurH', targets: [{ format: format }] },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
-  });
-  const bloomBlurVPipeline = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: { module: bloomModule, entryPoint: 'vs_main' },
-    fragment: { module: bloomModule, entryPoint: 'fs_blurV', targets: [{ format: format }] },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
-  });
-  const combineModule = device.createShaderModule({ code: WGSL_COMBINE });
-  const combinePipeline = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: { module: combineModule, entryPoint: 'vs_main' },
-    fragment: { module: combineModule, entryPoint: 'fs_main', targets: [{ format: format }] },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
-  });
-  // BloomParams uniform buffer (16 bytes).
-  const BLOOM_PARAMS_SIZE = 16;
-  const bloomParamsBuf = device.createBuffer({
-    size: BLOOM_PARAMS_SIZE,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
-  // Write once — threshold and intensity are constants for now.
-  // v88: intensity 0.6 -> 0.35. Lower intensity means the V blur
-  // doesn't smear bright pixel flicker into long vertical streaks.
-  // Specular highlights still bloom visibly, just with less halo.
-  const bloomBuf = new Float32Array(BLOOM_PARAMS_SIZE / 4);
-  bloomBuf[0] = 0.7;   // threshold
-  bloomBuf[1] = 0.35;  // intensity
-  bloomBuf[2] = 0;
-  bloomBuf[3] = 0;
-  device.queue.writeBuffer(bloomParamsBuf, 0, bloomBuf);
+  // v104: bloom pipelines removed (no extract / no blur / no combine).
+  // The composite pass now renders directly to the canvas view.
 
   // v82: white-tile backdrop pipeline (no bind group; pattern is pure
   // frag-coord-based procedural).
@@ -2016,38 +1778,34 @@ async function initAndRun() {
     entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
   });
 
-  // Depth + thickness + background + bloom textures and ping-pong bind
-  // groups for the SSF + post-process passes.
-  let depthRaw = null, depthH = null, depthV = null;
+  // Depth + thickness + background textures and ping-pong bind groups
+  // for the SSF passes. v104 dropped the post-process bloom chain;
+  // composite renders straight to canvas.
+  let depthRaw = null, depthA = null, depthB = null;
   let thicknessTex = null, thicknessH = null, thicknessV = null;
   let backgroundTex = null;
-  // v81 bloom textures.
-  let compositeTex = null, bloomBrightTex = null, bloomBlurredTex = null;
-  let compositeBindGroup = null, blurH1 = null, blurV1 = null, blurH2 = null, blurV2 = null;
+  let compositeBindGroup = null;
+  let curv0 = null, curv1 = null, curv2 = null;
   let thickBlurHBind = null, thickBlurVBind = null, thickBlurHBind2 = null;
-  let bloomBrightBind = null, bloomBlurHBind = null, bloomBlurVBind = null, combineBind = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
     const w = canvas.width, h = canvas.height;
     if (w === lastW && h === lastH && depthRaw) return;
     if (depthRaw) depthRaw.destroy();
-    if (depthH) depthH.destroy();
-    if (depthV) depthV.destroy();
+    if (depthA) depthA.destroy();
+    if (depthB) depthB.destroy();
     if (thicknessTex) thicknessTex.destroy();
     if (thicknessH) thicknessH.destroy();
     if (thicknessV) thicknessV.destroy();
     if (backgroundTex) backgroundTex.destroy();
-    if (compositeTex) compositeTex.destroy();
-    if (bloomBrightTex) bloomBrightTex.destroy();
-    if (bloomBlurredTex) bloomBlurredTex.destroy();
     const opts = {
       size: { width: w, height: h },
       format: 'depth32float',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     };
     depthRaw = device.createTexture(opts);
-    depthH = device.createTexture(opts);
-    depthV = device.createTexture(opts);
+    depthA = device.createTexture(opts);
+    depthB = device.createTexture(opts);
     // v101 perf: thickness pipeline at half-resolution. Thickness is just
     // a scalar field that feeds Beer's-law absorption (exponential) and
     // gets gaussian-blurred anyway — the high-frequency detail of full-
@@ -2071,31 +1829,30 @@ async function initAndRun() {
       format: format,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
-    // v81: bloom pipeline targets. compositeTex holds the un-bloomed
-    // fluid composite at full canvas resolution.
-    // v84: bloomBright/BlurredTex are HALF resolution — bloom blur is
-    // wide, and running it at quarter the pixels saves ~75% of bloom
-    // cost with no perceptible quality loss (the bloom signal is
-    // already gaussian-smooth).
-    const fullOpts = {
-      size: { width: w, height: h },
-      format: format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    };
-    const halfW = Math.max(1, Math.floor(w / 2));
-    const halfH = Math.max(1, Math.floor(h / 2));
-    const halfOpts = {
-      size: { width: halfW, height: halfH },
-      format: format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    };
-    compositeTex    = device.createTexture(fullOpts);
-    bloomBrightTex  = device.createTexture(halfOpts);
-    bloomBlurredTex = device.createTexture(halfOpts);
-    blurH1 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthRaw.createView() }] });
-    blurV1 = device.createBindGroup({ layout: blurV.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthH.createView() }] });
-    blurH2 = device.createBindGroup({ layout: blurH.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthV.createView() }] });
-    blurV2 = device.createBindGroup({ layout: blurV.getBindGroupLayout(0), entries: [{ binding: 0, resource: depthH.createView() }] });
+    // v104: curvature-flow ping-pong bind groups. 4 iterations:
+    //   depthRaw → depthA → depthB → depthA → depthB
+    // Composite reads depthB.
+    curv0 = device.createBindGroup({
+      layout: curvaturePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: depthRaw.createView() },
+        { binding: 1, resource: { buffer: curvParamsBuf } },
+      ],
+    });
+    curv1 = device.createBindGroup({
+      layout: curvaturePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: depthA.createView() },
+        { binding: 1, resource: { buffer: curvParamsBuf } },
+      ],
+    });
+    curv2 = device.createBindGroup({
+      layout: curvaturePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: depthB.createView() },
+        { binding: 1, resource: { buffer: curvParamsBuf } },
+      ],
+    });
     // v73 thickness blur bind groups: raw -> thicknessH (H pass) -> thicknessV (V pass).
     // v78 adds a 2nd round: thicknessV -> thicknessH (H pass) -> thicknessV (V pass).
     thickBlurHBind = device.createBindGroup({
@@ -2113,43 +1870,10 @@ async function initAndRun() {
     compositeBindGroup = device.createBindGroup({
       layout: compositePipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: depthV.createView() },
+        { binding: 0, resource: depthB.createView() },
         { binding: 1, resource: { buffer: compositeParamsBuf } },
-        { binding: 2, resource: thicknessV.createView() },   // <-- BLURRED
+        { binding: 2, resource: thicknessV.createView() },
         { binding: 3, resource: backgroundTex.createView() },
-      ],
-    });
-    // v81 bloom pipeline bind groups.
-    bloomBrightBind = device.createBindGroup({
-      layout: bloomBrightPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: compositeTex.createView() },
-        { binding: 1, resource: { buffer: bloomParamsBuf } },
-      ],
-    });
-    bloomBlurHBind = device.createBindGroup({
-      layout: bloomBlurHPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: bloomBrightTex.createView() },
-        { binding: 1, resource: { buffer: bloomParamsBuf } },
-      ],
-    });
-    bloomBlurVBind = device.createBindGroup({
-      layout: bloomBlurVPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: bloomBlurredTex.createView() },
-        { binding: 1, resource: { buffer: bloomParamsBuf } },
-      ],
-    });
-    // Final combine: composite + bloomed bright (alternating bloomBright
-    // tex which holds the V-blur output, since we ping-pong H→bloomBlurred,
-    // V→bloomBright).
-    combineBind = device.createBindGroup({
-      layout: combinePipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: compositeTex.createView() },
-        { binding: 1, resource: bloomBrightTex.createView() },
-        { binding: 2, resource: { buffer: bloomParamsBuf } },
       ],
     });
     lastW = w; lastH = h;
@@ -2350,11 +2074,25 @@ async function initAndRun() {
     compBuf[16] = SIM_TUNE.baseColorR;
     compBuf[17] = SIM_TUNE.baseColorG;
     compBuf[18] = SIM_TUNE.baseColorB;
-    // v79: elapsed wall-clock seconds. Drives the fBm ripple animation
-    // in the composite shader. Floats to 7 digits before frame jitter
-    // shows up; we wrap at 3600 s to avoid losing precision over time.
-    compBuf[19] = (now - startT) % 3600.0;
+    // v104: slot 19 (formerly time) is unused after the v104 strip of
+    // animated noise/caustics. Kept in the layout for ABI stability.
+    compBuf[19] = 0;
     device.queue.writeBuffer(compositeParamsBuf, 0, compBuf);
+
+    // v104: curvature-flow uniform. Cx, Cy are the physical scale of one
+    // pixel at unit view-space depth (Müller 2007). dt is the explicit-
+    // Euler step; tuned so 4 iterations smooth fluid-scale noise without
+    // collapsing real surface features.
+    const curvBuf = curvBufScratch;
+    curvBuf[0] = canvas.width;
+    curvBuf[1] = canvas.height;
+    curvBuf[2] = 2.0 / (canvas.width  * (f / aspect));
+    curvBuf[3] = 2.0 / (canvas.height * f);
+    curvBuf[4] = 0.1;
+    curvBuf[5] = 100;
+    curvBuf[6] = 0.00040;
+    curvBuf[7] = 0;
+    device.queue.writeBuffer(curvParamsBuf, 0, curvBuf);
 
     const enc2 = device.createCommandEncoder();
     // Background pass (v59 + v82): procedural white-tile backdrop first,
@@ -2435,77 +2173,26 @@ async function initAndRun() {
       p.setPipeline(depthPipeline); p.setBindGroup(0, depthBindGroup);
       p.draw(6, N); p.end();
     }
-    // v78: 2 H+V rounds -> 3 (smoother surface). v80: 3 -> 4 (vs dimples).
-    // v84: back to 3 H+V. v93 perf: 3 -> 2 H+V — with the wider R=26
-    // bilateral the second round already smooths well; dropping the
-    // third saves 2 full-screen bilateral passes per frame.
-    const blurSeq = [
-      { pipe: blurH, bind: blurH1, target: depthH },
-      { pipe: blurV, bind: blurV1, target: depthV },
-      { pipe: blurH, bind: blurH2, target: depthH },
-      { pipe: blurV, bind: blurV2, target: depthV },
+    // v104: screen-space curvature flow (Green/Müller). 4 iterations
+    // ping-pong depthRaw → depthA → depthB → depthA → depthB. Each
+    // iteration moves linearized depth toward its mean-curvature centre,
+    // smoothing the surface while preserving real geometric features.
+    const curvSeq = [
+      { src: curv0, dst: depthA },
+      { src: curv1, dst: depthB },
+      { src: curv2, dst: depthA },
+      { src: curv1, dst: depthB },
     ];
-    for (const step of blurSeq) {
+    for (const step of curvSeq) {
       const p = enc2.beginRenderPass({
         colorAttachments: [],
-        depthStencilAttachment: { view: step.target.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' },
+        depthStencilAttachment: { view: step.dst.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
-      p.setPipeline(step.pipe); p.setBindGroup(0, step.bind);
+      p.setPipeline(curvaturePipeline); p.setBindGroup(0, step.src);
       p.draw(3, 1); p.end();
     }
+    // v104: composite renders straight to the canvas (no bloom chain).
     const view = ctx.getCurrentTexture().createView();
-    // v81: composite now renders to compositeTex (not the canvas) so
-    // we can run the bloom post-process on its output before final blit.
-    {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [{
-          view: compositeTex.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          loadOp: 'clear', storeOp: 'store',
-        }],
-      });
-      p.setPipeline(compositePipeline); p.setBindGroup(0, compositeBindGroup);
-      p.draw(3, 1);
-      p.end();
-    }
-    // v81 bloom pipeline:
-    //   compositeTex -> [bright extract]  -> bloomBrightTex
-    //   bloomBrightTex -> [H blur]        -> bloomBlurredTex
-    //   bloomBlurredTex -> [V blur]       -> bloomBrightTex (ping-pong)
-    //   compositeTex + bloomBrightTex -> [combine] -> canvas
-    {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [{
-          view: bloomBrightTex.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear', storeOp: 'store',
-        }],
-      });
-      p.setPipeline(bloomBrightPipeline); p.setBindGroup(0, bloomBrightBind);
-      p.draw(3, 1); p.end();
-    }
-    {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [{
-          view: bloomBlurredTex.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear', storeOp: 'store',
-        }],
-      });
-      p.setPipeline(bloomBlurHPipeline); p.setBindGroup(0, bloomBlurHBind);
-      p.draw(3, 1); p.end();
-    }
-    {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [{
-          view: bloomBrightTex.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear', storeOp: 'store',
-        }],
-      });
-      p.setPipeline(bloomBlurVPipeline); p.setBindGroup(0, bloomBlurVBind);
-      p.draw(3, 1); p.end();
-    }
     {
       const p = enc2.beginRenderPass({
         colorAttachments: [{
@@ -2514,8 +2201,9 @@ async function initAndRun() {
           loadOp: 'clear', storeOp: 'store',
         }],
       });
-      p.setPipeline(combinePipeline); p.setBindGroup(0, combineBind);
-      p.draw(3, 1); p.end();
+      p.setPipeline(compositePipeline); p.setBindGroup(0, compositeBindGroup);
+      p.draw(3, 1);
+      p.end();
     }
     device.queue.submit([enc2.finish()]);
 

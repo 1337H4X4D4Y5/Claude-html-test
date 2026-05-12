@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v129</span>
+    <span class="tag">v130</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v129: debug visualisations — one cycling chip at the bottom of the FX panel rotates through 5 viz modes (depth → normal → thickness → noise → back-depth → off). Composite short-circuits to a false-colour render of the chosen intermediate buffer, so a broken pipeline phase reveals itself visually. Persisted in localStorage like the other toggles.</div>
+  <div class="desc">MLS-MPM on the GPU. v130: gaussianOnly smoothing toggle — collapses the v110 bilateral filter to a pure Gaussian (deck slide 17-18) when on, so the user can A/B against the full bilateral (slide 19) and curvature flow (slide 19+) directly. New "Gaussian only" preset chip applies it. 5 deck-section smoothing combinations now accessible via 3 chips.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

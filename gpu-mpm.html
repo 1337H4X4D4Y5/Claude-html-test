@@ -345,6 +345,7 @@
     <button class="preset" data-preset="flow_detail">Flow detail</button>
     <button class="preset" data-preset="shadow_cast">Shadow cast</button>
     <button class="preset" data-preset="rainbow_caustics">Rainbow caustics</button>
+    <button class="preset" data-preset="gaussian_only">Gaussian only</button>
   </div>
   <div id="phases-bulk">
     <button class="bulk" data-bulk="on">All on</button>
@@ -352,6 +353,7 @@
   </div>
   <h4>Pipeline (depth → surface)</h4>
   <button class="phase" data-toggle="smoothing">Smoothing — bilateral Gauss</button>
+  <button class="phase" data-toggle="gaussianOnly">Pure Gaussian (deck-18, no range weight)</button>
   <button class="phase" data-toggle="curvatureFlow">Curvature flow</button>
   <button class="phase" data-toggle="caustics">Caustics — ray-traced sun</button>
   <button class="phase" data-toggle="chromaticCaustics">Chromatic dispersion (deck-37)</button>
@@ -414,7 +416,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v129 (2026-05-12 — debug visualisations: a single cycling chip at the bottom of the FX panel rotates through 5 viz modes (depth, normal, thickness, noise, back-depth). Composite short-circuits to a false-colour view of the chosen intermediate buffer so broken phases reveal themselves.)';
+const APP_VERSION = 'mpm-v130 (2026-05-12 — gaussianOnly toggle: collapses the bilateral filter to a pure Gaussian (deck slide 17-18) so the user can A/B against the full v110 bilateral (slide 19). New "Gaussian only" preset; 5 deck-section smoothing combinations accessible via 3 chips.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -691,6 +693,10 @@ const state = {
     chromaticCaustics: false, // v128: deck-37 chromatic dispersion —
                               //       caustic pass run 3× at slightly
                               //       different IORs (R/G/B) for rainbow.
+    gaussianOnly:      false, // v130: deck-slide-17/18 mode — when on,
+                              //       the bilateral skips the range
+                              //       weight so it's a pure Gaussian
+                              //       (no edge preservation).
   },
   // v129: debug viz cycle (integer, not a boolean). 0 = off, 1 = front
   // depth, 2 = normal, 3 = thickness, 4 = noise, 5 = back depth. Bound
@@ -724,7 +730,7 @@ const TOGGLE_PRESETS = {
   minimalist:   { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: false, refraction: true,  fresnel: true,  spec: false, iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
   caustics:     { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: false, refraction: true,  fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: true,  additiveThickness: false },
   mirror:       { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: false, fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false },
-  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false, additiveThickness: false, flowNoise: false, translucentShadow: false, chromaticCaustics: false },
+  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false, additiveThickness: false, flowNoise: false, translucentShadow: false, chromaticCaustics: false, gaussianOnly: false },
   body_only:    { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: true,  refraction: false, fresnel: false, spec: false, iblAmbient: true,  cubemapReflect: false, toneMap: true,  additiveThickness: false },
   glassy_mirror:{ smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: true,  fresnel: true,  spec: true,  iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
   // v124: deck-faithful preset — additive-sprite thickness on top of
@@ -734,13 +740,17 @@ const TOGGLE_PRESETS = {
   // v125: deck-38 surface-detail preset — flow noise on top of the
   // reference render so the user can see the noise-driven flow detail
   // immediately. Same Reference look + flowNoise = true.
-  flow_detail:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: true,  translucentShadow: false, chromaticCaustics: false },
+  flow_detail:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: true,  translucentShadow: false, chromaticCaustics: false, gaussianOnly: false },
   // v127: deck-30 translucent shadow preset — fluid casts a sun-projected
   // dark patch on the box floor. Combined with the rest of Reference.
-  shadow_cast:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: false, translucentShadow: true,  chromaticCaustics: false },
+  shadow_cast:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: false, translucentShadow: true,  chromaticCaustics: false, gaussianOnly: false },
   // v128: deck-37 chromatic-dispersion preset — fluid casts rainbow-
   // edged caustics on the floor. Combined with the rest of Reference.
-  rainbow_caustics: { smoothing: true, curvatureFlow: true, caustics: true, beerLambert: true, subsurface: true, refraction: true, fresnel: true, spec: true, iblAmbient: true, cubemapReflect: true, toneMap: true, additiveThickness: false, flowNoise: false, translucentShadow: false, chromaticCaustics: true },
+  rainbow_caustics: { smoothing: true, curvatureFlow: true, caustics: true, beerLambert: true, subsurface: true, refraction: true, fresnel: true, spec: true, iblAmbient: true, cubemapReflect: true, toneMap: true, additiveThickness: false, flowNoise: false, translucentShadow: false, chromaticCaustics: true, gaussianOnly: false },
+  // v130: deck-slide-18 preset — pure Gaussian smoothing (no bilateral,
+  // no curvature flow). Direct A/B against Reference to see how much
+  // the bilateral + curvature flow contributes vs the plain Gaussian.
+  gaussian_only: { smoothing: true, curvatureFlow: false, caustics: true, beerLambert: true, subsurface: true, refraction: true, fresnel: true, spec: true, iblAmbient: true, cubemapReflect: true, toneMap: true, additiveThickness: false, flowNoise: false, translucentShadow: false, chromaticCaustics: false, gaussianOnly: true  },
 };
 
 const DEG = Math.PI / 180;
@@ -1656,10 +1666,11 @@ const WGSL_DEPTH_BILATERAL = `
 struct BilateralParams {
   near: f32, far: f32, fAspect: f32, fVert: f32,
   resolutionX: f32, resolutionY: f32, worldSigma: f32, maxScreenRadius: f32,
-  // v121: 'enabled' is the toggle — 0 = passthrough (return source depth
-  // unmodified), 1 = run the full bilateral. Repurposes one of the
-  // pad slots so the struct size stays at 48 bytes.
-  worldRangeSigma: f32, enabled: f32, _pad1: f32, _pad2: f32,
+  // v121: 'enabled' is the toggle — 0 = passthrough, 1 = run.
+  // v130: gaussianOnly — when 1, skip the range-weight term so the
+  // filter degrades to a pure (deck slide 17-18) Gaussian. Lets the
+  // user A/B against the v110 bilateral (slide 19).
+  worldRangeSigma: f32, enabled: f32, gaussianOnly: f32, _pad2: f32,
 };
 
 @group(0) @binding(0) var srcDepth: texture_depth_2d;
@@ -1708,14 +1719,18 @@ fn bilateral1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
     // Background silhouette: explicit skip is cheaper than a near-zero
     // range weight from the huge Δview_z (depth=1 ⇒ viewZ ≈ -far).
     if (zL < 0.99999) {
+      // v130: when gaussianOnly > 0.5 the range weight collapses to 1.0
+      // — the filter is then a pure (deck-slide-18) Gaussian.
       let dz = viewZc - linearizeNDC(zL);
-      let rangeW = exp(-dz * dz * rangeSigma2_inv);
+      let rangeFull = exp(-dz * dz * rangeSigma2_inv);
+      let rangeW = mix(rangeFull, 1.0, P.gaussianOnly);
       let w = spatialW * rangeW;
       sum = sum + zL * w; totalW = totalW + w;
     }
     if (zR < 0.99999) {
       let dz = viewZc - linearizeNDC(zR);
-      let rangeW = exp(-dz * dz * rangeSigma2_inv);
+      let rangeFull = exp(-dz * dz * rangeSigma2_inv);
+      let rangeW = mix(rangeFull, 1.0, P.gaussianOnly);
       let w = spatialW * rangeW;
       sum = sum + zR * w; totalW = totalW + w;
     }
@@ -3471,7 +3486,10 @@ async function initAndRun() {
     gaussBuf[8] = 0.15;
     // v121: enabled flag (1.0 = run; 0.0 = passthrough).
     gaussBuf[9] = state.toggles.smoothing ? 1.0 : 0.0;
-    gaussBuf[10] = 0; gaussBuf[11] = 0;
+    // v130: gaussianOnly flag — when on, the bilateral collapses to
+    // a pure Gaussian (no range weight).
+    gaussBuf[10] = state.toggles.gaussianOnly ? 1.0 : 0.0;
+    gaussBuf[11] = 0;
     device.queue.writeBuffer(gaussParamsBuf, 0, gaussBuf);
 
     // v121: render-toggles uniform. One float per phase (0 = bypass,

@@ -1418,6 +1418,35 @@
         'Phases-panel toggle button must be wired in JS');
     });
 
+    test('gpu-mpm v130: gaussianOnly toggle degrades bilateral to pure Gaussian (deck-18)', () => {
+      // The deck shows a smoothing progression: pure Gaussian (slide
+      // 17-18) → bilateral (slide 19) → curvature flow (slide 19+).
+      // v130 lets the user pick *any* of these via the existing
+      // smoothing + curvatureFlow + new gaussianOnly toggles, so the
+      // pure-Gaussian deck-18 method can be A/B'd against the full stack.
+      const src = readMpmScript();
+      // BilateralParams now has the gaussianOnly field.
+      const bilIdx = src.indexOf('const WGSL_DEPTH_BILATERAL');
+      const bilEnd = src.indexOf('`;', bilIdx);
+      const bilSrc = src.slice(bilIdx, bilEnd);
+      assert(bilSrc.indexOf('gaussianOnly: f32') >= 0,
+        'BilateralParams must declare gaussianOnly: f32');
+      // Shader uses it to mix the range weight against 1.0.
+      assert(bilSrc.match(/mix\(\s*rangeFull\s*,\s*1\.0\s*,\s*P\.gaussianOnly\s*\)/) !== null,
+        'shader must mix(rangeFull, 1.0, P.gaussianOnly) so the toggle collapses range to identity');
+      // State + uniform write.
+      assert(src.indexOf('gaussianOnly:') >= 0,
+        'state.toggles.gaussianOnly must exist');
+      assert(src.indexOf('gaussBuf[10] = state.toggles.gaussianOnly') >= 0,
+        'frame loop must write gaussBuf[10] = state.toggles.gaussianOnly');
+      // UI chip + preset.
+      const html = readMpmHtml();
+      assert(html.indexOf('data-toggle="gaussianOnly"') >= 0,
+        'UI must include a touch button with data-toggle="gaussianOnly"');
+      assert(html.indexOf('data-preset="gaussian_only"') >= 0,
+        'UI must include a "Gaussian only" preset chip');
+    });
+
     test('gpu-mpm v129: debug visualisation cycle (5 viz modes)', () => {
       // A single cycling chip in the FX panel that selects which
       // intermediate buffer the composite should output as colour
@@ -1915,11 +1944,12 @@
         'shader must declare worldRangeSigma in the uniform struct');
       assert(shader.indexOf('rangeSigma2_inv') >= 0,
         'shader must compute the range-weight reciprocal sigma²');
-      // The range weight must multiply the spatial weight to form the
-      // bilateral sample weight.
-      assert(shader.match(/let\s+rangeW\s*=\s*exp\(/) !== null ||
-             shader.match(/rangeW\s*=\s*exp\(/) !== null,
-        'shader must compute a range-weight via exp(-Δz² × rangeSigma2_inv)');
+      // The range weight must be computed via exp(-Δz² × rangeSigma2_inv).
+      // v130 renames the local from rangeW → rangeFull (the bilateral
+      // raw weight) before mixing against 1.0 to support the v130
+      // gaussianOnly toggle; the exp() call is identical.
+      assert(shader.match(/(rangeFull|rangeW)\s*=\s*exp\(/) !== null,
+        'shader must compute the range weight via exp(-Δz² × rangeSigma2_inv)');
       assert(shader.match(/spatialW\s*\*\s*rangeW/) !== null,
         'final sample weight must be spatialW * rangeW (bilateral product)');
       // Bilateral uniform must be 48 bytes (12 floats including pads).

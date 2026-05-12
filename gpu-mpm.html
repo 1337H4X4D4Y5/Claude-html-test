@@ -330,6 +330,7 @@
     <button class="preset" data-preset="deck_thickness">Deck thickness</button>
     <button class="preset" data-preset="flow_detail">Flow detail</button>
     <button class="preset" data-preset="shadow_cast">Shadow cast</button>
+    <button class="preset" data-preset="rainbow_caustics">Rainbow caustics</button>
   </div>
   <div id="phases-bulk">
     <button class="bulk" data-bulk="on">All on</button>
@@ -339,6 +340,7 @@
   <button class="phase" data-toggle="smoothing">Smoothing — bilateral Gauss</button>
   <button class="phase" data-toggle="curvatureFlow">Curvature flow</button>
   <button class="phase" data-toggle="caustics">Caustics — ray-traced sun</button>
+  <button class="phase" data-toggle="chromaticCaustics">Chromatic dispersion (deck-37)</button>
   <button class="phase" data-toggle="additiveThickness">Additive thickness (deck-25)</button>
   <button class="phase" data-toggle="flowNoise">Flow noise (deck-38)</button>
   <button class="phase" data-toggle="translucentShadow">Translucent shadow (deck-30)</button>
@@ -396,7 +398,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v127 (2026-05-12 — deck-30 translucent shadows: fluid sphere imposters rendered from sun POV → light depth map → backdrop projects floor pixels into light NDC and attenuates the tile colour where sun rays traverse fluid. Tap "Translucent shadow (deck-30)" or "Shadow cast" preset.)';
+const APP_VERSION = 'mpm-v128 (2026-05-12 — deck-37 chromatic-dispersion caustics: 3 caustic passes per frame at slightly different IORs (R=1.323, G=1.333, B=1.348) with R/G/B-only tints. Where IOR-divergence spreads the refracted rays, rainbow fringes emerge. Tap "Chromatic dispersion (deck-37)" or "Rainbow caustics" preset.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -670,6 +672,9 @@ const state = {
                               //       sampled at particle world centres.
     translucentShadow: false, // v127: deck-30 shadow on the floor cast
                               //       by fluid sampled from the sun's POV.
+    chromaticCaustics: false, // v128: deck-37 chromatic dispersion —
+                              //       caustic pass run 3× at slightly
+                              //       different IORs (R/G/B) for rainbow.
   },
 };
 (function loadTogglesFromStorage() {
@@ -688,7 +693,7 @@ const TOGGLE_PRESETS = {
   minimalist:   { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: false, refraction: true,  fresnel: true,  spec: false, iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
   caustics:     { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: false, refraction: true,  fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: true,  additiveThickness: false },
   mirror:       { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: false, fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false },
-  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false, additiveThickness: false, flowNoise: false, translucentShadow: false },
+  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false, additiveThickness: false, flowNoise: false, translucentShadow: false, chromaticCaustics: false },
   body_only:    { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: true,  refraction: false, fresnel: false, spec: false, iblAmbient: true,  cubemapReflect: false, toneMap: true,  additiveThickness: false },
   glassy_mirror:{ smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: true,  fresnel: true,  spec: true,  iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
   // v124: deck-faithful preset — additive-sprite thickness on top of
@@ -698,10 +703,13 @@ const TOGGLE_PRESETS = {
   // v125: deck-38 surface-detail preset — flow noise on top of the
   // reference render so the user can see the noise-driven flow detail
   // immediately. Same Reference look + flowNoise = true.
-  flow_detail:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: true,  translucentShadow: false },
+  flow_detail:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: true,  translucentShadow: false, chromaticCaustics: false },
   // v127: deck-30 translucent shadow preset — fluid casts a sun-projected
   // dark patch on the box floor. Combined with the rest of Reference.
-  shadow_cast:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: false, translucentShadow: true  },
+  shadow_cast:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: false, translucentShadow: true,  chromaticCaustics: false },
+  // v128: deck-37 chromatic-dispersion preset — fluid casts rainbow-
+  // edged caustics on the floor. Combined with the rest of Reference.
+  rainbow_caustics: { smoothing: true, curvatureFlow: true, caustics: true, beerLambert: true, subsurface: true, refraction: true, fresnel: true, spec: true, iblAmbient: true, cubemapReflect: true, toneMap: true, additiveThickness: false, flowNoise: false, translucentShadow: false, chromaticCaustics: true },
 };
 
 const DEG = Math.PI / 180;
@@ -1785,7 +1793,11 @@ struct CausticParams {
   resolutionX: f32, resolutionY: f32, sourceGridN: f32, splatRadius: f32,
   lightDirX: f32, lightDirY: f32, lightDirZ: f32, refractRatio: f32,
   boxHalfX: f32, boxHalfY: f32, boxHalfZ: f32, fitD: f32,
-  splatIntensity: f32, _pad0: f32, _pad1: f32, _pad2: f32,
+  // v128: tintR/G/B replace the previously-hardcoded warm sunny tint
+  // (1.0, 0.95, 0.72). Lets a single shader run 3× per frame with
+  // R-only / G-only / B-only tints at slightly different refractRatios
+  // for chromatic-dispersion caustics (deck slide 37).
+  splatIntensity: f32, tintR: f32, tintG: f32, tintB: f32,
 };
 
 @group(0) @binding(0) var srcDepth: texture_depth_2d;
@@ -1900,9 +1912,12 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
   let falloff = (1.0 - r2);
   let f2 = falloff * falloff;
   let g = f2 * in.intensity;
-  // Warm sunny tint (R > G > B) so caustics read as "focused sunlight,"
-  // additively brightening the tile pattern beneath.
-  return vec4<f32>(g, g * 0.95, g * 0.72, 0.0);
+  // v128: tint comes from the uniform (CausticParams.tintR/G/B). The
+  // single-IOR mode uses a warm sunny tint (1.0, 0.95, 0.72); the
+  // chromatic-dispersion mode runs the shader 3× with isolated R/G/B
+  // tints at slightly different refractRatios, summing into rainbow
+  // caustics where IOR-divergence spreads the refracted rays.
+  return vec4<f32>(g * P.tintR, g * P.tintG, g * P.tintB, 0.0);
 }
 `;
 
@@ -2704,11 +2719,15 @@ async function initAndRun() {
   });
   // CausticParams: 20 floats / 80 bytes.
   const CAUSTIC_PARAMS_SIZE = 80;
-  const causticParamsBuf = device.createBuffer({
-    size: CAUSTIC_PARAMS_SIZE,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
-  const causticBufScratch = new Float32Array(CAUSTIC_PARAMS_SIZE / 4);
+  // v128: three caustic uniform buffers — one per colour channel for
+  // chromatic-dispersion mode. The single-IOR mode (chromaticCaustics
+  // off) just uses the R buffer.
+  const causticParamsBufR = device.createBuffer({ size: CAUSTIC_PARAMS_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const causticParamsBufG = device.createBuffer({ size: CAUSTIC_PARAMS_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const causticParamsBufB = device.createBuffer({ size: CAUSTIC_PARAMS_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const causticBufScratchR = new Float32Array(CAUSTIC_PARAMS_SIZE / 4);
+  const causticBufScratchG = new Float32Array(CAUSTIC_PARAMS_SIZE / 4);
+  const causticBufScratchB = new Float32Array(CAUSTIC_PARAMS_SIZE / 4);
   // 96×96 source-grid samples = 9216 splats per frame. Sparse enough
   // to keep VS cost low (each instance does ~5 depth reads), dense
   // enough that adjacent refracted rays overlap on the floor so the
@@ -2971,7 +2990,7 @@ async function initAndRun() {
   let backgroundTex = null;
   let compositeBindGroup = null;
   let curv0 = null, curv1 = null, curv2 = null;
-  let causticBindGroup = null;
+  let causticBindGroupR = null, causticBindGroupG = null, causticBindGroupB = null;
   let gaussRawToA = null, gaussAToB = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
@@ -3071,11 +3090,28 @@ async function initAndRun() {
     });
     // v108: caustic pass reads the curvature-flowed depth (depthB) to
     // recover the smooth surface that focuses the light.
-    causticBindGroup = device.createBindGroup({
+    // v128: three bind groups, one per colour channel for chromatic-
+    // dispersion mode. Each reuses depthB but points to its own
+    // CausticParams buffer.
+    causticBindGroupR = device.createBindGroup({
       layout: causticPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: depthB.createView() },
-        { binding: 1, resource: { buffer: causticParamsBuf } },
+        { binding: 1, resource: { buffer: causticParamsBufR } },
+      ],
+    });
+    causticBindGroupG = device.createBindGroup({
+      layout: causticPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: depthB.createView() },
+        { binding: 1, resource: { buffer: causticParamsBufG } },
+      ],
+    });
+    causticBindGroupB = device.createBindGroup({
+      layout: causticPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: depthB.createView() },
+        { binding: 1, resource: { buffer: causticParamsBufB } },
       ],
     });
     // v109: Gaussian depth pre-smooth bind groups.
@@ -3455,26 +3491,45 @@ async function initAndRun() {
     for (let i = 0; i < 16; i++) bdBuf[12 + i] = lightVP[i];
     device.queue.writeBuffer(backdropParamsBuf, 0, bdBuf);
 
-    // v108: caustic-pass uniform. Sun direction shares the composite
-    // keylight so the focused light comes from the same place the
-    // Fresnel reflection sees it. refractRatio = n_air / n_water.
-    const causticBuf = causticBufScratch;
-    causticBuf[0] = 0.1; causticBuf[1] = 100;
-    causticBuf[2] = f / aspect; causticBuf[3] = f;
-    causticBuf[4] = canvas.width; causticBuf[5] = canvas.height;
-    causticBuf[6] = CAUSTIC_SOURCE_GRID_N;
-    causticBuf[7] = 0.014;                 // NDC splat radius
-    causticBuf[8]  = Lv[0] / Llen;
-    causticBuf[9]  = Lv[1] / Llen;
-    causticBuf[10] = Lv[2] / Llen;
-    causticBuf[11] = 1.0 / 1.33;           // air → water IOR ratio
-    causticBuf[12] = BOX_HALF_X;
-    causticBuf[13] = BOX_HALF_Y;
-    causticBuf[14] = BOX_HALF_Z;
-    causticBuf[15] = CAM_FIT_D;
-    causticBuf[16] = 0.045;                // per-splat intensity
-    causticBuf[17] = 0; causticBuf[18] = 0; causticBuf[19] = 0;
-    device.queue.writeBuffer(causticParamsBuf, 0, causticBuf);
+    // v108/v128: caustic-pass uniforms. Single-IOR mode (default) writes
+    // only the R buffer with a warm sunny tint (1.0, 0.95, 0.72) and the
+    // physical 1.33 IOR. Chromatic mode (slide 37) writes all 3 buffers
+    // with per-channel tints and slightly-different IORs so each of
+    // R/G/B refracts differently → rainbow caustic fringes where rays
+    // diverge.
+    function fillCausticBuf(buf, refractRatio, tintR, tintG, tintB, intensity) {
+      buf[0] = 0.1; buf[1] = 100;
+      buf[2] = f / aspect; buf[3] = f;
+      buf[4] = canvas.width; buf[5] = canvas.height;
+      buf[6] = CAUSTIC_SOURCE_GRID_N;
+      buf[7] = 0.014;
+      buf[8]  = Lv[0] / Llen;
+      buf[9]  = Lv[1] / Llen;
+      buf[10] = Lv[2] / Llen;
+      buf[11] = refractRatio;
+      buf[12] = BOX_HALF_X;
+      buf[13] = BOX_HALF_Y;
+      buf[14] = BOX_HALF_Z;
+      buf[15] = CAM_FIT_D;
+      buf[16] = intensity;
+      buf[17] = tintR; buf[18] = tintG; buf[19] = tintB;
+    }
+    if (state.toggles.chromaticCaustics) {
+      // n_R / n_G / n_B for water taken as 1.323 / 1.333 / 1.348 — the
+      // physical Abbe-number spread is much smaller (~1.328-1.337),
+      // exaggerated here so the dispersion reads visibly. Intensity
+      // halved per channel since we'll sum 3 passes.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.323, 1.0, 0.0, 0.0, 0.025);
+      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.025);
+      fillCausticBuf(causticBufScratchB, 1.0 / 1.348, 0.0, 0.0, 1.0, 0.025);
+      device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
+      device.queue.writeBuffer(causticParamsBufG, 0, causticBufScratchG);
+      device.queue.writeBuffer(causticParamsBufB, 0, causticBufScratchB);
+    } else {
+      // Single warm-sunny pass — original v108 behaviour.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.045);
+      device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
+    }
 
     const enc2 = device.createCommandEncoder();
     // v127: deck-30 light-space depth pass — renders fluid sphere
@@ -3657,8 +3712,18 @@ async function initAndRun() {
           loadOp: 'load', storeOp: 'store',
         }],
       });
-      p.setPipeline(causticPipeline); p.setBindGroup(0, causticBindGroup);
+      p.setPipeline(causticPipeline);
+      // v128: chromatic mode dispatches 3 caustic passes (R/G/B) each
+      // with a slightly different refractRatio + isolated channel tint.
+      // Single mode dispatches just the R buffer with the warm tint.
+      p.setBindGroup(0, causticBindGroupR);
       p.draw(6, CAUSTIC_SOURCE_GRID_N * CAUSTIC_SOURCE_GRID_N);
+      if (state.toggles.chromaticCaustics) {
+        p.setBindGroup(0, causticBindGroupG);
+        p.draw(6, CAUSTIC_SOURCE_GRID_N * CAUSTIC_SOURCE_GRID_N);
+        p.setBindGroup(0, causticBindGroupB);
+        p.draw(6, CAUSTIC_SOURCE_GRID_N * CAUSTIC_SOURCE_GRID_N);
+      }
       p.end();
     }
     // v104: composite renders straight to the canvas (no bloom chain).

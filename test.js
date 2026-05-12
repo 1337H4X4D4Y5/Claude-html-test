@@ -1418,6 +1418,46 @@
         'Phases-panel toggle button must be wired in JS');
     });
 
+    test('gpu-mpm v128: deck-37 chromatic-dispersion caustics (3 passes, R/G/B IORs)', () => {
+      // Slide 37: "Can perform multiple times with different indices of
+      // refraction to simulate refractive dispersion (R, G, B)." Three
+      // caustic uniform buffers + three bind groups so the same shader
+      // dispatches at three slightly-different refractRatios with
+      // R-/G-/B-only tints. Where rays converge cleanly the sum is
+      // white; where IOR-divergence spreads them, rainbow fringes.
+      const src = readMpmScript();
+      // Shader uniform must carry per-channel tint fields.
+      const cIdx = src.indexOf('struct CausticParams');
+      const cEnd = src.indexOf('};', cIdx);
+      const csrc = src.slice(cIdx, cEnd);
+      assert(csrc.indexOf('tintR') >= 0 && csrc.indexOf('tintG') >= 0 && csrc.indexOf('tintB') >= 0,
+        'CausticParams must declare tintR/tintG/tintB fields');
+      // Fragment shader must consume the per-channel tints.
+      const causticStart = src.indexOf('const WGSL_CAUSTIC');
+      const causticEnd = src.indexOf('`;', causticStart);
+      const shaderSrc = src.slice(causticStart, causticEnd);
+      assert(shaderSrc.match(/g\s*\*\s*P\.tintR/) !== null,
+        'caustic fragment must multiply by P.tintR (and G/B) for chromatic mode');
+      // Three uniform buffers + three bind groups.
+      assert(src.indexOf('causticParamsBufR') >= 0 &&
+             src.indexOf('causticParamsBufG') >= 0 &&
+             src.indexOf('causticParamsBufB') >= 0,
+        'three caustic uniform buffers (causticParamsBufR/G/B) must exist');
+      assert(src.indexOf('causticBindGroupR') >= 0 &&
+             src.indexOf('causticBindGroupG') >= 0 &&
+             src.indexOf('causticBindGroupB') >= 0,
+        'three caustic bind groups (causticBindGroupR/G/B) must exist');
+      // JS toggle + dispatch.
+      assert(src.indexOf('state.toggles.chromaticCaustics') >= 0,
+        'chromaticCaustics toggle must drive the chromatic dispatch path');
+      // UI.
+      const html = readMpmHtml();
+      assert(html.indexOf('data-toggle="chromaticCaustics"') >= 0,
+        'UI must include a touch button with data-toggle="chromaticCaustics"');
+      assert(html.indexOf('data-preset="rainbow_caustics"') >= 0,
+        'UI must include a "Rainbow caustics" preset chip');
+    });
+
     test('gpu-mpm v127: deck-30 translucent shadow pipeline + backdrop projection', () => {
       // Per slide 30: render fluid from sun's POV → light depth map →
       // backdrop projects floor pixels into light NDC, attenuates the
@@ -2324,10 +2364,19 @@
       // succeed (not TIR), and the resulting ray should go downward
       // so it can hit the floor.
       const src = readMpmScript();
-      const ratioMatch = src.match(/causticBuf\[11\]\s*=\s*([0-9.\s/]+?);/);
-      assert(ratioMatch, 'caustic refract ratio not found');
-      // Eval as JS to handle "1.0 / 1.33" form.
-      const ratio = eval(ratioMatch[1]);
+      // v128 refactored the caustic uniform write into a fillCausticBuf
+      // helper; the refractRatio is now passed as a function argument
+      // (e.g. `1.0 / 1.333`). Match either the legacy direct assignment
+      // or the function-call form.
+      let ratio;
+      const directMatch = src.match(/causticBuf\[11\]\s*=\s*([0-9.\s/]+?);/);
+      if (directMatch) {
+        ratio = eval(directMatch[1]);
+      } else {
+        const fillMatch = src.match(/fillCausticBuf\([^,]+,\s*([0-9.\s/]+?)\s*,/);
+        assert(fillMatch, 'caustic refract ratio not found');
+        ratio = eval(fillMatch[1]);
+      }
       const sunDir = [0.35, 0.80, 0.50]; // matches the JS in gpu-mpm.html
       const sl = Math.hypot(...sunDir);
       const sunN = sunDir.map(x => x / sl);

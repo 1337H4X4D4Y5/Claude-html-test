@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v127</span>
+    <span class="tag">v128</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v127: deck-30 translucent shadows — fluid sphere imposters rendered from the sun's POV into a light-space depth texture; the backdrop ray-traces each floor pixel back into light NDC and attenuates the tile colour where the sun's path would have to traverse fluid. Tap the new "Translucent shadow (deck-30)" chip or "Shadow cast" preset. Builds on v126 FX button fix.</div>
+  <div class="desc">MLS-MPM on the GPU. v128: deck-37 chromatic-dispersion caustics — three caustic passes per frame at slightly different IORs (1.323 / 1.333 / 1.348 for R/G/B) with isolated channel tints. Where rays converge cleanly the sum is white; where IOR-divergence spreads them, rainbow fringes appear at the caustic edges. Tap "Chromatic dispersion (deck-37)" chip or "Rainbow caustics" preset.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

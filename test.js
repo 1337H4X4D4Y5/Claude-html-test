@@ -993,19 +993,32 @@
         'COMPOSITE_PARAMS_SIZE must be 80 bytes (got ' + sizeMatch[1] + ')');
     });
 
-    test('gpu-mpm v53: thickness pass shader + pipeline + frame draw wired', () => {
+    test('gpu-mpm v107: back-face depth pass shader + pipeline + frame draw wired', () => {
+      // v107 replaces the v53 additive-thickness pass with a back-face
+      // depth pass. Same particle imposter but writes the FAR sphere
+      // intersection; depthCompare='greater' + clearValue=0.0 keeps the
+      // farthest fragment per pixel. Composite reads it to compute
+      // physical view-space path length.
       const src = readMpmScript();
-      assert(src.indexOf('WGSL_THICKNESS') >= 0, 'WGSL_THICKNESS shader source missing');
-      assert(src.indexOf('thicknessPipeline') >= 0, 'thicknessPipeline not created');
-      assert(src.indexOf('thicknessBindGroup') >= 0, 'thicknessBindGroup not created');
-      assert(src.indexOf('thicknessTex') >= 0, 'thicknessTex texture missing');
-      // Frame loop must draw the thickness pass (one draw call with N instances).
-      // Heuristic: pipeline set + a draw(6, N) following it.
-      const setIdx = src.indexOf('p.setPipeline(thicknessPipeline)');
-      assert(setIdx >= 0, 'thicknessPipeline never bound in a render pass');
+      assert(src.indexOf('WGSL_BACK_DEPTH') >= 0, 'WGSL_BACK_DEPTH shader source missing');
+      assert(src.indexOf('backDepthPipeline') >= 0, 'backDepthPipeline not created');
+      assert(src.indexOf('backDepthBindGroup') >= 0, 'backDepthBindGroup not created');
+      assert(src.indexOf('backDepthTex') >= 0, 'backDepthTex texture missing');
+      // Pipeline must use depthCompare='greater'.
+      const pipeIdx = src.indexOf('backDepthPipeline = device.createRenderPipeline');
+      const pipeSlice = src.slice(pipeIdx, pipeIdx + 600);
+      assert(pipeSlice.indexOf("depthCompare: 'greater'") >= 0,
+        "backDepthPipeline must set depthCompare: 'greater' (keep the farthest fragment)");
+      // Frame loop must draw the back-depth pass with depthClearValue: 0.0
+      // and draw(6, N) — same instance count as the front-depth pass.
+      const setIdx = src.indexOf('p.setPipeline(backDepthPipeline)');
+      assert(setIdx >= 0, 'backDepthPipeline never bound in a render pass');
+      const before = src.slice(Math.max(0, setIdx - 400), setIdx);
+      assert(before.indexOf('depthClearValue: 0.0') >= 0,
+        'back-depth render pass must clear to depth=0.0 so depthCompare=greater works');
       const after = src.slice(setIdx, setIdx + 200);
       assert(after.indexOf('p.draw(6, N)') >= 0,
-        'thicknessPipeline render pass does not draw(6, N)');
+        'backDepthPipeline render pass does not draw(6, N)');
     });
 
     test('gpu-mpm v54: no WGSL reserved words used as let/var identifiers', () => {
@@ -1040,30 +1053,24 @@
       }
     });
 
-    test('gpu-mpm v73: thickness texture is blurred (separable H+V) before composite', () => {
-      // v53 added thickness; the composite sampled it raw. v73 inserts
-      // a 2-pass separable gaussian on the thickness texture to remove
-      // per-cell density variation that read as a grid of dimples on
-      // the surface through Beer's law.
+    test('gpu-mpm v107: thickness blur pipeline removed (back-face depth supersedes it)', () => {
+      // v107 dropped the v53 additive-thickness texture + the v73-v101
+      // separable thickness blur because two-layer depth gives a smooth
+      // view-space path length directly. Verify both are gone.
       const src = readMpmScript();
-      assert(src.indexOf('WGSL_THICKNESS_BLUR') >= 0,
-        'WGSL_THICKNESS_BLUR shader source missing');
-      assert(src.indexOf('thicknessBlurH') >= 0 && src.indexOf('thicknessBlurV') >= 0,
-        'thicknessBlurH/V pipelines not created');
-      assert(src.indexOf('thicknessH') >= 0 && src.indexOf('thicknessV') >= 0,
-        'thicknessH/thicknessV ping-pong textures not created');
-      // compositeBindGroup must sample the BLURRED thickness, not the raw one.
-      // Heuristic: the binding 2 entry of compositeBindGroup uses thicknessV.
+      assert(src.indexOf('const WGSL_THICKNESS_BLUR') < 0,
+        'const WGSL_THICKNESS_BLUR declaration should be removed in v107');
+      assert(src.match(/\bthicknessBlurH\b/) === null && src.match(/\bthicknessBlurV\b/) === null,
+        'thicknessBlurH/V pipeline objects should be removed in v107');
+      assert(src.match(/\bthicknessTex\b/) === null,
+        'thicknessTex (additive r16float texture) should be removed in v107');
+      // Composite must bind backDepthTex at the slot where it used to
+      // bind thicknessV.
       const compIdx = src.indexOf('compositePipeline.getBindGroupLayout(0)');
       assert(compIdx >= 0, 'compositeBindGroup not found');
-      const bgSlice = src.slice(compIdx, compIdx + 400);
-      assert(bgSlice.indexOf('thicknessV.createView()') >= 0,
-        'composite must sample thicknessV (blurred), not the raw thicknessTex');
-      // Frame loop must dispatch both blur passes.
-      assert(src.indexOf('p.setPipeline(thicknessBlurH)') >= 0,
-        'thicknessBlurH never dispatched in frame loop');
-      assert(src.indexOf('p.setPipeline(thicknessBlurV)') >= 0,
-        'thicknessBlurV never dispatched in frame loop');
+      const bgSlice = src.slice(compIdx, compIdx + 500);
+      assert(bgSlice.indexOf('backDepthTex.createView()') >= 0,
+        'composite must sample backDepthTex (back-face depth) in v107');
     });
 
     test('gpu-mpm v59: refraction wiring — backgroundTex pass + composite samples it', () => {
@@ -1102,22 +1109,27 @@
         'renderBuf[23] (alphaScale, used by thickness pass) must be > 0, got ' + v);
     });
 
-    test('gpu-mpm v53: composite shader uses thickness + Beer\'s law + sky reflection', () => {
+    test('gpu-mpm v107: composite uses Beer-Lambert on two-layer view-space path length + cubemap Fresnel', () => {
       const src = readMpmScript();
       // Pull the WGSL_COMPOSITE template literal body.
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
       assert(compIdx >= 0, 'WGSL_COMPOSITE source not found');
       const compEnd = src.indexOf('`;', compIdx);
       const compositeSrc = src.slice(compIdx, compEnd);
-      assert(compositeSrc.indexOf('thicknessTex') >= 0,
-        'composite shader does not bind thicknessTex');
+      // v107: thickness is computed inline from front + back depth, no
+      // thicknessTex binding. backDepthTex is bound at slot 2.
+      assert(compositeSrc.indexOf('backDepthTex') >= 0,
+        'composite shader does not bind backDepthTex');
+      assert(compositeSrc.indexOf('thicknessTex') < 0,
+        'composite shader must no longer bind thicknessTex in v107');
+      // pathLen / pathLength expression from front-back view-space delta.
+      assert(compositeSrc.indexOf('pathLen') >= 0 || compositeSrc.indexOf('pathLength') >= 0,
+        'composite shader must compute a view-space pathLen between front and back depth');
       assert(compositeSrc.indexOf('exp(-P.absorptionR') >= 0 ||
              compositeSrc.indexOf('exp(-P.absorption') >= 0,
         'composite shader does not apply Beer law exp(-coef * thickness)');
       assert(compositeSrc.indexOf('reflect(-viewDir, n)') >= 0,
         'composite shader does not compute reflected view direction');
-      // v105: procedural sky cubemap. Composite samples a real cube
-      // texture instead of the v104 inline sampleSky() helper.
       assert(compositeSrc.indexOf('textureSampleLevel(skyCube') >= 0 ||
              compositeSrc.indexOf('textureSample(skyCube') >= 0,
         'composite shader does not sample the sky cubemap (skyCube)');

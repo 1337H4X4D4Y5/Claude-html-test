@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v106</span>
+    <span class="tag">v107</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v106: HDR sky cubemap (rgba16float, sun core ~9x brightness uncapped by 8-bit unorm so ACES tone-mapping actually has highlights to compress) + cheap subsurface-scatter glow inside the fluid body. Builds on v104's curvature-flow depth + stripped fBm/caustics/bloom and v105's 5-tap silhouette-aware normal.</div>
+  <div class="desc">MLS-MPM on the GPU. v107: two-layer thickness rendering (NVIDIA SSF deck slides 27-29) — fluid imposters rendered into front + back depth textures, composite computes Beer-Lambert path length as the view-space distance between them. Eliminates the additive-sprite thickness pass and its separable Gaussian blur entirely (3 fewer full-screen passes per frame). Builds on v106 HDR cubemap + scatter, v105 5-tap normal + ACES, v104 curvature flow.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

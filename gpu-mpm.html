@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v106 (2026-05-12 — HDR sky cubemap (rgba16float), subsurface scatter glow)';
+const APP_VERSION = 'mpm-v107 (2026-05-12 — two-layer thickness rendering: back-face depth pass, view-space path length, no additive sprites or thickness blur)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1024,20 +1024,22 @@ fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
 }
 `;
 
-// v53: thickness pass. Same billboard vertex layout as the depth pass, but
-// the fragment writes a smooth falloff value to a single-channel color
-// target with additive blending. The accumulated total per pixel is a
-// view-ray integrated "thickness" of fluid in front of the camera —
-// exactly the quantity Beer's law (the composite shader) needs to tint
-// water by depth (deep parts darker / more blue, shallow parts clearer).
-// v78: the thickness imposter is 1.6x the size of the depth imposter so
-// neighbouring particles' colour contributions overlap heavily even with
-// a small depth radius. Depth keeps finer detail, thickness stays smooth.
-const WGSL_THICKNESS = `
+// v107: two-layer thickness rendering, the canonical NVIDIA SSF deck
+// technique (slides 27-29). Mirror of WGSL_DEPTH but writes the FAR
+// sphere-imposter intersection (viewZcenter - r*sqrt(1-r²) instead of
+// + r*sqrt(...)). Combined with depthCompare='greater' and an init
+// clear of 0.0, this captures the FARTHEST fluid surface in view per
+// pixel. Composite then computes per-pixel view-ray thickness as the
+// distance between linearized front and back depth — physically the
+// path length light traverses through the fluid mass, no additive-
+// sprite approximation, no per-cell density bumps to blur away.
+const WGSL_BACK_DEPTH = `
 struct RenderParams {
   viewProj: mat4x4<f32>,
-  cameraRight: vec3<f32>, particleSize: f32,
-  cameraUp: vec3<f32>, alphaScale: f32,
+  cameraRight: vec3<f32>,
+  particleSize: f32,
+  cameraUp: vec3<f32>,
+  alphaScale: f32,
 };
 
 @group(0) @binding(0) var<storage, read> pos: array<vec4<f32>>;
@@ -1057,8 +1059,7 @@ fn vs_main(@builtin(vertex_index) vi: u32,
   );
   let q = quad[vi];
   let center = pos[ii].xyz;
-  // v78: 1.6x larger than the depth imposter — wider color overlap.
-  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * (R.particleSize * 1.6);
+  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * R.particleSize;
   var out: VOut;
   out.position = R.viewProj * vec4<f32>(wp, 1.0);
   out.uv = q;
@@ -1066,16 +1067,27 @@ fn vs_main(@builtin(vertex_index) vi: u32,
 }
 
 @fragment
-fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
   let r2 = dot(in.uv, in.uv);
   if (r2 > 1.0) { discard; }
-  // Smooth falloff (1 - r^2). Integrated area = pi/2 per particle, so each
-  // accumulated pixel is a rough proxy for the number of particles whose
-  // imposter overlaps it weighted by closeness to centre.
-  let t = (1.0 - r2) * R.alphaScale;
-  return vec4<f32>(t, 0.0, 0.0, 0.0);
+  let viewZcenter = -1.0 / in.position.w;
+  // Back-face: subtract the sphere offset (the FAR intersection in
+  // view space). viewZ is more negative ⇒ farther from camera.
+  let viewZ = viewZcenter - R.particleSize * sqrt(1.0 - r2);
+  let near: f32 = 0.1;
+  let far: f32 = 100.0;
+  let d = -viewZ;
+  if (d <= near) { return 0.0; }
+  return (1.0 - near / d) * far / (far - near);
 }
 `;
+
+// v107: additive-sprite thickness pass (WGSL_THICKNESS) + half-res
+// thickness-blur pipeline (WGSL_THICKNESS_BLUR) removed. Both are
+// superseded by the back-face depth pass — thickness is now the
+// physical view-space distance between front and back faces, computed
+// inline in the composite shader. Net pipeline savings: 1 fewer
+// per-particle pass + 2 fewer full-screen blur passes.
 
 // v104: replaced the wide separable bilateral depth blur with screen-space
 // curvature flow (Müller 2007 / Green NVIDIA GDC 2010). One iteration moves
@@ -1162,52 +1174,6 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
 }
 `;
 
-// v73: separable gaussian blur for the r16float thickness texture. Used
-// before composite samples it, to smooth out the per-cell density
-// variation that otherwise reads as a grid of dimples through Beer's
-// law absorption. Independent of the bilateral DEPTH blur because that
-// only smooths surface position, not internal thickness.
-const WGSL_THICKNESS_BLUR = `
-@group(0) @binding(0) var src: texture_2d<f32>;
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
-  var p = array<vec2<f32>, 3>(
-    vec2<f32>(-1.0, -1.0), vec2<f32>( 3.0, -1.0), vec2<f32>(-1.0,  3.0)
-  );
-  return vec4<f32>(p[vi], 0.0, 1.0);
-}
-
-fn tblur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
-  // v80: R 14 -> 20, sigma widened. Thickness gets more aggressive
-  // smoothing to match the wider depth blur — both passes now wash out
-  // per-cell density variation at similar scale.
-  let R: i32 = 20;
-  let sigma2_inv: f32 = 1.0 / 130.0;
-  var sum: f32 = textureLoad(src, coord, 0).r;
-  var totalW: f32 = 1.0;
-  for (var i: i32 = 1; i <= R; i = i + 1) {
-    let w = exp(-f32(i * i) * sigma2_inv);
-    let sR = textureLoad(src, coord + dir * i, 0).r;
-    let sL = textureLoad(src, coord - dir * i, 0).r;
-    sum = sum + (sR + sL) * w;
-    totalW = totalW + 2.0 * w;
-  }
-  return sum / totalW;
-}
-
-@fragment
-fn fs_h(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-  let v = tblur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(1, 0));
-  return vec4<f32>(v, 0.0, 0.0, 1.0);
-}
-@fragment
-fn fs_v(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-  let v = tblur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(0, 1));
-  return vec4<f32>(v, 0.0, 0.0, 1.0);
-}
-`;
-
 const WGSL_COMPOSITE = `
 struct CompositeParams {
   near: f32, far: f32, fAspect: f32, fVert: f32,
@@ -1219,7 +1185,7 @@ struct CompositeParams {
 
 @group(0) @binding(0) var depthTex: texture_depth_2d;
 @group(0) @binding(1) var<uniform> P: CompositeParams;
-@group(0) @binding(2) var thicknessTex: texture_2d<f32>;
+@group(0) @binding(2) var backDepthTex: texture_depth_2d;
 @group(0) @binding(3) var backgroundTex: texture_2d<f32>;
 @group(0) @binding(4) var skyCube: texture_cube<f32>;
 @group(0) @binding(5) var skySampler: sampler;
@@ -1308,18 +1274,28 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let nv = max(0.0, dot(n, viewDir));
   let fresnel = pow(1.0 - nv, 5.0);
 
-  // Beer-Lambert absorption from blurred thickness (half-res, nearest up).
-  let thicknessRaw = textureLoad(thicknessTex, coord / 2, 0).r;
-  let thickness = thicknessRaw * P.thicknessScale;
+  // v107: two-layer thickness — Beer-Lambert path length is the
+  // physical view-space distance between front and back fluid faces,
+  // not an additive-sprite approximation. backDepthTex is the FARTHEST
+  // sphere-imposter intersection per pixel (depthCompare='greater').
+  // viewPos.z is the linearized FRONT depth; linearize backDepth the
+  // same way and take the difference. Both depths are in view space
+  // (negative); the back is more negative, so (front - back) is the
+  // positive path length.
+  let backDepthN = textureLoad(backDepthTex, coord, 0);
+  let backViewZ = P.near * P.far / (backDepthN * (P.far - P.near) - P.far);
+  let pathLen = max(0.0, viewPos.z - backViewZ);
+  let thickness = pathLen * P.thicknessScale;
   let absorption = vec3<f32>(
     exp(-P.absorptionR * thickness),
     exp(-P.absorptionG * thickness),
     exp(-P.absorptionB * thickness)
   );
 
-  // Thin-water mask: silhouette pixels have ≈ 0 thickness, would otherwise
-  // fire glancing-angle Fresnel/spec.
-  let thinClamp = clamp(thicknessRaw * 4.0, 0.0, 1.0);
+  // Thin-water mask: silhouette pixels have ≈ 0 path length, would
+  // otherwise fire glancing-angle Fresnel/spec. thicknessScale=1 → the
+  // raw pathLen is in view-space distance units (≈ 0..BOX_HALF_Z*2).
+  let thinClamp = clamp(pathLen * 6.0, 0.0, 1.0);
   let fresnelMasked = fresnel * thinClamp;
   let specMasked    = spec    * thinClamp;
 
@@ -1640,28 +1616,22 @@ async function initAndRun() {
     ],
   });
 
-  // v53: thickness pipeline. Same vertex shader shape as depth, fragment
-  // writes a smooth falloff to a one-channel float target with additive
-  // blending so multiple particles' imposters sum into a "thickness" map.
-  const THICKNESS_FORMAT = 'r16float';
-  const thicknessModule = device.createShaderModule({ code: WGSL_THICKNESS });
-  const thicknessPipeline = device.createRenderPipeline({
+  // v107: two-layer thickness — back-face depth pipeline. Same particle
+  // imposter, but the fragment writes the FARTHEST sphere intersection
+  // and the depth state uses depthCompare='greater' with clear=0.0 so
+  // the farthest fragment wins per pixel. Composite reads back+front
+  // depth, computes pathLength = front_view − back_view for Beer's law.
+  // The additive thickness pass + separable thickness blur are gone.
+  const backDepthModule = device.createShaderModule({ code: WGSL_BACK_DEPTH });
+  const backDepthPipeline = device.createRenderPipeline({
     layout: 'auto',
-    vertex: { module: thicknessModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: thicknessModule, entryPoint: 'fs_main',
-      targets: [{
-        format: THICKNESS_FORMAT,
-        blend: {
-          color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-        },
-      }],
-    },
+    vertex: { module: backDepthModule, entryPoint: 'vs_main' },
+    fragment: { module: backDepthModule, entryPoint: 'fs_main', targets: [] },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'greater' },
   });
-  const thicknessBindGroup = device.createBindGroup({
-    layout: thicknessPipeline.getBindGroupLayout(0),
+  const backDepthBindGroup = device.createBindGroup({
+    layout: backDepthPipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: posBuf } },
       { binding: 1, resource: { buffer: renderParamsBuf } },
@@ -1798,20 +1768,9 @@ async function initAndRun() {
     }
   })();
 
-  // v73: separable colour blur for the r16float thickness texture.
-  const thicknessBlurModule = device.createShaderModule({ code: WGSL_THICKNESS_BLUR });
-  const thicknessBlurH = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: { module: thicknessBlurModule, entryPoint: 'vs_main' },
-    fragment: { module: thicknessBlurModule, entryPoint: 'fs_h', targets: [{ format: THICKNESS_FORMAT }] },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
-  });
-  const thicknessBlurV = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: { module: thicknessBlurModule, entryPoint: 'vs_main' },
-    fragment: { module: thicknessBlurModule, entryPoint: 'fs_v', targets: [{ format: THICKNESS_FORMAT }] },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
-  });
+  // v107: thicknessBlur pipelines removed. Two-layer depth gives a
+  // smooth view-space path length directly; no separable thickness
+  // gaussian needed.
 
   const compositeModule = device.createShaderModule({ code: WGSL_COMPOSITE });
   const compositePipeline = device.createRenderPipeline({
@@ -1922,15 +1881,14 @@ async function initAndRun() {
     entries: [{ binding: 0, resource: { buffer: renderParamsBuf } }],
   });
 
-  // Depth + thickness + background textures and ping-pong bind groups
-  // for the SSF passes. v104 dropped the post-process bloom chain;
-  // composite renders straight to canvas.
+  // Front depth (curvature-flow ping-pong) + back-face depth + background
+  // textures for the SSF passes. v104 dropped the bloom chain; v107
+  // dropped the additive-thickness texture in favour of two-layer depth.
   let depthRaw = null, depthA = null, depthB = null;
-  let thicknessTex = null, thicknessH = null, thicknessV = null;
+  let backDepthTex = null;
   let backgroundTex = null;
   let compositeBindGroup = null;
   let curv0 = null, curv1 = null, curv2 = null;
-  let thickBlurHBind = null, thickBlurVBind = null, thickBlurHBind2 = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
     const w = canvas.width, h = canvas.height;
@@ -1938,9 +1896,7 @@ async function initAndRun() {
     if (depthRaw) depthRaw.destroy();
     if (depthA) depthA.destroy();
     if (depthB) depthB.destroy();
-    if (thicknessTex) thicknessTex.destroy();
-    if (thicknessH) thicknessH.destroy();
-    if (thicknessV) thicknessV.destroy();
+    if (backDepthTex) backDepthTex.destroy();
     if (backgroundTex) backgroundTex.destroy();
     const opts = {
       size: { width: w, height: h },
@@ -1950,21 +1906,12 @@ async function initAndRun() {
     depthRaw = device.createTexture(opts);
     depthA = device.createTexture(opts);
     depthB = device.createTexture(opts);
-    // v101 perf: thickness pipeline at half-resolution. Thickness is just
-    // a scalar field that feeds Beer's-law absorption (exponential) and
-    // gets gaussian-blurred anyway — the high-frequency detail of full-
-    // res is invisible after the blur. Quarter the pixel count for the
-    // thickness particle pass + its 2 blur passes.
-    const halfTW = Math.max(1, Math.floor(w / 2));
-    const halfTH = Math.max(1, Math.floor(h / 2));
-    const thicknessOpts = {
-      size: { width: halfTW, height: halfTH },
-      format: THICKNESS_FORMAT,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    };
-    thicknessTex = device.createTexture(thicknessOpts);
-    thicknessH = device.createTexture(thicknessOpts);
-    thicknessV = device.createTexture(thicknessOpts);
+    // v107: back-face depth texture — full canvas resolution, depth32float,
+    // same opts as the front depth ping-pong. Cleared to 0.0 in the
+    // back-depth render pass; depthCompare='greater' keeps the farthest
+    // sphere intersection per pixel. Composite reads it to compute view-
+    // space path length for Beer's-law absorption.
+    backDepthTex = device.createTexture(opts);
     // v59: the background texture holds the box wireframe + clear colour.
     // Rendered each frame before the fluid composite, then sampled
     // (warped by surface normal) by the composite for refraction.
@@ -1997,26 +1944,12 @@ async function initAndRun() {
         { binding: 1, resource: { buffer: curvParamsBuf } },
       ],
     });
-    // v73 thickness blur bind groups: raw -> thicknessH (H pass) -> thicknessV (V pass).
-    // v78 adds a 2nd round: thicknessV -> thicknessH (H pass) -> thicknessV (V pass).
-    thickBlurHBind = device.createBindGroup({
-      layout: thicknessBlurH.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: thicknessTex.createView() }],
-    });
-    thickBlurVBind = device.createBindGroup({
-      layout: thicknessBlurV.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: thicknessH.createView() }],
-    });
-    thickBlurHBind2 = device.createBindGroup({
-      layout: thicknessBlurH.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: thicknessV.createView() }],
-    });
     compositeBindGroup = device.createBindGroup({
       layout: compositePipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: depthB.createView() },
         { binding: 1, resource: { buffer: compositeParamsBuf } },
-        { binding: 2, resource: thicknessV.createView() },
+        { binding: 2, resource: backDepthTex.createView() },
         { binding: 3, resource: backgroundTex.createView() },
         { binding: 4, resource: skyCubeTex.createView({ dimension: 'cube' }) },
         { binding: 5, resource: skySampler },
@@ -2267,56 +2200,27 @@ async function initAndRun() {
       p.setVertexBuffer(0, cubeEdgeBuf); p.draw(24, 1);
       p.end();
     }
-    // Thickness (additive). Each particle adds a soft falloff disc into
-    // the thickness target; total per pixel is the view-ray fluid mass
-    // sampled by the Beer's-law branch of the composite shader.
-    {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [{
-          view: thicknessTex.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear', storeOp: 'store',
-        }],
-      });
-      p.setPipeline(thicknessPipeline); p.setBindGroup(0, thicknessBindGroup);
-      p.draw(6, N); p.end();
-    }
-    // v73: blur the thickness texture. Horizontal then vertical, both
-    // gaussian — kills the per-cell density bumps that Beer's law was
-    // amplifying into a visible dimple grid.
-    // v78 added a 2nd H+V round to match a wider thickness imposter.
-    // v84 drops back to 1 round (R=20, sigma~11) — the wider radius
-    // (v80) already does the smoothing the second round was redundantly
-    // doing, ~50% cheaper thickness blur.
-    {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [{
-          view: thicknessH.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear', storeOp: 'store',
-        }],
-      });
-      p.setPipeline(thicknessBlurH); p.setBindGroup(0, thickBlurHBind);
-      p.draw(3, 1); p.end();
-    }
-    {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [{
-          view: thicknessV.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear', storeOp: 'store',
-        }],
-      });
-      p.setPipeline(thicknessBlurV); p.setBindGroup(0, thickBlurVBind);
-      p.draw(3, 1); p.end();
-    }
-    // Depth.
+    // v107: front-face depth pass — closest fluid surface per pixel.
     {
       const p = enc2.beginRenderPass({
         colorAttachments: [],
         depthStencilAttachment: { view: depthRaw.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
       p.setPipeline(depthPipeline); p.setBindGroup(0, depthBindGroup);
+      p.draw(6, N); p.end();
+    }
+    // v107: back-face depth pass — farthest fluid surface per pixel.
+    // Clears to 0.0 + depthCompare='greater' so the FARTHEST sphere
+    // intersection wins. Composite computes view-ray path length as
+    // linearize(depthRaw) − linearize(backDepth) for Beer-Lambert
+    // absorption. Replaces the v53 additive-sprite thickness + the
+    // v73-v101 separable thickness blur (3 fewer passes per frame).
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [],
+        depthStencilAttachment: { view: backDepthTex.createView(), depthClearValue: 0.0, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      p.setPipeline(backDepthPipeline); p.setBindGroup(0, backDepthBindGroup);
       p.draw(6, N); p.end();
     }
     // v104: screen-space curvature flow (Green/Müller). 4 iterations

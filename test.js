@@ -793,14 +793,17 @@
         jsAssigns.push({ idx: parseInt(m[1], 10), expr: m[2].trim() });
       }
       jsAssigns.sort((a, b) => a.idx - b.idx);
-      // v60: 16 -> 20 slots. boxHalf scalar replaced with vec3 (boxHalfX/Y/Z)
-      // + gridHalf. Total uniform 64B -> 80B.
+      // v60: 16 -> 20 slots (boxHalf vec3 + gridHalf, 64B -> 80B).
+      // v103: 20 -> 28 slots (cellMinX/Y/Z + cellRangeX/Y/Z + 2 pad,
+      // 80B -> 112B) for active-cell dispatch.
       const expectedOrder = [
         'gravity', 'gravity', 'gravity', 'dt',
         'boxHalfX', 'boxHalfY', 'boxHalfZ', 'gridHalf',
         'cellSize', 'invCellSize', 'fixedPoint', 'particleMass',
         'velDamping', 'restitution', 'pressureK', 'restDensity',
-        'maxAccel', 'wallFriction', 'viscosity', '_pad',
+        'maxAccel', 'wallFriction', 'viscosity', '_pad0',
+        'cellMinX', 'cellMinY', 'cellMinZ', 'cellRangeX',
+        'cellRangeY', 'cellRangeZ', '_padA', '_padB',
       ];
       assert(jsAssigns.length === expectedOrder.length,
         'expected ' + expectedOrder.length + ' simBuf assigns, got ' + jsAssigns.length);
@@ -811,7 +814,9 @@
         'boxHalfX', 'boxHalfY', 'boxHalfZ', 'gridHalf',
         'cellSize', 'invCellSize', 'fixedPoint', 'particleMass',
         'velDamping', 'restitution', 'pressureK', 'restDensity',
-        'maxAccel', 'wallFriction', 'viscosity',
+        'maxAccel', 'wallFriction', 'viscosity', '_pad0',
+        'cellMinX', 'cellMinY', 'cellMinZ', 'cellRangeX',
+        'cellRangeY', 'cellRangeZ', '_padA', '_padB',
       ];
       assert(wgslOrder.length === expectedWgsl.length,
         'WGSL struct has ' + wgslOrder.length + ' fields, expected ' + expectedWgsl.length);

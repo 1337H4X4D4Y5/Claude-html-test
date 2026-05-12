@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v102 (2026-05-11 — depth bilateral R 32->24 (proportional to v100 DPR reduction))';
+const APP_VERSION = 'mpm-v103 (2026-05-11 — active-cell dispatch (5x fewer cell-kernel threads))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -331,6 +331,31 @@ function recomputeBoxDerived() {
   CELL_SIZE = (2 * GRID_HALF) / GRID_SIZE;
   FILL_VOLUME = 4 * BOX_HALF_X * BOX_HALF_Y * BOX_HALF_Z;
   _natRho = N * 1.0 / FILL_VOLUME;
+}
+
+// v103: compute the box's AABB in cell-index space + a safety margin
+// for P2G's 3x3x3 scatter. cs_clearGrid + cs_grid will only dispatch
+// over this range — saves ~80% of cell-kernel threads when the box
+// occupies a small fraction of the cubic grid.
+let CELL_MIN_X = 0, CELL_MIN_Y = 0, CELL_MIN_Z = 0;
+let CELL_RANGE_X = GRID_SIZE, CELL_RANGE_Y = GRID_SIZE, CELL_RANGE_Z = GRID_SIZE;
+function recomputeActiveCellRange() {
+  const margin = 3;   // cells of safety for P2G scatter
+  function rangeAxis(boxHalf) {
+    const minF = (GRID_HALF - boxHalf) / CELL_SIZE - margin;
+    const maxF = (GRID_HALF + boxHalf) / CELL_SIZE + margin;
+    return {
+      min: Math.max(0, Math.floor(minF)),
+      max: Math.min(GRID_SIZE - 1, Math.ceil(maxF)),
+    };
+  }
+  const x = rangeAxis(BOX_HALF_X);
+  const y = rangeAxis(BOX_HALF_Y);
+  const z = rangeAxis(BOX_HALF_Z);
+  CELL_MIN_X = x.min; CELL_MIN_Y = y.min; CELL_MIN_Z = z.min;
+  CELL_RANGE_X = x.max - x.min + 1;
+  CELL_RANGE_Y = y.max - y.min + 1;
+  CELL_RANGE_Z = z.max - z.min + 1;
 }
 
 // v51: fluid styles. Each preset overrides the live-tunable subset of
@@ -648,6 +673,15 @@ struct SimParams {
   maxAccel: f32,
   wallFriction: f32,
   viscosity: f32,
+  _pad0: f32,
+  cellMinX: f32,
+  cellMinY: f32,
+  cellMinZ: f32,
+  cellRangeX: f32,
+  cellRangeY: f32,
+  cellRangeZ: f32,
+  _padA: f32,
+  _padB: f32,
 };
 
 const N: u32 = ${N}u;
@@ -704,11 +738,20 @@ fn samplePressure(ix: i32, iy: i32, iz: i32) -> f32 {
   return P.pressureK * (r / P.restDensity - 1.0);
 }
 
-@compute @workgroup_size(64)
+// v103: dispatch only over the box's active cell range. The cubic 64^3
+// grid is mostly empty (box only fills ~20%); empty-cell threads used
+// to early-return but still cost scheduling. cellMinX/Y/Z + cellRange*
+// in SimParams describe the box AABB in cell space; we 3D-dispatch
+// (ceil(rangeX/4), ceil(rangeY/4), ceil(rangeZ/4)) workgroups with
+// 4x4x4 threads = 64 invocations each, matching the previous total.
+@compute @workgroup_size(4, 4, 4)
 fn cs_clearGrid(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
-  if (i >= NUM_CELLS) { return; }
-  let b = i * 4u;
+  if (gid.x >= u32(P.cellRangeX) || gid.y >= u32(P.cellRangeY) || gid.z >= u32(P.cellRangeZ)) { return; }
+  let ix = gid.x + u32(P.cellMinX);
+  let iy = gid.y + u32(P.cellMinY);
+  let iz = gid.z + u32(P.cellMinZ);
+  let ci = cellIndex(ix, iy, iz);
+  let b = ci * 4u;
   atomicStore(&grid[b + 0u], 0);
   atomicStore(&grid[b + 1u], 0);
   atomicStore(&grid[b + 2u], 0);
@@ -766,10 +809,16 @@ fn cs_p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 }
 
-@compute @workgroup_size(64)
+// v103: 3D dispatch over box's active cell range (see cs_clearGrid).
+// Workgroup_size (4,4,4) = 64 threads; bounds check filters tail
+// invocations from non-multiple-of-4 ranges.
+@compute @workgroup_size(4, 4, 4)
 fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let ci = gid.x;
-  if (ci >= NUM_CELLS) { return; }
+  if (gid.x >= u32(P.cellRangeX) || gid.y >= u32(P.cellRangeY) || gid.z >= u32(P.cellRangeZ)) { return; }
+  let ix = gid.x + u32(P.cellMinX);
+  let iy = gid.y + u32(P.cellMinY);
+  let iz = gid.z + u32(P.cellMinZ);
+  let ci = cellIndex(ix, iy, iz);
   let b = ci * 4u;
   let invS = 1.0 / P.fixedPoint;
   let mass = f32(atomicLoad(&grid[b + 0u])) * invS;
@@ -782,11 +831,6 @@ fn cs_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     f32(atomicLoad(&grid[b + 2u])) * invS,
     f32(atomicLoad(&grid[b + 3u])) * invS
   ) / mass;
-  // Cell coordinates for neighbour lookups.
-  let iz = ci / (GRID_SIZE * GRID_SIZE);
-  let rem = ci - iz * GRID_SIZE * GRID_SIZE;
-  let iy = rem / GRID_SIZE;
-  let ix = rem - iy * GRID_SIZE;
 
   // Gravity (body force).
   v = v + P.gravity * P.dt;
@@ -1051,12 +1095,12 @@ fn blur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
   // v96: R 26 -> 32 + depthThresh 0.05 -> 0.07 — wall-adjacent particle
   // columns showed residual per-particle bumps because the bilateral
   // didn't reach far enough INTO the fluid mass at the silhouette edge.
-  // v102 perf: v100 dropped DPR cap 2 -> 1.5, so the kernel now covers
-  // the SAME world-space area at R=24 that it did at R=32 before.
-  // ~25% fewer samples per pixel per pass at identical visual coverage.
-  let R: i32 = 24;
+  // (v102 tried R=24 sigma=200; reverted at v103 — user reported FPS
+  // regression in the sample but it was likely gyro/scene variance, the
+  // change was logically a small win. Reverted for safety.)
+  let R: i32 = 32;
   let depthThresh: f32 = 0.07;
-  let sigma2_inv: f32 = 1.0 / 200.0;
+  let sigma2_inv: f32 = 1.0 / 340.0;
   var sum: f32 = center;
   var totalW: f32 = 1.0;
   for (var i: i32 = 1; i <= R; i = i + 1) {
@@ -1596,6 +1640,7 @@ async function initAndRun() {
   BOX_HALF_X = canvasAspect * BOX_HALF_Y;
   BOX_HALF_Z = BOX_DEPTH_INITIAL;
   recomputeBoxDerived();
+  recomputeActiveCellRange();  // v103: drives the 3D dispatch for cell kernels
   applyPreset(state.preset);   // refresh pressureK + restDensity from new _natRho
 
   if (!navigator.gpu) throw new Error('navigator.gpu missing');
@@ -1678,8 +1723,10 @@ async function initAndRun() {
   });
 
   // Sim uniform buffer.
-  // v60: bumped 64 -> 80 to fit boxHalfX/Y/Z + gridHalf (was a single boxHalf).
-  const SIM_PARAMS_SIZE = 80;
+  // v60: bumped 64 -> 80 (boxHalfX/Y/Z + gridHalf).
+  // v103: bumped 80 -> 112 (cellMinX/Y/Z + cellRangeX/Y/Z for active-
+  // cell dispatch in cs_clearGrid + cs_grid).
+  const SIM_PARAMS_SIZE = 112;
   const simParamsBuf = device.createBuffer({
     size: SIM_PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -2211,25 +2258,35 @@ async function initAndRun() {
     simBuf[17] = SIM_TUNE.wallFriction;
     simBuf[18] = SIM_TUNE.viscosity;
     simBuf[19] = 0;
+    // v103: active cell range for cs_clearGrid + cs_grid 3D dispatch.
+    simBuf[20] = CELL_MIN_X;
+    simBuf[21] = CELL_MIN_Y;
+    simBuf[22] = CELL_MIN_Z;
+    simBuf[23] = CELL_RANGE_X;
+    simBuf[24] = CELL_RANGE_Y;
+    simBuf[25] = CELL_RANGE_Z;
+    simBuf[26] = 0;
+    simBuf[27] = 0;
     device.queue.writeBuffer(simParamsBuf, 0, simBuf);
 
-    const cellGroups = Math.ceil(NUM_CELLS / 64);
+    // v103: cell kernels dispatch in 3D over the box's active cell
+    // range (workgroup 4x4x4). Particle kernels stay 1D over N.
+    const cellGroupsX = Math.ceil(CELL_RANGE_X / 4);
+    const cellGroupsY = Math.ceil(CELL_RANGE_Y / 4);
+    const cellGroupsZ = Math.ceil(CELL_RANGE_Z / 4);
     const particleGroups = Math.ceil(N / 64);
-    // v98 perf: previously each substep had its own encoder + submit
-    // (up to 8 submits/frame). Combine into a single compute pass with
-    // pipeline switches between substeps — one encoder, one submit.
-    // Driver overhead drops; the GPU sees one continuous queue of work.
+    // v98 perf: single encoder + single submit for the whole substep loop.
     {
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
       pass.setBindGroup(0, computeBindGroup);
       for (let s = 0; s < subSteps; s++) {
         pass.setPipeline(clearPipeline);
-        pass.dispatchWorkgroups(cellGroups);
+        pass.dispatchWorkgroups(cellGroupsX, cellGroupsY, cellGroupsZ);
         pass.setPipeline(p2gPipeline);
         pass.dispatchWorkgroups(particleGroups);
         pass.setPipeline(gridPipeline);
-        pass.dispatchWorkgroups(cellGroups);
+        pass.dispatchWorkgroups(cellGroupsX, cellGroupsY, cellGroupsZ);
         pass.setPipeline(g2pPipeline);
         pass.dispatchWorkgroups(particleGroups);
         state.steps++;

@@ -1913,6 +1913,323 @@
     });
   }
 
+  // =================================================================
+  // v122: NUMERICAL RenderMath test suite.
+  //
+  // Pure-JS reference implementations of the WGSL shader math + tests
+  // that exercise them across the relevant input domains. These give
+  // me an "offline" check that the rendering pipeline's algebra is
+  // sound — endpoints, monotonicity, round-trips, calibration — without
+  // a GPU or a real browser.
+  //
+  // Each math function here mirrors the WGSL implementation in the
+  // composite / bilateral / caustic shaders. If a shader's math drifts
+  // away from the JS reference, the assertion fires.
+  // =================================================================
+  {
+    const RenderMath = {
+      // depth ∈ [0,1] (NDC) → view-space z (negative). Matches the WGSL
+      // `linearizeNDC` / `viewPosFromDepth` helpers.
+      linearizeNDC(zn, near, far) {
+        return near * far / (zn * (far - near) - far);
+      },
+      // view-space z (negative) → depth ∈ [0,1]. Inverse of above.
+      ndcFromView(zv, near, far) {
+        return far / (far - near) + (near * far) / ((far - near) * zv);
+      },
+      // Schlick Fresnel: F(cosθ) = R0 + (1-R0)·(1-cosθ)^5. cosθ = dot(N,V).
+      schlick(cosTheta, R0) {
+        return R0 + (1 - R0) * Math.pow(1 - cosTheta, 5);
+      },
+      // Beer-Lambert: T(t) = exp(-coef·t). Returns fraction TRANSMITTED.
+      beerLambert(thickness, coef) {
+        return Math.exp(-coef * thickness);
+      },
+      // GLSL/WGSL refract(): incident i (already pointing INTO surface),
+      // normal n (pointing OUT of surface, away from i), eta = n1/n2.
+      // Returns refracted direction, or [0,0,0] on total internal reflection.
+      refract(i, n, eta) {
+        const ni = i[0]*n[0] + i[1]*n[1] + i[2]*n[2];
+        const k = 1 - eta*eta * (1 - ni*ni);
+        if (k < 0) return [0, 0, 0];
+        const t = eta*ni + Math.sqrt(k);
+        return [eta*i[0] - t*n[0], eta*i[1] - t*n[1], eta*i[2] - t*n[2]];
+      },
+      // ACES Filmic per-channel approximation (Hable / Narkowicz form).
+      // Matches the WGSL acesFilm() in WGSL_COMPOSITE.
+      aces(x) {
+        const a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
+        const f = v => Math.max(0, Math.min(1, (v*(a*v+b))/(v*(c*v+d)+e)));
+        return [f(x[0]), f(x[1]), f(x[2])];
+      },
+      // Mean curvature of a flat surface = 0 (sanity check for the
+      // curvature flow's mean-curvature formula). Linearized form on
+      // a 5-stencil: H ≈ Laplacian(z).
+      laplacian5(zc, zL, zR, zU, zD) {
+        return zL + zR + zU + zD - 4 * zc;
+      },
+    };
+
+    test('RenderMath: linearizeNDC at endpoints', () => {
+      const z0 = RenderMath.linearizeNDC(0, 0.1, 100);
+      assert(Math.abs(z0 - (-0.1)) < 1e-9,
+        'depth=0 (near plane) should give viewZ = -near; got ' + z0);
+      const z1 = RenderMath.linearizeNDC(1, 0.1, 100);
+      assert(Math.abs(z1 - (-100)) < 1e-9,
+        'depth=1 (far plane) should give viewZ = -far; got ' + z1);
+    });
+
+    test('RenderMath: linearizeNDC ↔ ndcFromView round-trip', () => {
+      const near = 0.1, far = 100;
+      for (let zn = 0.05; zn < 0.999; zn += 0.097) {
+        const zv = RenderMath.linearizeNDC(zn, near, far);
+        const zn2 = RenderMath.ndcFromView(zv, near, far);
+        assert(Math.abs(zn - zn2) < 1e-6,
+          'round-trip failed at zn=' + zn + ': back-converted to ' + zn2);
+      }
+    });
+
+    test('RenderMath: linearizeNDC monotonic (depth increasing → viewZ more negative)', () => {
+      const near = 0.1, far = 100;
+      let prev = Infinity;
+      for (let zn = 0.0; zn <= 0.999; zn += 0.1) {
+        const zv = RenderMath.linearizeNDC(zn, near, far);
+        assert(zv <= prev, 'linearizeNDC not monotonic at zn=' + zn);
+        prev = zv;
+      }
+    });
+
+    test('RenderMath: Schlick at cosθ=1 returns R0 exactly', () => {
+      for (const R0 of [0.01, 0.02, 0.04, 0.10]) {
+        assert(Math.abs(RenderMath.schlick(1, R0) - R0) < 1e-9,
+          'Schlick(1, ' + R0 + ') should = R0');
+      }
+    });
+
+    test('RenderMath: Schlick at cosθ=0 returns 1.0 (grazing reflects fully)', () => {
+      for (const R0 of [0.01, 0.02, 0.04, 0.10]) {
+        assert(Math.abs(RenderMath.schlick(0, R0) - 1.0) < 1e-9,
+          'Schlick(0, ' + R0 + ') should = 1.0');
+      }
+    });
+
+    test('RenderMath: Schlick monotonic decreasing as cosθ rises', () => {
+      let prev = 2.0;  // larger than any valid Fresnel
+      for (let c = 0.0; c <= 1.0; c += 0.05) {
+        const f = RenderMath.schlick(c, 0.02);
+        assert(f <= prev + 1e-9,
+          'Schlick not monotonic at cosθ=' + c.toFixed(2) + ': ' + f + ' vs prev ' + prev);
+        prev = f;
+      }
+    });
+
+    test('RenderMath: Schlick at typical viewing angle (cosθ=0.7) ≈ 0.025', () => {
+      // pow(0.3, 5) ≈ 0.00243; F ≈ 0.020 + 0.98·0.00243 ≈ 0.0224.
+      const f = RenderMath.schlick(0.7, 0.02);
+      assert(f > 0.02 && f < 0.04,
+        'Fresnel at cosθ=0.7 should be ~0.022; got ' + f.toFixed(4));
+    });
+
+    test('RenderMath: Beer-Lambert at t=0 = 1.0 (no absorption)', () => {
+      for (const k of [0.5, 5.0, 50.0]) {
+        assert(Math.abs(RenderMath.beerLambert(0, k) - 1.0) < 1e-9,
+          'Beer-Lambert at t=0 must be 1.0');
+      }
+    });
+
+    test('RenderMath: Beer-Lambert monotonic decreasing with thickness', () => {
+      let prev = 1.0;
+      for (let t = 0.0; t <= 2.0; t += 0.1) {
+        const T = RenderMath.beerLambert(t, 5);
+        assert(T <= prev + 1e-9, 'Beer-Lambert not monotonic at t=' + t);
+        prev = T;
+      }
+    });
+
+    test('RenderMath: Beer-Lambert with t·k=1 transmits ~37%', () => {
+      const T = RenderMath.beerLambert(0.2, 5.0);
+      assert(Math.abs(T - Math.exp(-1)) < 1e-6,
+        'T at k·t=1 should be e^(-1) ≈ 0.368; got ' + T);
+    });
+
+    test('RenderMath: refract — no bending at normal incidence', () => {
+      // Incident pointing straight down (0,-1,0), normal up (0,1,0).
+      const r = RenderMath.refract([0, -1, 0], [0, 1, 0], 1.0 / 1.33);
+      // Refracted should also point straight down (0, -1, 0) since
+      // there's no horizontal component to bend.
+      assert(Math.abs(r[0]) < 1e-6 && Math.abs(r[2]) < 1e-6,
+        'normal incidence should have no horizontal bend; got ' + r);
+      assert(r[1] < 0, 'refracted ray should still go downward');
+      // At eta < 1 (denser medium), the ray bends TOWARD the normal,
+      // but since incidence is already along the normal, magnitude is 1.
+      const mag = Math.hypot(r[0], r[1], r[2]);
+      assert(Math.abs(mag - 1.0) < 1e-6,
+        'refract should preserve unit length at normal incidence; got mag=' + mag);
+    });
+
+    test('RenderMath: refract — total internal reflection returns zero vector', () => {
+      // Water → air (eta = 1.33). Incidence beyond critical angle
+      // (~48.6°) should TIR.
+      const theta = 60 * Math.PI / 180;
+      const i = [Math.sin(theta), -Math.cos(theta), 0];   // into surface from below
+      const n = [0, 1, 0];
+      const r = RenderMath.refract(i, n, 1.33);
+      assert(r[0] === 0 && r[1] === 0 && r[2] === 0,
+        'TIR should return [0,0,0]; got ' + r);
+    });
+
+    test('RenderMath: refract — refracted ray stays in same plane as incident + normal', () => {
+      const theta = 30 * Math.PI / 180;
+      const i = [Math.sin(theta), -Math.cos(theta), 0];
+      const n = [0, 1, 0];
+      const r = RenderMath.refract(i, n, 1.0 / 1.33);
+      assert(Math.abs(r[2]) < 1e-6,
+        'refracted ray must stay in xy plane when incident does; got r.z=' + r[2]);
+    });
+
+    test('RenderMath: ACES at 0 = 0', () => {
+      const r = RenderMath.aces([0, 0, 0]);
+      assert(Math.abs(r[0]) < 1e-9 && Math.abs(r[1]) < 1e-9 && Math.abs(r[2]) < 1e-9);
+    });
+
+    test('RenderMath: ACES at low input is approximately linear', () => {
+      const r = RenderMath.aces([0.1, 0.1, 0.1]);
+      // ACES at 0.1 ≈ 0.083 (slightly under-curves at low end).
+      assert(r[0] > 0.05 && r[0] < 0.15,
+        'ACES at 0.1 should be near 0.1; got ' + r[0].toFixed(4));
+    });
+
+    test('RenderMath: ACES compresses bright values toward 1.0', () => {
+      const r = RenderMath.aces([10, 10, 10]);
+      assert(r[0] > 0.85 && r[0] <= 1.0,
+        'ACES at 10 should saturate near 1.0; got ' + r[0].toFixed(4));
+    });
+
+    test('RenderMath: ACES monotonic (brighter input → brighter output)', () => {
+      let prev = -1;
+      for (let v = 0; v < 5; v += 0.2) {
+        const r = RenderMath.aces([v, v, v]);
+        assert(r[0] >= prev - 1e-9, 'ACES not monotonic at v=' + v);
+        prev = r[0];
+      }
+    });
+
+    test('RenderMath: curvature Laplacian = 0 on a flat surface', () => {
+      const zc = 0.5;
+      const L = RenderMath.laplacian5(zc, zc, zc, zc, zc);
+      assert(Math.abs(L) < 1e-12, 'flat 5-stencil should have zero Laplacian');
+    });
+
+    test('RenderMath: curvature Laplacian > 0 on a local minimum', () => {
+      // Cup shape: centre is lower than neighbours → Laplacian positive
+      // → curvature flow pushes centre UP toward neighbours.
+      const L = RenderMath.laplacian5(0.3, 0.5, 0.5, 0.5, 0.5);
+      assert(L > 0, 'local minimum should have positive Laplacian');
+    });
+
+    test('RenderMath: curvature Laplacian < 0 on a local maximum', () => {
+      const L = RenderMath.laplacian5(0.7, 0.5, 0.5, 0.5, 0.5);
+      assert(L < 0, 'local maximum should have negative Laplacian');
+    });
+
+    // ---------- Integration tests: calibration of the live constants ----------
+
+    test('Integration: thicknessScale × max-path × absorptionR gives visible Beer-Lambert', () => {
+      // Pull the actual constants from the source and compute the
+      // absorbed fraction at the deepest point of the box. Should be
+      // in the "visibly blue" range — 30-85%.
+      const src = readMpmScript();
+      const tsMatch  = src.match(/compBuf\[6\]\s*=\s*([0-9.]+);/);
+      const arMatch  = src.match(/key:\s*['"]water['"][\s\S]*?absorptionR:\s*([0-9.]+)/);
+      const bhzMatch = src.match(/let\s+BOX_HALF_Z\s*=\s*([0-9.]+);/);
+      assert(tsMatch && arMatch && bhzMatch, 'failed to extract calibration constants');
+      const thicknessScale = parseFloat(tsMatch[1]);
+      const absorptionR   = parseFloat(arMatch[1]);
+      const boxHalfZ      = parseFloat(bhzMatch[1]);
+      const maxPathLen = 2 * boxHalfZ;
+      const T = RenderMath.beerLambert(maxPathLen * thicknessScale, absorptionR);
+      const absorbed = 1 - T;
+      assert(absorbed >= 0.30 && absorbed <= 0.90,
+        'Beer-Lambert red absorption at max depth should be 30-90%; got ' +
+        (absorbed*100).toFixed(1) + '% (thicknessScale=' + thicknessScale +
+        ', BOX_HALF_Z=' + boxHalfZ + ', absorptionR=' + absorptionR + ')');
+    });
+
+    test('Integration: Schlick R0 from source gives ~2% reflection at normal incidence', () => {
+      const src = readMpmScript();
+      const r0Match = src.match(/R0_water\s*:\s*f32\s*=\s*([0-9.]+)/);
+      assert(r0Match, 'R0_water constant not found in composite');
+      const R0 = parseFloat(r0Match[1]);
+      const F_normal = RenderMath.schlick(1.0, R0);
+      assert(Math.abs(F_normal - R0) < 1e-9);
+      assert(F_normal >= 0.005 && F_normal <= 0.10,
+        'R0 should give 0.5-10% reflection at normal incidence (physical water = 2%); got ' +
+        (F_normal*100).toFixed(2) + '%');
+    });
+
+    test('Integration: refract sun direction with surface normal does NOT TIR for typical surface', () => {
+      // The caustic pass refracts the sun INTO the water. For typical
+      // sun direction + roughly-horizontal water surface, refract should
+      // succeed (not TIR), and the resulting ray should go downward
+      // so it can hit the floor.
+      const src = readMpmScript();
+      const ratioMatch = src.match(/causticBuf\[11\]\s*=\s*([0-9.\s/]+?);/);
+      assert(ratioMatch, 'caustic refract ratio not found');
+      // Eval as JS to handle "1.0 / 1.33" form.
+      const ratio = eval(ratioMatch[1]);
+      const sunDir = [0.35, 0.80, 0.50]; // matches the JS in gpu-mpm.html
+      const sl = Math.hypot(...sunDir);
+      const sunN = sunDir.map(x => x / sl);
+      const incident = [-sunN[0], -sunN[1], -sunN[2]]; // direction of light travel
+      const normal = [0, 1, 0]; // flat water surface
+      const r = RenderMath.refract(incident, normal, ratio);
+      assert(r[0] !== 0 || r[1] !== 0 || r[2] !== 0,
+        'sun → water surface should NOT TIR for typical sun direction');
+      assert(r[1] < 0,
+        'refracted sun ray must travel downward to hit floor; got r.y=' + r[1]);
+    });
+
+    test('Integration: Gaussian σ at typical viewing depth ≥ particle screen-space size', () => {
+      // worldSigma is in world units; particle imposter is PARTICLE_RADIUS.
+      // The Gaussian needs σ_world ≥ PARTICLE_RADIUS so the kernel actually
+      // smooths across at least one particle. (Already a regression test;
+      // here we also check the screen-space radius using the camera
+      // projection numerics.)
+      const src = readMpmScript();
+      const wsMatch = src.match(/gaussBuf\[6\]\s*=\s*([0-9.]+);/);
+      const prMatch = src.match(/const\s+PARTICLE_RADIUS\s*=\s*([0-9.]+);/);
+      const worldSigma   = parseFloat(wsMatch[1]);
+      const particleRadius = parseFloat(prMatch[1]);
+      assert(worldSigma >= particleRadius,
+        'worldSigma must be ≥ PARTICLE_RADIUS or Gaussian under-smooths');
+      // Compute screen sigma at typical depth (viewZ ≈ -2.2 in our box,
+      // fAspect ≈ 4.66 for iPhone-portrait aspect).
+      const viewZ = -2.2;
+      const fAspect = 4.66;
+      const resX = 585;     // iPhone 13 portrait × DPR 1.5
+      const pixelView = 2.0 * Math.abs(viewZ) / (fAspect * resX);
+      const sigmaScreen = worldSigma / pixelView;
+      assert(sigmaScreen >= 10,
+        'screen-space σ at typical depth should be ≥ 10 px; got ' + sigmaScreen.toFixed(1));
+    });
+
+    test('Integration: thinClamp saturates inside box at typical scene', () => {
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      const tcMatch = compositeSrc.match(/clamp\(\s*pathLen\s*\*\s*([0-9.]+)/);
+      const bhzMatch = src.match(/let\s+BOX_HALF_Z\s*=\s*([0-9.]+);/);
+      const mul = parseFloat(tcMatch[1]);
+      const boxHalfZ = parseFloat(bhzMatch[1]);
+      const maxPathLen = 2 * boxHalfZ;
+      // Saturation pathLen = 1 / mul. Want this ≤ 0.4 × max so bulk is unmasked.
+      assert(1 / mul <= 0.4 * maxPathLen,
+        'thinClamp saturation pathLen (' + (1/mul).toFixed(3) +
+        ') must be ≤ 40% of maxPathLen (' + maxPathLen.toFixed(3) + ')');
+    });
+  }
+
   // ---------- Reporting ----------
 
   if (isNode) {

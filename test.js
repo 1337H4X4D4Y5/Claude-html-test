@@ -2238,16 +2238,46 @@
       assert(iorB - iorR >= 0.04,
         'chromatic IOR spread (n_B - n_R) must be ≥ 0.04 for visible rainbow rim; got ' +
         (iorB - iorR).toFixed(3));
-      // Footprint clip must be generous — caustics extend onto floor
-      // outside the water column. Pre-v137 it clipped at exactly the
-      // box footprint; v137 expands to 2× so the surrounding marble
-      // gets the rainbow halo.
+      // Footprint clip must be generous on the floor — caustics extend
+      // onto the marble outside the water column. v137 used > 2×;
+      // v138 reformulated as the inclusion form (<= * 2.0). Either form
+      // is accepted.
       const causticIdx = src.indexOf('const WGSL_CAUSTIC');
       const causticEnd = src.indexOf('`;', causticIdx);
       const causticSrc = src.slice(causticIdx, causticEnd);
-      assert(causticSrc.match(/abs\(hit\.x\)\s*>\s*P\.boxHalfX\s*\*\s*[1-9]\d*(\.\d+)?\b/) !== null ||
-             causticSrc.match(/abs\(hit\.x\)\s*>\s*[1-9]\d*(\.\d+)?\s*\*\s*P\.boxHalfX\b/) !== null,
-        'caustic footprint clip must be wider than 1× boxHalf so caustics extend onto surrounding floor');
+      const floorClipExc = causticSrc.match(/abs\([a-z]+\.x\)\s*>\s*P\.boxHalfX\s*\*\s*[1-9]\d*(\.\d+)?\b/);
+      const floorClipInc = causticSrc.match(/abs\([a-z]+\.x\)\s*<=\s*P\.boxHalfX\s*\*\s*[1-9]\d*(\.\d+)?\b/);
+      assert(floorClipExc !== null || floorClipInc !== null,
+        'caustic floor-clip must be wider than 1× boxHalf so caustics extend onto surrounding floor');
+    });
+
+    test('gpu-mpm v138: caustic shader traces refracted rays to walls, not just the floor', () => {
+      // The user asked why no caustics appear on the back wall. The
+      // pre-v138 shader had `if (refractedDir.y >= -0.01) discard`
+      // which dropped every ray heading sideways instead of down —
+      // exactly the rays that would hit walls. v138 traces against
+      // floor + back + left + right and picks the first hit.
+      const src = readMpmScript();
+      const causticIdx = src.indexOf('const WGSL_CAUSTIC');
+      const causticEnd = src.indexOf('`;', causticIdx);
+      const causticSrc = src.slice(causticIdx, causticEnd);
+      // Must NOT pre-emptively discard sideways-going rays.
+      assert(causticSrc.indexOf('refractedDir.y >= -0.01') < 0,
+        'pre-v138 down-only filter removed — must not blanket-discard non-downward refracted rays');
+      // Must compute t for each of the 4 useful faces and pick the
+      // closest. We look for boxHalfX-derived t (walls), boxHalfY (floor),
+      // and boxHalfZ (back wall).
+      assert(causticSrc.match(/-\s*P\.boxHalfY\s*-\s*worldPos\.y/) !== null,
+        'must compute t for the floor (y = -boxHalfY)');
+      assert(causticSrc.match(/-\s*P\.boxHalfZ\s*-\s*worldPos\.z/) !== null,
+        'must compute t for the back wall (z = -boxHalfZ)');
+      assert(causticSrc.match(/-\s*P\.boxHalfX\s*-\s*worldPos\.x/) !== null ||
+             causticSrc.match(/P\.boxHalfX\s*-\s*worldPos\.x/) !== null,
+        'must compute t for at least one side wall (x = ±boxHalfX)');
+      // The projection must use hit.y (not hardcoded -boxHalfY), since
+      // wall hits have varying y. Earlier versions hardcoded -(-boxHalfY).
+      assert(causticSrc.match(/hitNdcY\s*=\s*-\s*hit\.y\s*\*/) !== null,
+        'projection must use hit.y (any wall y), not the floor-only -(-boxHalfY)');
     });
 
     test('gpu-mpm v98 perf: MPM substep loop has zero submits inside', () => {

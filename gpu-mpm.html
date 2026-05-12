@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v137 (2026-05-12 — caustics visibility overhaul. Pre-v137 splat intensity 0.025-0.045 was lost against the ~0.8-luma white-tile backdrop — caustics existed but you could not see them. Bumped to 0.18 per chromatic channel + 0.30 single (≈6-7× brighter). Lifted the WGSL_CAUSTIC footprint clip from 1× → 2× boxHalf so caustics extend onto the marble surrounding the water column (rainbow rim now lands where it should). Chromatic IOR spread widened 1.323/1.333/1.348 (±1%) → 1.305/1.333/1.365 (±2.5%) for a clearly visible R/G/B fringe at the silhouette.)';
+const APP_VERSION = 'mpm-v138 (2026-05-12 — caustics now trace to walls, not just the floor. v137 made caustics bright but the shader still hard-discarded every refracted ray that was not heading downward — so any ray that would have lit the back wall died before splat. v138 traces against 4 box faces (floor, back wall, left wall, right wall), picks the first hit, and generalizes the camera projection to use hit.y instead of the hardcoded -boxHalfY. No, you do not need a point light — directional sun works; the rays just needed somewhere to land.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2227,29 +2227,68 @@ fn vs_main(@builtin(vertex_index) vi: u32,
   let incident = -lightDir;
   let refractedDir = refract(incident, worldN, P.refractRatio);
 
-  // Total-internal-reflection guard + skip rays not heading downward.
+  // Total-internal-reflection guard.
   if (length(refractedDir) < 0.0001) { out.position = OFF; return out; }
-  if (refractedDir.y >= -0.01)       { out.position = OFF; return out; }
 
-  // Trace refracted ray to the floor plane y = −boxHalfY.
-  let t = (-P.boxHalfY - worldPos.y) / refractedDir.y;
-  if (t < 0.0) { out.position = OFF; return out; }
-  let hit = worldPos + refractedDir * t;
+  // v138: trace refracted ray to whichever of the 4 useful box faces
+  // it strikes first — floor (y=-boxHalfY), back wall (z=-boxHalfZ),
+  // left wall (x=-boxHalfX), right wall (x=+boxHalfX). The front wall
+  // (z=+boxHalfZ) is between the camera and the water so we skip it
+  // (would block the view of the fluid). The ceiling never receives
+  // caustics from above-sun. Earlier versions only traced to the floor
+  // and discarded sideways-refracting rays, which is why you saw no
+  // caustics on the back wall — the rays existed, we just threw them
+  // away before they could splat.
+  let T_INF = 1e9;
+  var tBest = T_INF;
+  var hit = vec3<f32>(0.0);
 
-  // v137: previously clipped to |hit| > boxHalf — but real caustics
-  // extend well beyond the water's silhouette onto the surrounding floor
-  // (most visibly as rainbow fringes from chromatic dispersion). We now
-  // clip much more generously: 2× the footprint in X/Z, so caustics
-  // splat onto the marble around the water column too.
-  if (abs(hit.x) > P.boxHalfX * 2.0 || abs(hit.z) > P.boxHalfZ * 2.0) {
-    out.position = OFF; return out;
+  if (refractedDir.y < -0.001) {
+    let t = (-P.boxHalfY - worldPos.y) / refractedDir.y;
+    if (t > 0.0 && t < tBest) {
+      let h = worldPos + refractedDir * t;
+      // Floor caustics may spread beyond the box footprint onto the
+      // surrounding marble (the v137 rainbow-halo behaviour).
+      if (abs(h.x) <= P.boxHalfX * 2.0 && abs(h.z) <= P.boxHalfZ * 2.0) {
+        tBest = t; hit = h;
+      }
+    }
   }
+  if (refractedDir.z < -0.001) {  // back wall
+    let t = (-P.boxHalfZ - worldPos.z) / refractedDir.z;
+    if (t > 0.0 && t < tBest) {
+      let h = worldPos + refractedDir * t;
+      if (abs(h.x) <= P.boxHalfX * 1.2 && h.y <= P.boxHalfY * 1.2 && h.y >= -P.boxHalfY) {
+        tBest = t; hit = h;
+      }
+    }
+  }
+  if (refractedDir.x < -0.001) {  // left wall
+    let t = (-P.boxHalfX - worldPos.x) / refractedDir.x;
+    if (t > 0.0 && t < tBest) {
+      let h = worldPos + refractedDir * t;
+      if (abs(h.z) <= P.boxHalfZ * 1.2 && h.y <= P.boxHalfY * 1.2 && h.y >= -P.boxHalfY) {
+        tBest = t; hit = h;
+      }
+    }
+  }
+  if (refractedDir.x > 0.001) {   // right wall
+    let t = (P.boxHalfX - worldPos.x) / refractedDir.x;
+    if (t > 0.0 && t < tBest) {
+      let h = worldPos + refractedDir * t;
+      if (abs(h.z) <= P.boxHalfZ * 1.2 && h.y <= P.boxHalfY * 1.2 && h.y >= -P.boxHalfY) {
+        tBest = t; hit = h;
+      }
+    }
+  }
+  if (tBest >= T_INF) { out.position = OFF; return out; }
 
-  // Project floor-hit world point to camera NDC. View pos of hit is
-  // (hit.x, -boxHalfY, hit.z - fitD).
+  // v138: generalized projection — hit.y is no longer hardcoded to
+  // -boxHalfY since wall hits have any y value in the box.
   let hitViewZ = hit.z - P.fitD;
-  let hitNdcX = -hit.x       * P.fAspect / hitViewZ;
-  let hitNdcY = -(-P.boxHalfY) * P.fVert  / hitViewZ;
+  if (hitViewZ >= -0.001) { out.position = OFF; return out; }  // behind cam
+  let hitNdcX = -hit.x * P.fAspect / hitViewZ;
+  let hitNdcY = -hit.y * P.fVert   / hitViewZ;
 
   // Splat as a small quad in NDC. Quartic falloff in the fragment.
   out.position = vec4<f32>(hitNdcX + q.x * P.splatRadius,

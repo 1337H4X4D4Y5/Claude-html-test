@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v137</span>
+    <span class="tag">v138</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v137: caustics visibility overhaul. Splat intensity bumped 0.025-0.045 → 0.18-0.30 (≈6-7×) so caustics actually register against the white-tile backdrop instead of being invisible. Footprint clip lifted from 1× → 2× boxHalf so caustics extend onto the marble surrounding the water column (where the chromatic rainbow rim lives). Chromatic IOR spread widened ±1% → ±2.5% (1.305/1.333/1.365) for a clearly visible R/G/B fringe at the silhouette.</div>
+  <div class="desc">MLS-MPM on the GPU. v138: caustics now land on the back + side walls, not just the floor. v137 made caustics bright, but the shader still hard-discarded every refracted ray that wasn't heading downward — sideways-going rays that would have lit the walls died before splat. v138 traces against four box faces (floor, back wall, left wall, right wall), picks the first hit, and generalizes the camera projection to use hit.y instead of the hardcoded floor-y so wall caustics reproject correctly.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

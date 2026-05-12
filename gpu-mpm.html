@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v108 (2026-05-12 — true ray-traced caustics (Snell + refract + trace to floor + Jacobian via additive splatting); curvature flow dt 4e-4 → 3e-4 to preserve more surface detail)';
+const APP_VERSION = 'mpm-v109 (2026-05-12 — view-invariant Gaussian depth pre-smooth (NVIDIA SSF deck slide 18): per-pixel screen radius from local depth, world-space constant kernel, 50px cap)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1089,6 +1089,85 @@ fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
 // inline in the composite shader. Net pipeline savings: 1 fewer
 // per-particle pass + 2 fewer full-screen blur passes.
 
+// v109: view-invariant Gaussian depth smoothing per NVIDIA SSF deck
+// slide 18. The smoothing extent is fixed in WORLD space — the screen
+// radius is computed per-pixel from the local view-space depth so that
+// far surfaces use small kernels and near surfaces use large ones,
+// keeping the blur uniform on the physical surface. Clamped to a max
+// of 50 pixels for performance (one of the deck's specific perf hints).
+// Runs as a separable H+V pre-pass before the v104 curvature-flow loop
+// so curvature flow operates on already-pre-smoothed depth — Gaussian
+// kills the per-particle imposter noise efficiently, curvature flow
+// then refines geometric features without over-smoothing.
+const WGSL_DEPTH_GAUSS = `
+struct GaussParams {
+  near: f32, far: f32, fAspect: f32, fVert: f32,
+  resolutionX: f32, resolutionY: f32, worldRadius: f32, maxScreenRadius: f32,
+};
+
+@group(0) @binding(0) var srcDepth: texture_depth_2d;
+@group(0) @binding(1) var<uniform> P: GaussParams;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 3.0, -1.0), vec2<f32>(-1.0,  3.0)
+  );
+  return vec4<f32>(p[vi], 0.0, 1.0);
+}
+
+fn linearizeNDC(zn: f32) -> f32 {
+  return P.near * P.far / (zn * (P.far - P.near) - P.far);
+}
+
+// At each fluid pixel, compute the screen-space radius that corresponds
+// to P.worldRadius at this pixel's view-space depth, clamped to
+// P.maxScreenRadius. sigma = R/2 gives a Gaussian falling to e^(-2)
+// at the kernel edge — sharp enough to preserve features at the
+// kernel boundary, smooth enough to blend interior noise. Silhouette
+// samples (depth ≈ 1) are skipped so the blur doesn't pull background
+// depth INTO the surface.
+fn gaussBlur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
+  let zN = textureLoad(srcDepth, coord, 0);
+  if (zN >= 0.99999) { return 1.0; }
+
+  let viewZ = linearizeNDC(zN);
+  // View-space size of one screen pixel at this depth (using fAspect
+  // for X; for diagonal blur a geometric mean would be tighter, but
+  // the separable kernels are axis-aligned so X- and Y-pixel sizes
+  // are correct per direction).
+  let pixelView = 2.0 * abs(viewZ) / (P.fAspect * P.resolutionX);
+  let radius_f = P.worldRadius / max(pixelView, 1e-6);
+  let R = max(1, i32(min(radius_f, P.maxScreenRadius)));
+
+  let sigma = f32(R) * 0.5;
+  let sigma2_inv = 1.0 / max(sigma * sigma, 1.0);
+
+  var sum: f32 = zN;
+  var totalW: f32 = 1.0;
+  // Bounded loop (≤ 50) with early break so WGSL compiles efficiently
+  // on iOS Safari even though R varies per pixel.
+  for (var i: i32 = 1; i <= 50; i = i + 1) {
+    if (i > R) { break; }
+    let w = exp(-f32(i * i) * sigma2_inv);
+    let zL = textureLoad(srcDepth, coord - dir * i, 0);
+    let zR = textureLoad(srcDepth, coord + dir * i, 0);
+    if (zL < 0.99999) { sum = sum + zL * w; totalW = totalW + w; }
+    if (zR < 0.99999) { sum = sum + zR * w; totalW = totalW + w; }
+  }
+  return sum / totalW;
+}
+
+@fragment
+fn fs_h(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
+  return gaussBlur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(1, 0));
+}
+@fragment
+fn fs_v(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
+  return gaussBlur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(0, 1));
+}
+`;
+
 // v104: replaced the wide separable bilateral depth blur with screen-space
 // curvature flow (Müller 2007 / Green NVIDIA GDC 2010). One iteration moves
 // each linearized depth sample along the surface normal toward its mean-
@@ -1776,6 +1855,33 @@ async function initAndRun() {
     ],
   });
 
+  // v109: view-invariant Gaussian depth pre-smooth (NVIDIA SSF deck slide
+  // 18). Two pipelines (H + V) sharing one module, both writing to a
+  // depth32float target via @builtin(frag_depth). Runs once H + once V
+  // before the curvature-flow loop.
+  const gaussModule = device.createShaderModule({ code: WGSL_DEPTH_GAUSS });
+  const gaussH = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: gaussModule, entryPoint: 'vs_main' },
+    fragment: { module: gaussModule, entryPoint: 'fs_h', targets: [] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'always' },
+  });
+  const gaussV = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: gaussModule, entryPoint: 'vs_main' },
+    fragment: { module: gaussModule, entryPoint: 'fs_v', targets: [] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'always' },
+  });
+  // GaussParams: near, far, fAspect, fVert, resX, resY, worldRadius, maxScreenRadius — 32 bytes.
+  const GAUSS_PARAMS_SIZE = 32;
+  const gaussParamsBuf = device.createBuffer({
+    size: GAUSS_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const gaussBufScratch = new Float32Array(GAUSS_PARAMS_SIZE / 4);
+
   // v104: screen-space curvature flow replaces the wide separable bilateral
   // depth blur. Single non-separable pipeline, ping-ponged 4 times.
   const curvatureModule = device.createShaderModule({ code: WGSL_CURVATURE });
@@ -2063,6 +2169,7 @@ async function initAndRun() {
   let compositeBindGroup = null;
   let curv0 = null, curv1 = null, curv2 = null;
   let causticBindGroup = null;
+  let gaussRawToA = null, gaussAToB = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
     const w = canvas.width, h = canvas.height;
@@ -2136,6 +2243,24 @@ async function initAndRun() {
       entries: [
         { binding: 0, resource: depthB.createView() },
         { binding: 1, resource: { buffer: causticParamsBuf } },
+      ],
+    });
+    // v109: Gaussian depth pre-smooth bind groups.
+    //   gauss H: depthRaw → depthA
+    //   gauss V: depthA   → depthB
+    // (curvature flow then ping-pongs starting from depthB.)
+    gaussRawToA = device.createBindGroup({
+      layout: gaussH.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: depthRaw.createView() },
+        { binding: 1, resource: { buffer: gaussParamsBuf } },
+      ],
+    });
+    gaussAToB = device.createBindGroup({
+      layout: gaussV.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: depthA.createView() },
+        { binding: 1, resource: { buffer: gaussParamsBuf } },
       ],
     });
     lastW = w; lastH = h;
@@ -2366,6 +2491,19 @@ async function initAndRun() {
     curvBuf[7] = 0;
     device.queue.writeBuffer(curvParamsBuf, 0, curvBuf);
 
+    // v109: view-invariant Gaussian uniform. worldRadius = 0.012 ≈
+    // 1.2% of the box width, the smoothing scale that knocks down
+    // per-particle imposter noise without melting wave features.
+    // maxScreenRadius = 50 px (the deck's specific perf hint —
+    // clamps near-camera kernels to keep the loop bounded).
+    const gaussBuf = gaussBufScratch;
+    gaussBuf[0] = 0.1; gaussBuf[1] = 100;
+    gaussBuf[2] = f / aspect; gaussBuf[3] = f;
+    gaussBuf[4] = canvas.width; gaussBuf[5] = canvas.height;
+    gaussBuf[6] = 0.012;
+    gaussBuf[7] = 50.0;
+    device.queue.writeBuffer(gaussParamsBuf, 0, gaussBuf);
+
     // v108: caustic-pass uniform. Sun direction shares the composite
     // keylight so the focused light comes from the same place the
     // Fresnel reflection sees it. refractRatio = n_air / n_water.
@@ -2437,13 +2575,32 @@ async function initAndRun() {
       p.setPipeline(backDepthPipeline); p.setBindGroup(0, backDepthBindGroup);
       p.draw(6, N); p.end();
     }
-    // v104: 4-iteration ping-pong: depthRaw → depthA → depthB → depthA → depthB.
-    // v108: dt reduced 4e-4 → 3e-4 to preserve more wave-scale surface
-    // variation. Total smoothing (dt × iters) drops ~25%, just enough
-    // to keep caustic-driving curvature while still killing per-
-    // particle imposter noise.
+    // v109: view-invariant Gaussian pre-smooth (NVIDIA SSF deck slide 18).
+    // Two separable passes — kills per-particle imposter noise with a
+    // world-space-constant kernel before curvature flow refines features.
+    //   depthRaw --gaussH--> depthA --gaussV--> depthB
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [],
+        depthStencilAttachment: { view: depthA.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      p.setPipeline(gaussH); p.setBindGroup(0, gaussRawToA);
+      p.draw(3, 1); p.end();
+    }
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [],
+        depthStencilAttachment: { view: depthB.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      p.setPipeline(gaussV); p.setBindGroup(0, gaussAToB);
+      p.draw(3, 1); p.end();
+    }
+    // v109: curvature flow now starts from the Gaussian-smoothed depthB.
+    // 4 iterations alternating between depthA and depthB.
+    //   depthB --curv--> depthA --curv--> depthB --curv--> depthA --curv--> depthB
+    // v108: dt reduced 4e-4 → 3e-4 — preserves wave-scale variation.
     const curvSeq = [
-      { src: curv0, dst: depthA },
+      { src: curv2, dst: depthA },
       { src: curv1, dst: depthB },
       { src: curv2, dst: depthA },
       { src: curv1, dst: depthB },

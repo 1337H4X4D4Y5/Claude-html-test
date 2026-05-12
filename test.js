@@ -1317,6 +1317,43 @@
         'composite must add the sss term to the transmitted body colour');
     });
 
+    test('gpu-mpm v109: view-invariant Gaussian depth pre-smooth (NVIDIA SSF slide 18)', () => {
+      // v109 adds a separable Gaussian blur on depth ahead of the
+      // curvature-flow loop. The kernel width is recomputed per-pixel
+      // from the local view-space depth so the smoothing extent is
+      // constant in WORLD space (variable in screen space). Clamped to
+      // 50 pixels for performance — exactly the deck's spec.
+      const src = readMpmScript();
+      assert(src.indexOf('WGSL_DEPTH_GAUSS') >= 0,
+        'WGSL_DEPTH_GAUSS shader source missing');
+      assert(src.indexOf('gaussH') >= 0 && src.indexOf('gaussV') >= 0,
+        'gaussH / gaussV pipelines not created');
+      assert(src.indexOf('gaussParamsBuf') >= 0,
+        'gaussParamsBuf uniform not created');
+      assert(src.indexOf('writeBuffer(gaussParamsBuf') >= 0,
+        'gaussParamsBuf must be written from JS each frame');
+      // Shader must compute a per-pixel screen radius from a worldRadius
+      // uniform — i.e., be view-invariant.
+      const gIdx = src.indexOf('const WGSL_DEPTH_GAUSS');
+      const gEnd = src.indexOf('`;', gIdx);
+      const gaussSrc = src.slice(gIdx, gEnd);
+      assert(gaussSrc.indexOf('worldRadius') >= 0,
+        'gauss shader must declare worldRadius uniform (constant in world space)');
+      assert(gaussSrc.indexOf('maxScreenRadius') >= 0,
+        'gauss shader must clamp R to maxScreenRadius (perf cap from the deck)');
+      assert(gaussSrc.indexOf('pixelView') >= 0 || gaussSrc.match(/2\.0\s*\*\s*abs\(viewZ\)/),
+        'gauss shader must compute view-space pixel size from depth (view-invariance)');
+      // Pipeline must dispatch both passes in the frame loop, before curvature flow.
+      const fhIdx = src.indexOf('p.setPipeline(gaussH)');
+      const fvIdx = src.indexOf('p.setPipeline(gaussV)');
+      const fcIdx = src.indexOf('p.setPipeline(curvaturePipeline)');
+      assert(fhIdx >= 0 && fvIdx >= 0,
+        'gaussH and gaussV must both be dispatched in the frame loop');
+      assert(fcIdx >= 0, 'curvaturePipeline must still be dispatched');
+      assert(fhIdx < fcIdx && fvIdx < fcIdx,
+        'gaussH and gaussV must run BEFORE the curvature-flow loop (pre-smooth)');
+    });
+
     test('gpu-mpm v108: true light-ray caustic pipeline (refract + trace + splat)', () => {
       // v108 implements ray-traced caustics per the NVIDIA SSF deck:
       // for each source-grid sample of the curvature-flowed front depth,

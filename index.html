@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v108</span>
+    <span class="tag">v109</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v108: TRUE ray-traced caustics — each frame, ~9k source-grid samples of the curvature-flowed surface refract the sun direction via Snell's law, trace to the box floor, project to NDC, and additively splat. Caustic patterns are the actual Jacobian of the light-ray map (no procedural fBm, no static texture). v107 two-layer thickness, v106 HDR cubemap + scatter, v105 5-tap normal + ACES, v104 curvature flow underneath.</div>
+  <div class="desc">MLS-MPM on the GPU. v109: view-invariant Gaussian depth pre-smooth (NVIDIA SSF deck slide 18) — kernel width recomputed per-pixel from local view-space depth so smoothing extent is CONSTANT in world space, capped at 50 screen pixels for performance. Runs separable H+V before the v104 curvature-flow loop. v108 true ray-traced caustics, v107 two-layer thickness, v106 HDR cubemap, v105 5-tap normal + ACES underneath.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

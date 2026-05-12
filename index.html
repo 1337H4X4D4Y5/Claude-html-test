@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v107</span>
+    <span class="tag">v108</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v107: two-layer thickness rendering (NVIDIA SSF deck slides 27-29) — fluid imposters rendered into front + back depth textures, composite computes Beer-Lambert path length as the view-space distance between them. Eliminates the additive-sprite thickness pass and its separable Gaussian blur entirely (3 fewer full-screen passes per frame). Builds on v106 HDR cubemap + scatter, v105 5-tap normal + ACES, v104 curvature flow.</div>
+  <div class="desc">MLS-MPM on the GPU. v108: TRUE ray-traced caustics — each frame, ~9k source-grid samples of the curvature-flowed surface refract the sun direction via Snell's law, trace to the box floor, project to NDC, and additively splat. Caustic patterns are the actual Jacobian of the light-ray map (no procedural fBm, no static texture). v107 two-layer thickness, v106 HDR cubemap + scatter, v105 5-tap normal + ACES, v104 curvature flow underneath.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

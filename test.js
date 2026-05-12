@@ -1317,6 +1317,43 @@
         'composite must add the sss term to the transmitted body colour');
     });
 
+    test('gpu-mpm v108: true light-ray caustic pipeline (refract + trace + splat)', () => {
+      // v108 implements ray-traced caustics per the NVIDIA SSF deck:
+      // for each source-grid sample of the curvature-flowed front depth,
+      // recover the world surface point + normal, refract the sun
+      // direction via Snell, trace to the box floor, project to NDC,
+      // and additively splat into backgroundTex. The Jacobian (local
+      // convergence of refracted rays) emerges from additive blending.
+      const src = readMpmScript();
+      assert(src.indexOf('WGSL_CAUSTIC') >= 0,
+        'WGSL_CAUSTIC shader source missing (v108 caustic pass)');
+      assert(src.indexOf('causticPipeline') >= 0, 'causticPipeline not created');
+      assert(src.indexOf('causticBindGroup') >= 0, 'causticBindGroup not created');
+      assert(src.indexOf('causticParamsBuf') >= 0, 'causticParamsBuf uniform missing');
+      assert(src.indexOf('writeBuffer(causticParamsBuf') >= 0,
+        'causticParamsBuf must be written from JS each frame');
+      assert(src.indexOf('p.setPipeline(causticPipeline)') >= 0,
+        'causticPipeline never dispatched in the frame loop');
+      // Caustic shader must actually use Snell's law via refract().
+      const cIdx = src.indexOf('const WGSL_CAUSTIC');
+      const cEnd = src.indexOf('`;', cIdx);
+      const causticSrc = src.slice(cIdx, cEnd);
+      assert(causticSrc.indexOf('refract(') >= 0,
+        'caustic shader must call refract() (Snell on sun direction)');
+      assert(causticSrc.indexOf('CausticParams') >= 0,
+        'caustic shader must declare a CausticParams uniform struct');
+      assert(causticSrc.indexOf('boxHalfX') >= 0 && causticSrc.indexOf('boxHalfY') >= 0,
+        'caustic shader must know the box half extents (for floor trace + footprint clip)');
+      assert(causticSrc.indexOf('fitD') >= 0,
+        'caustic shader must know fitD (camera-to-world Z offset) for floor → NDC reprojection');
+      // Caustic source grid size must be a square number > 1.
+      const gridMatch = src.match(/CAUSTIC_SOURCE_GRID_N\s*=\s*(\d+)/);
+      assert(gridMatch, 'CAUSTIC_SOURCE_GRID_N constant not declared');
+      const grid = parseInt(gridMatch[1], 10);
+      assert(grid >= 32 && grid <= 256,
+        'CAUSTIC_SOURCE_GRID_N should be in a sensible range (32-256); got ' + grid);
+    });
+
     test('gpu-mpm v98 perf: MPM substep loop has zero submits inside', () => {
       // v98 combined per-substep submits into one. Verify the
       // substep loop body contains no device.queue.submit calls.

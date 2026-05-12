@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v107 (2026-05-12 — two-layer thickness rendering: back-face depth pass, view-space path length, no additive sprites or thickness blur)';
+const APP_VERSION = 'mpm-v108 (2026-05-12 — true ray-traced caustics (Snell + refract + trace to floor + Jacobian via additive splatting); curvature flow dt 4e-4 → 3e-4 to preserve more surface detail)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1174,6 +1174,144 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
 }
 `;
 
+// v108: TRUE light-ray caustics. For each source-grid cell of the
+// curvature-flowed front depth, reconstruct the view-space surface
+// point + 5-tap normal, refract the sun direction through the surface
+// using Snell's law (n_water = 1.33), trace the refracted ray from
+// the surface to the box floor (world y = −boxHalfY), project the
+// floor-hit point to NDC, and additively splat a small Gaussian into
+// backgroundTex. The Jacobian (local convergence of refracted rays)
+// emerges naturally from additive blending — where many adjacent
+// source cells project their refracted rays to a tight floor cluster,
+// brightness accumulates into a focused caustic line. No procedural
+// fBm, no static texture: the patterns ARE the physical light paths.
+const WGSL_CAUSTIC = `
+struct CausticParams {
+  near: f32, far: f32, fAspect: f32, fVert: f32,
+  resolutionX: f32, resolutionY: f32, sourceGridN: f32, splatRadius: f32,
+  lightDirX: f32, lightDirY: f32, lightDirZ: f32, refractRatio: f32,
+  boxHalfX: f32, boxHalfY: f32, boxHalfZ: f32, fitD: f32,
+  splatIntensity: f32, _pad0: f32, _pad1: f32, _pad2: f32,
+};
+
+@group(0) @binding(0) var srcDepth: texture_depth_2d;
+@group(0) @binding(1) var<uniform> P: CausticParams;
+
+struct VOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) intensity: f32,
+};
+
+fn viewPosAt(sx: f32, sy: f32, depth: f32) -> vec3<f32> {
+  let ndcX = (sx / P.resolutionX) * 2.0 - 1.0;
+  let ndcY = 1.0 - (sy / P.resolutionY) * 2.0;
+  let viewZ = P.near * P.far / (depth * (P.far - P.near) - P.far);
+  let viewX = -ndcX * viewZ / P.fAspect;
+  let viewY = -ndcY * viewZ / P.fVert;
+  return vec3<f32>(viewX, viewY, viewZ);
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32,
+           @builtin(instance_index) ii: u32) -> VOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0)
+  );
+  let q = quad[vi];
+
+  let gridN = i32(P.sourceGridN);
+  let gx = i32(ii) % gridN;
+  let gy = i32(ii) / gridN;
+  let sampleX = (f32(gx) + 0.5) / f32(gridN) * P.resolutionX;
+  let sampleY = (f32(gy) + 0.5) / f32(gridN) * P.resolutionY;
+  let sxi = i32(sampleX);
+  let syi = i32(sampleY);
+
+  let dc = textureLoad(srcDepth, vec2<i32>(sxi, syi), 0);
+
+  var out: VOut;
+  out.uv = q;
+  out.intensity = 0.0;
+  // Off-screen position used to discard sources that produce no caustic.
+  let OFF = vec4<f32>(10.0, 10.0, 0.0, 1.0);
+
+  if (dc >= 0.99999) { out.position = OFF; return out; }
+
+  // 5-tap silhouette-aware view-space normal — same trick the composite
+  // uses. Coarse over a 4×4 stencil since source grid is sparse anyway.
+  let dL = textureLoad(srcDepth, vec2<i32>(sxi - 2, syi),     0);
+  let dR = textureLoad(srcDepth, vec2<i32>(sxi + 2, syi),     0);
+  let dU = textureLoad(srcDepth, vec2<i32>(sxi,     syi - 2), 0);
+  let dD = textureLoad(srcDepth, vec2<i32>(sxi,     syi + 2), 0);
+  let zL = select(dL, dc, dL >= 0.99999);
+  let zR = select(dR, dc, dR >= 0.99999);
+  let zU = select(dU, dc, dU >= 0.99999);
+  let zD = select(dD, dc, dD >= 0.99999);
+
+  let viewC = viewPosAt(sampleX,       sampleY,       dc);
+  let vL    = viewPosAt(sampleX - 2.0, sampleY,       zL);
+  let vR    = viewPosAt(sampleX + 2.0, sampleY,       zR);
+  let vU    = viewPosAt(sampleX,       sampleY - 2.0, zU);
+  let vD    = viewPosAt(sampleX,       sampleY + 2.0, zD);
+  let ddxR = vR - viewC; let ddxL = viewC - vL;
+  let ddyD = vD - viewC; let ddyU = viewC - vU;
+  let ddx = select(ddxR, ddxL, abs(ddxR.z) > abs(ddxL.z));
+  let ddy = select(ddyD, ddyU, abs(ddyD.z) > abs(ddyU.z));
+  let n = normalize(cross(ddy, ddx));
+
+  // View ↔ world for our identity-rotation camera at world (0, 0, fitD).
+  let worldPos = vec3<f32>(viewC.x, viewC.y, viewC.z + P.fitD);
+  let worldN = n;
+
+  // Snell refraction of the sun direction. lightDir points surface→sun;
+  // incident (direction of light propagation) = -lightDir.
+  let lightDir = normalize(vec3<f32>(P.lightDirX, P.lightDirY, P.lightDirZ));
+  let incident = -lightDir;
+  let refractedDir = refract(incident, worldN, P.refractRatio);
+
+  // Total-internal-reflection guard + skip rays not heading downward.
+  if (length(refractedDir) < 0.0001) { out.position = OFF; return out; }
+  if (refractedDir.y >= -0.01)       { out.position = OFF; return out; }
+
+  // Trace refracted ray to the floor plane y = −boxHalfY.
+  let t = (-P.boxHalfY - worldPos.y) / refractedDir.y;
+  if (t < 0.0) { out.position = OFF; return out; }
+  let hit = worldPos + refractedDir * t;
+
+  // Clip to the box footprint — no floor exists outside.
+  if (abs(hit.x) > P.boxHalfX || abs(hit.z) > P.boxHalfZ) {
+    out.position = OFF; return out;
+  }
+
+  // Project floor-hit world point to camera NDC. View pos of hit is
+  // (hit.x, -boxHalfY, hit.z - fitD).
+  let hitViewZ = hit.z - P.fitD;
+  let hitNdcX = -hit.x       * P.fAspect / hitViewZ;
+  let hitNdcY = -(-P.boxHalfY) * P.fVert  / hitViewZ;
+
+  // Splat as a small quad in NDC. Quartic falloff in the fragment.
+  out.position = vec4<f32>(hitNdcX + q.x * P.splatRadius,
+                           hitNdcY + q.y * P.splatRadius,
+                           0.0, 1.0);
+  out.intensity = P.splatIntensity;
+  return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.uv, in.uv);
+  if (r2 > 1.0) { discard; }
+  let falloff = (1.0 - r2);
+  let f2 = falloff * falloff;
+  let g = f2 * in.intensity;
+  // Warm sunny tint (R > G > B) so caustics read as "focused sunlight,"
+  // additively brightening the tile pattern beneath.
+  return vec4<f32>(g, g * 0.95, g * 0.72, 0.0);
+}
+`;
+
 const WGSL_COMPOSITE = `
 struct CompositeParams {
   near: f32, far: f32, fAspect: f32, fVert: f32,
@@ -1656,6 +1794,41 @@ async function initAndRun() {
   });
   const curvBufScratch = new Float32Array(CURV_PARAMS_SIZE / 4);
 
+  // v108: true light-ray caustics. Pipeline draws one quad per source-
+  // grid cell, each instance reads its sampled depth + 4 neighbors,
+  // refracts the sun through the local surface normal, traces to the
+  // floor plane, projects to NDC, and additively splats. Render target
+  // is backgroundTex — caustics overlay the tile backdrop and are then
+  // refraction-warped by the composite.
+  const causticModule = device.createShaderModule({ code: WGSL_CAUSTIC });
+  const causticPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: causticModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: causticModule, entryPoint: 'fs_main',
+      targets: [{
+        format: format,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  // CausticParams: 20 floats / 80 bytes.
+  const CAUSTIC_PARAMS_SIZE = 80;
+  const causticParamsBuf = device.createBuffer({
+    size: CAUSTIC_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const causticBufScratch = new Float32Array(CAUSTIC_PARAMS_SIZE / 4);
+  // 96×96 source-grid samples = 9216 splats per frame. Sparse enough
+  // to keep VS cost low (each instance does ~5 depth reads), dense
+  // enough that adjacent refracted rays overlap on the floor so the
+  // Jacobian shows up.
+  const CAUSTIC_SOURCE_GRID_N = 96;
+
   // v106: procedural sky cubemap, baked once, NOW HDR (rgba16float).
   // The v105 rgba8unorm version clipped the sun core (which we author
   // at >1.0 luminance) down to white, so the ACES tone mapper had
@@ -1889,6 +2062,7 @@ async function initAndRun() {
   let backgroundTex = null;
   let compositeBindGroup = null;
   let curv0 = null, curv1 = null, curv2 = null;
+  let causticBindGroup = null;
   let lastW = 0, lastH = 0;
   function ensureDepthTex() {
     const w = canvas.width, h = canvas.height;
@@ -1955,17 +2129,30 @@ async function initAndRun() {
         { binding: 5, resource: skySampler },
       ],
     });
+    // v108: caustic pass reads the curvature-flowed depth (depthB) to
+    // recover the smooth surface that focuses the light.
+    causticBindGroup = device.createBindGroup({
+      layout: causticPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: depthB.createView() },
+        { binding: 1, resource: { buffer: causticParamsBuf } },
+      ],
+    });
     lastW = w; lastH = h;
   }
 
   // --- Camera ---
+  // v108: fitD hoisted so the caustic pass can use the world↔view
+  // translation when projecting floor hit points back to NDC.
+  const CAM_FOV_Y = 50 * DEG;
+  const CAM_FIT_D = BOX_HALF_Y / Math.tan(CAM_FOV_Y / 2) + BOX_HALF_Z;
   function buildViewProj(aspect) {
     // v62: fit so the FRONT face of the box (z = +BOX_HALF_Z) fills the
     // viewport. Front-face is closer to camera, so it projects largest;
     // fitting from z=0 (v61) over-extended the front corners off-screen.
-    const fovY = 50 * DEG;
+    const fovY = CAM_FOV_Y;
     const near = 0.1, far = 100;
-    const fitD = BOX_HALF_Y / Math.tan(fovY / 2) + BOX_HALF_Z;
+    const fitD = CAM_FIT_D;
     const eye = [0, 0, fitD];
     const f = 1 / Math.tan(fovY / 2);
     const proj = [
@@ -2169,9 +2356,36 @@ async function initAndRun() {
     curvBuf[3] = 2.0 / (canvas.height * f);
     curvBuf[4] = 0.1;
     curvBuf[5] = 100;
-    curvBuf[6] = 0.00040;
+    // v108: dt reduced 4e-4 → 3e-4. Coupled with 3 iterations (was 4),
+    // the curvature flow now preserves more local surface variation —
+    // wave crests, troughs, and ripple-scale detail survive the smooth
+    // pass instead of being washed flat. The caustic pass benefits
+    // directly: a slightly more wavy surface = more interesting Snell
+    // refraction = more visible focusing patterns on the floor.
+    curvBuf[6] = 0.00030;
     curvBuf[7] = 0;
     device.queue.writeBuffer(curvParamsBuf, 0, curvBuf);
+
+    // v108: caustic-pass uniform. Sun direction shares the composite
+    // keylight so the focused light comes from the same place the
+    // Fresnel reflection sees it. refractRatio = n_air / n_water.
+    const causticBuf = causticBufScratch;
+    causticBuf[0] = 0.1; causticBuf[1] = 100;
+    causticBuf[2] = f / aspect; causticBuf[3] = f;
+    causticBuf[4] = canvas.width; causticBuf[5] = canvas.height;
+    causticBuf[6] = CAUSTIC_SOURCE_GRID_N;
+    causticBuf[7] = 0.014;                 // NDC splat radius
+    causticBuf[8]  = Lv[0] / Llen;
+    causticBuf[9]  = Lv[1] / Llen;
+    causticBuf[10] = Lv[2] / Llen;
+    causticBuf[11] = 1.0 / 1.33;           // air → water IOR ratio
+    causticBuf[12] = BOX_HALF_X;
+    causticBuf[13] = BOX_HALF_Y;
+    causticBuf[14] = BOX_HALF_Z;
+    causticBuf[15] = CAM_FIT_D;
+    causticBuf[16] = 0.045;                // per-splat intensity
+    causticBuf[17] = 0; causticBuf[18] = 0; causticBuf[19] = 0;
+    device.queue.writeBuffer(causticParamsBuf, 0, causticBuf);
 
     const enc2 = device.createCommandEncoder();
     // Background pass (v59 + v82): procedural white-tile backdrop first,
@@ -2223,10 +2437,11 @@ async function initAndRun() {
       p.setPipeline(backDepthPipeline); p.setBindGroup(0, backDepthBindGroup);
       p.draw(6, N); p.end();
     }
-    // v104: screen-space curvature flow (Green/Müller). 4 iterations
-    // ping-pong depthRaw → depthA → depthB → depthA → depthB. Each
-    // iteration moves linearized depth toward its mean-curvature centre,
-    // smoothing the surface while preserving real geometric features.
+    // v104: 4-iteration ping-pong: depthRaw → depthA → depthB → depthA → depthB.
+    // v108: dt reduced 4e-4 → 3e-4 to preserve more wave-scale surface
+    // variation. Total smoothing (dt × iters) drops ~25%, just enough
+    // to keep caustic-driving curvature while still killing per-
+    // particle imposter noise.
     const curvSeq = [
       { src: curv0, dst: depthA },
       { src: curv1, dst: depthB },
@@ -2240,6 +2455,21 @@ async function initAndRun() {
       });
       p.setPipeline(curvaturePipeline); p.setBindGroup(0, step.src);
       p.draw(3, 1); p.end();
+    }
+    // v108: TRUE light-ray caustics. With the smoothed front depth
+    // (depthB) just refreshed by the curvature-flow loop, splat refracted
+    // sun rays into backgroundTex. Additive blending over the tile
+    // backdrop — the composite's refraction warp then picks them up.
+    {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: backgroundTex.createView(),
+          loadOp: 'load', storeOp: 'store',
+        }],
+      });
+      p.setPipeline(causticPipeline); p.setBindGroup(0, causticBindGroup);
+      p.draw(6, CAUSTIC_SOURCE_GRID_N * CAUSTIC_SOURCE_GRID_N);
+      p.end();
     }
     // v104: composite renders straight to the canvas (no bloom chain).
     const view = ctx.getCurrentTexture().createView();

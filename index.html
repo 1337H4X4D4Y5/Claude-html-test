@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v110</span>
+    <span class="tag">v111</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v110: bilateral depth filter (NVIDIA SSF deck slide 19) — adds a range-weight exp(-Δview_z² / worldRangeSigma²) on top of v109's view-invariant spatial Gaussian. Preserves depth discontinuities WITHIN the fluid (separate sloshes, splashes, wall edges), not just the background silhouette. v108 ray-traced caustics, v107 two-layer thickness, v106 HDR cubemap, v105 5-tap normal + ACES underneath.</div>
+  <div class="desc">MLS-MPM on the GPU. v111: image-based ambient irradiance — sample the HDR sky cubemap in the surface-normal direction (clamped to avoid sun-core blow-out) for true environment-lit ambient instead of a flat 0.30 constant. Confirms NVIDIA SSF deck slide 20: surface position + normal both derived from the same smoothed depth (Gaussian + bilateral + curvature flow). v110 bilateral, v109 view-invariant Gaussian, v108 ray-traced caustics, v107 two-layer thickness, v106 HDR cubemap underneath.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

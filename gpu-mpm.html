@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v110 (2026-05-12 — bilateral depth filter (NVIDIA SSF slide 19): range-weight = exp(-Δview_z² / worldRangeSigma²) added to v109 view-invariant spatial Gaussian, preserves edges WITHIN the fluid)';
+const APP_VERSION = 'mpm-v111 (2026-05-12 — surface shading: image-based ambient irradiance — sample sky cubemap in normal direction for ambient (replaces flat 0.30); confirms slide-20 position+normal consistency)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1531,9 +1531,18 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let bgCoord = clamp(coord + warp, vec2<i32>(0), resMax);
   let bg = textureLoad(backgroundTex, bgCoord, 0).rgb;
 
-  // Body: lerp absorbed background → lit base colour by opacity.
+  // v111: image-based ambient (NVIDIA SSF deck slide 20 — "shade as
+  // usual" with surface position + normal both derived from the
+  // smoothed depth). Replaces the flat 0.30 ambient with the sky
+  // cubemap sampled in the normal direction: real environment
+  // irradiance. Clamped to keep the HDR sun core (cubemap luminance
+  // ~9.0) from blowing out the diffuse term — the sun's direct
+  // contribution belongs to the Blinn-Phong specular branch below.
   let baseColor = vec3<f32>(P.baseColorR, P.baseColorG, P.baseColorB);
-  let litBase = baseColor * (0.30 + 0.70 * diffuse);
+  let skyAmbient = min(textureSampleLevel(skyCube, skySampler, n, 0.0).rgb,
+                       vec3<f32>(1.4));
+  let sunTint = vec3<f32>(1.00, 0.95, 0.85);
+  let litBase = baseColor * (sunTint * diffuse * 0.62 + skyAmbient * 0.32);
   let avgAbsorb = (absorption.r + absorption.g + absorption.b) * (1.0 / 3.0);
   let opacity = 1.0 - avgAbsorb;
   let absorbedBg = bg * absorption;

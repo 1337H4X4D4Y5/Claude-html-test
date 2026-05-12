@@ -1389,6 +1389,32 @@
         'frame loop must write gaussBuf[8] = worldRangeSigma');
     });
 
+    test('gpu-mpm v111: image-based ambient irradiance (sample sky cubemap with surface normal)', () => {
+      // v111 implements NVIDIA SSF deck slide 20 "shade as usual" with
+      // a real IBL ambient term: ambient = clamp(textureSample(skyCube, n))
+      // — environment color sampled in the surface-normal direction,
+      // clamped to keep the HDR sun core from blowing out the diffuse
+      // branch (the sun's direct contribution belongs to the Blinn-
+      // Phong specular). Replaces the v110 flat 0.30 ambient constant.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.indexOf('skyAmbient') >= 0,
+        'composite must compute a skyAmbient term');
+      // Must sample the cubemap with the surface NORMAL (n).
+      assert(compositeSrc.match(/textureSampleLevel\(\s*skyCube\s*,\s*skySampler\s*,\s*n\s*,/) !== null,
+        'composite must sample skyCube with the surface normal n (in addition to the existing reflection)');
+      // Clamp on the ambient sample so the HDR sun core doesn't blow
+      // out the diffuse term.
+      assert(compositeSrc.indexOf('min(textureSampleLevel(skyCube') >= 0 ||
+             compositeSrc.match(/min\(.*skyCube/) !== null,
+        'composite must clamp the skyAmbient sample (min(...) on the cubemap read for ambient)');
+      // Flat 0.30 ambient is gone.
+      assert(compositeSrc.indexOf('0.30 + 0.70 * diffuse') < 0,
+        'composite must not use the flat 0.30 ambient anymore');
+    });
+
     test('gpu-mpm v108: true light-ray caustic pipeline (refract + trace + splat)', () => {
       // v108 implements ray-traced caustics per the NVIDIA SSF deck:
       // for each source-grid sample of the curvature-flowed front depth,

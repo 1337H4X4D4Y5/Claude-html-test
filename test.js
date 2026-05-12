@@ -1317,15 +1317,16 @@
         'composite must add the sss term to the transmitted body colour');
     });
 
-    test('gpu-mpm v109: view-invariant Gaussian depth pre-smooth (NVIDIA SSF slide 18)', () => {
-      // v109 adds a separable Gaussian blur on depth ahead of the
-      // curvature-flow loop. The kernel width is recomputed per-pixel
-      // from the local view-space depth so the smoothing extent is
-      // constant in WORLD space (variable in screen space). Clamped to
-      // 50 pixels for performance — exactly the deck's spec.
+    test('gpu-mpm v109: view-invariant depth pre-smooth (NVIDIA SSF slide 18)', () => {
+      // v109 added a separable depth blur ahead of the curvature-flow
+      // loop. The kernel width is recomputed per-pixel from the local
+      // view-space depth so the smoothing extent is constant in WORLD
+      // space (variable in screen space). Clamped to 50 pixels.
+      // v110 upgrades the kernel to a true bilateral filter (see
+      // separate test) but the view-invariance is the slide-18 property.
       const src = readMpmScript();
-      assert(src.indexOf('WGSL_DEPTH_GAUSS') >= 0,
-        'WGSL_DEPTH_GAUSS shader source missing');
+      assert(src.indexOf('WGSL_DEPTH_BILATERAL') >= 0,
+        'WGSL_DEPTH_BILATERAL shader source missing');
       assert(src.indexOf('gaussH') >= 0 && src.indexOf('gaussV') >= 0,
         'gaussH / gaussV pipelines not created');
       assert(src.indexOf('gaussParamsBuf') >= 0,
@@ -1334,15 +1335,15 @@
         'gaussParamsBuf must be written from JS each frame');
       // Shader must compute a per-pixel screen radius from a worldRadius
       // uniform — i.e., be view-invariant.
-      const gIdx = src.indexOf('const WGSL_DEPTH_GAUSS');
+      const gIdx = src.indexOf('const WGSL_DEPTH_BILATERAL');
       const gEnd = src.indexOf('`;', gIdx);
       const gaussSrc = src.slice(gIdx, gEnd);
       assert(gaussSrc.indexOf('worldRadius') >= 0,
-        'gauss shader must declare worldRadius uniform (constant in world space)');
+        'depth-filter shader must declare worldRadius uniform (constant in world space)');
       assert(gaussSrc.indexOf('maxScreenRadius') >= 0,
-        'gauss shader must clamp R to maxScreenRadius (perf cap from the deck)');
-      assert(gaussSrc.indexOf('pixelView') >= 0 || gaussSrc.match(/2\.0\s*\*\s*abs\(viewZ\)/),
-        'gauss shader must compute view-space pixel size from depth (view-invariance)');
+        'depth-filter shader must clamp R to maxScreenRadius (perf cap from the deck)');
+      assert(gaussSrc.indexOf('pixelView') >= 0 || gaussSrc.match(/2\.0\s*\*\s*abs\(viewZ/),
+        'depth-filter shader must compute view-space pixel size from depth (view-invariance)');
       // Pipeline must dispatch both passes in the frame loop, before curvature flow.
       const fhIdx = src.indexOf('p.setPipeline(gaussH)');
       const fvIdx = src.indexOf('p.setPipeline(gaussV)');
@@ -1352,6 +1353,40 @@
       assert(fcIdx >= 0, 'curvaturePipeline must still be dispatched');
       assert(fhIdx < fcIdx && fvIdx < fcIdx,
         'gaussH and gaussV must run BEFORE the curvature-flow loop (pre-smooth)');
+    });
+
+    test('gpu-mpm v110: depth filter is bilateral (range weight in world depth units)', () => {
+      // v110 upgrades v109's Gaussian to a true bilateral filter per
+      // NVIDIA SSF deck slide 19: sample weight = spatial Gaussian ×
+      // range Gaussian, where the range Gaussian is exp(-Δviewz² /
+      // worldRangeSigma²). View-invariant in BOTH spatial and range.
+      const src = readMpmScript();
+      const gIdx = src.indexOf('const WGSL_DEPTH_BILATERAL');
+      assert(gIdx >= 0, 'WGSL_DEPTH_BILATERAL not found');
+      const gEnd = src.indexOf('`;', gIdx);
+      const shader = src.slice(gIdx, gEnd);
+      assert(shader.indexOf('worldRangeSigma') >= 0,
+        'shader must declare worldRangeSigma in the uniform struct');
+      assert(shader.indexOf('rangeSigma2_inv') >= 0,
+        'shader must compute the range-weight reciprocal sigma²');
+      // The range weight must multiply the spatial weight to form the
+      // bilateral sample weight.
+      assert(shader.match(/let\s+rangeW\s*=\s*exp\(/) !== null ||
+             shader.match(/rangeW\s*=\s*exp\(/) !== null,
+        'shader must compute a range-weight via exp(-Δz² × rangeSigma2_inv)');
+      assert(shader.match(/spatialW\s*\*\s*rangeW/) !== null,
+        'final sample weight must be spatialW * rangeW (bilateral product)');
+      // Bilateral uniform must be 48 bytes (12 floats including pads).
+      const sizeMatch = src.match(/GAUSS_PARAMS_SIZE\s*=\s*(\d+)/);
+      assert(sizeMatch, 'GAUSS_PARAMS_SIZE constant not declared');
+      assert(parseInt(sizeMatch[1], 10) === 48,
+        'GAUSS_PARAMS_SIZE must be 48 bytes (v110 added worldRangeSigma + 3 pads)');
+      // worldRangeSigma must be written from JS each frame at slot 8.
+      const writeIdx = src.indexOf('writeBuffer(gaussParamsBuf');
+      assert(writeIdx >= 0, 'gaussParamsBuf must be written each frame');
+      const writeCtx = src.slice(Math.max(0, writeIdx - 400), writeIdx);
+      assert(writeCtx.match(/gaussBuf\[8\]\s*=/) !== null,
+        'frame loop must write gaussBuf[8] = worldRangeSigma');
     });
 
     test('gpu-mpm v108: true light-ray caustic pipeline (refract + trace + splat)', () => {

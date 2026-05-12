@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v133 (2026-05-12 — fix: JS error in buildDebugReport ("Can\'t find variable: canvas" — looked up by DOM now). Fix: GPU encoder error when translucentShadow OFF — lightDepthTex now always cleared so the backdrop\'s bind group reads a valid texture state.)';
+const APP_VERSION = 'mpm-v134 (2026-05-12 — fix: flowNoise toggle froze the sim (validation error: half-res color attachment paired with full-res depth attachment in the noise render pass — dropped the depth test, last-writer-wins is fine for screen-space noise). Retune: tunable defaults shipped (thicknessScale 1.8 → 0.40 — was absorbing 99% red at BOX_HALF_Z 0.25; worldRangeSigma 0.15 → 0.10; refractStrength 35 → 30). Schema-bumped localStorage so existing users pick up the new defaults. Stale gpuError now clears after 300 clean frames. WGSL_LIGHT_DEPTH dropped explicit @builtin(frag_depth) write — auto-depth path, less compiler trouble on iOS Safari.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -700,6 +700,11 @@ const state = {
   frameMs: 0, frameMsAvg: 0, frameMsMax: 0,
   frameMsAcc: 0, frameMsCount: 0,
   initError: null, gpuError: null,
+  // v134: when an uncaught GPU error fires, state.gpuError is set. The
+  // banner used to be sticky forever — even after the underlying glitch
+  // was fixed, the user still saw the stale message. We now reset the
+  // banner once we've run 300 frames (~5s @ 60fps) without a new error.
+  framesSinceGpuError: 99999,
   preset: DEFAULT_PRESET, presetLabel: findPreset(DEFAULT_PRESET).label,
   // v121: per-phase render toggles. Each is a JS boolean; persisted
   // in localStorage so reloads keep the user's A/B setup. Defaults
@@ -742,11 +747,17 @@ const state = {
   // the FX panel and is consumed by the uniform writes each frame.
   // Persisted to localStorage so the user's tuning survives a reload.
   tunables: {
+    // v134: defaults retuned for the current BOX_HALF_Z = 0.25 (max
+    // pathLen 0.5). Old thicknessScale = 1.8 absorbed 98.9% red at max
+    // depth — fluid looked opaque-black. 0.40 gives ~63% red, ~39% green,
+    // ~15% blue absorption at deepest point — visibly water-coloured but
+    // not opaque. worldRangeSigma tightened 0.15 → 0.10 for crisper
+    // separation between sloshes; the others sit at physical baselines.
     worldSigma:      0.030,
-    worldRangeSigma: 0.15,
-    thicknessScale:  1.8,
+    worldRangeSigma: 0.10,
+    thicknessScale:  0.40,
     R0_water:        0.020,
-    refractStrength: 35.0,
+    refractStrength: 30.0,
   },
   // v132: per-toggle performance audit. auditState cycles each toggle
   // ON for AUDIT_WARMUP frames + AUDIT_FRAMES sample frames, then OFF
@@ -765,6 +776,13 @@ const TUNABLE_DEFS = [
   { key: 'R0_water',        label: 'Fresnel R₀',      min: 0.000, max: 0.100, step: 0.002, fmt: v => v.toFixed(3) },
   { key: 'refractStrength', label: 'Refract strength',min: 0,     max: 80,    step: 1,     fmt: v => v.toFixed(0) },
 ];
+// v134: bump TUNABLE_SCHEMA whenever the *meaning* of a tunable changes
+// (axes retuned, ranges reshaped, a new tunable added). On a mismatch,
+// saved tunables are discarded and the in-code defaults take over —
+// otherwise users with old localStorage data are stuck at the previous
+// thicknessScale = 1.8 that absorbs 99% of red light at the current box
+// depth. Toggles + debugViz are kept; only tunables are reset.
+const TUNABLE_SCHEMA = 2;
 (function loadTogglesFromStorage() {
   try {
     const saved = JSON.parse(localStorage.getItem('water-box-toggles') || '{}');
@@ -775,8 +793,9 @@ const TUNABLE_DEFS = [
     if (Number.isInteger(saved.__debugViz)) {
       state.debugViz = Math.max(0, Math.min(5, saved.__debugViz));
     }
-    // v131: live tunable values (floats).
-    if (saved.__tunables && typeof saved.__tunables === 'object') {
+    // v131: live tunable values (floats). v134: gated on schema version.
+    if (saved.__tunableSchema === TUNABLE_SCHEMA &&
+        saved.__tunables && typeof saved.__tunables === 'object') {
       for (const def of TUNABLE_DEFS) {
         const v = saved.__tunables[def.key];
         if (typeof v === 'number' && Number.isFinite(v) && v >= def.min && v <= def.max) {
@@ -791,6 +810,7 @@ function saveTogglesToStorage() {
     const obj = Object.assign({}, state.toggles);
     obj.__debugViz = state.debugViz;
     obj.__tunables = state.tunables;
+    obj.__tunableSchema = TUNABLE_SCHEMA;
     localStorage.setItem('water-box-toggles', JSON.stringify(obj));
   } catch (_) {}
 }
@@ -1678,14 +1698,16 @@ fn vs_main(@builtin(vertex_index) vi: u32,
 }
 
 @fragment
-fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
-  // Disc test — same as camera-view depth pass. We don't bother with the
-  // sphere-imposter Z offset because the shadow projection is
-  // orthographic and we only care about which floor pixels are
-  // occluded; the imposter quad's z is good enough.
+fn fs_main(in: VOut) {
+  // Disc test — same as camera-view depth pass. v134: we used to write
+  // @builtin(frag_depth) = in.position.z explicitly, but that's identical
+  // to the rasterizer's own depth for a flat quad and forces the iOS
+  // Safari compiler off the early-Z path. Discard inside the disc, let
+  // the hardware fill the depth attachment — no color attachment, no
+  // explicit depth write, just a coverage mask. The shadow projection is
+  // orthographic so the quad-vs-sphere Z difference is invisible anyway.
   let r2 = dot(in.uv, in.uv);
   if (r2 > 1.0) { discard; }
-  return in.position.z;
 }
 `;
 
@@ -2693,6 +2715,7 @@ async function initAndRun() {
   device.addEventListener('uncapturederror', function (event) {
     const msg = event.error && event.error.message ? event.error.message : String(event.error);
     state.gpuError = (state.gpuError ? state.gpuError + ' | ' : '') + msg;
+    state.framesSinceGpuError = 0;
   });
   const ctx = canvas.getContext('webgpu');
   const format = navigator.gpu.getPreferredCanvasFormat();
@@ -2962,6 +2985,14 @@ async function initAndRun() {
   // the visible particle's noise survives per pixel. Same THICKNESS_FORMAT
   // since we just need a smooth scalar field.
   const noiseModule = device.createShaderModule({ code: WGSL_NOISE });
+  // v134: no depth attachment. The noiseTex is half-res but depthRaw is
+  // full-res — pairing them in a single render pass is a WebGPU
+  // attachment-size mismatch (all attachments must share dimensions) and
+  // the resulting validation error invalidates the device on iOS Safari,
+  // freezing the sim the moment flowNoise toggles on. The composite only
+  // samples noiseTex at surface pixels and uses it for a small normal
+  // perturbation, so last-writer-wins (no depth test) is acceptable —
+  // the noise is a screen-space high-freq detail, not a geometric mask.
   const noisePipeline = device.createRenderPipeline({
     layout: 'auto',
     vertex: { module: noiseModule, entryPoint: 'vs_main' },
@@ -2970,11 +3001,6 @@ async function initAndRun() {
       targets: [{ format: THICKNESS_FORMAT }],
     },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
-    depthStencil: {
-      format: 'depth32float',
-      depthWriteEnabled: false,
-      depthCompare: 'less-equal',
-    },
   });
   const noiseBindGroup = device.createBindGroup({
     layout: noisePipeline.getBindGroupLayout(0),
@@ -3540,6 +3566,13 @@ async function initAndRun() {
     if (dt > 1 / 20) dt = 1 / 20;
     if (dt < 1 / 300) dt = 1 / 300;
 
+    // v134: age the GPU-error banner. Cleared after ~300 clean frames so
+    // a transient validation error doesn't leave the banner stuck on.
+    if (state.gpuError) {
+      state.framesSinceGpuError++;
+      if (state.framesSinceGpuError > 300) state.gpuError = null;
+    }
+
     state.gravity.x += (state.target.x - state.gravity.x) * 0.15;
     state.gravity.y += (state.target.y - state.gravity.y) * 0.15;
     state.gravity.z += (state.target.z - state.gravity.z) * 0.15;
@@ -4004,10 +4037,6 @@ async function initAndRun() {
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
           loadOp: 'clear', storeOp: 'store',
         }],
-        depthStencilAttachment: {
-          view: depthRaw.createView(),
-          depthLoadOp: 'load', depthStoreOp: 'store',
-        },
       });
       p.setPipeline(noisePipeline); p.setBindGroup(0, noiseBindGroup);
       p.draw(6, N); p.end();

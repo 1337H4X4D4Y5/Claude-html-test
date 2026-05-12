@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v133</span>
+    <span class="tag">v134</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v133: two fixes. (1) buildDebugReport was throwing "Can't find variable: canvas" because the canvas const lives inside initAndRun and the report runs at the top-level — the Copy + Share buttons silently failed. Now uses document.getElementById('gpu-canvas') with safe fallbacks. (2) The light-depth texture (v127) was uninitialised when the translucent-shadow toggle was off, triggering "encoder state is not valid" on iOS Safari when the backdrop bound it. Now always cleared each frame; the particle draw is still conditional on the toggle.</div>
+  <div class="desc">MLS-MPM on the GPU. v134: flowNoise toggle no longer freezes the sim — the noise render pass was pairing a half-res color attachment with a full-res depth attachment (WebGPU rejects mismatched sizes), so the depth test is dropped and last-writer-wins is used for the screen-space noise. Slider defaults retuned to the current BOX_HALF_Z = 0.25 box (thicknessScale 1.8 → 0.40 to stop 99% red absorption, worldRangeSigma 0.15 → 0.10, refractStrength 35 → 30) — schema-bumped so existing users pick them up. Stale gpuError banner clears after 300 clean frames. WGSL_LIGHT_DEPTH switched to auto-depth (no explicit frag_depth write) for iOS Safari compiler stability.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

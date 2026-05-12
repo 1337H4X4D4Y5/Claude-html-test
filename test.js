@@ -1824,7 +1824,9 @@
       const thicknessScale = parseFloat(tsMatch[1]);
       const apMatch = src.match(/key:\s*['"]water['"][\s\S]*?absorptionR:\s*([0-9.]+)/);
       const absorptionR = parseFloat(apMatch[1]);
-      const bhzMatch = src.match(/let\s+BOX_HALF_Z\s*=\s*([0-9.]+);/);
+      // v134: runtime box depth comes from readBoxDepth(), not the
+      // `let BOX_HALF_Z` placeholder (which initAndRun overwrites).
+      const bhzMatch = src.match(/function\s+readBoxDepth[\s\S]*?return\s+([0-9.]+)\s*;/);
       const boxHalfZ = parseFloat(bhzMatch[1]);
       const maxThickness = 2 * boxHalfZ * thicknessScale;
       const redAbsorbed = 1 - Math.exp(-absorptionR * maxThickness);
@@ -2048,18 +2050,29 @@
 
     test('gpu-mpm v113: thickness-shading recalibration for path-length units (slide 23)', () => {
       // v107's two-layer thickness made `thickness` view-space path
-      // length (range ~0..0.10 for our box), but thicknessScale + the
-      // thinClamp multiplier had been tuned for the old additive-sprite
-      // range. Net: Beer-Lambert + Fresnel both suppressed nearly to
-      // zero; water looked clear. v113 recalibrates.
+      // length (range ~0..0.50 for our box at the v62 default depth
+      // 0.25), and thicknessScale must hit 30-90% red absorption at max
+      // depth to look like coloured water (not glass-clear, not opaque).
+      // v134: bound checked against the actual box depth default — the
+      // old ≥ 1.0 check was calibrated for BOX_HALF_Z = 0.10 and ran
+      // ~99% red at the current 0.25 default, so it's been replaced
+      // with the Beer-Lambert visibility check directly.
       const src = readMpmScript();
-      // v131: thicknessScale is now a state.tunables default value;
-      // must be ≥ 1.0 to give visible Beer-Lambert at max box depth.
       const tsMatch = src.match(/thicknessScale:\s*([0-9.]+),/);
       assert(tsMatch, 'state.tunables.thicknessScale default not found');
       const ts = parseFloat(tsMatch[1]);
-      assert(ts >= 1.0,
-        'thicknessScale default must be >= 1.0 for path-length thickness (got ' + ts + ')');
+      const apMatch = src.match(/key:\s*['"]water['"][\s\S]*?absorptionR:\s*([0-9.]+)/);
+      assert(apMatch, 'water preset absorptionR not found');
+      const absR = parseFloat(apMatch[1]);
+      const bhzMatch = src.match(/function\s+readBoxDepth[\s\S]*?return\s+([0-9.]+)\s*;/);
+      assert(bhzMatch, 'readBoxDepth default not found');
+      const bhz = parseFloat(bhzMatch[1]);
+      const maxThickness = 2 * bhz * ts;
+      const absorbed = 1 - Math.exp(-absR * maxThickness);
+      assert(absorbed >= 0.30 && absorbed <= 0.95,
+        'thicknessScale (' + ts + ') × max-pathLen (' + (2*bhz).toFixed(2) +
+        ') × absorptionR (' + absR + ') should put red absorption in 30-95%, got ' +
+        (absorbed * 100).toFixed(1) + '%');
       // thinClamp multiplier must scale to saturate within the box's
       // pathLen range (~0.10). 25× saturates at pathLen ≈ 0.04, sensible.
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
@@ -2477,7 +2490,10 @@
       // v131: thicknessScale is now a state.tunables default value.
       const tsMatch  = src.match(/thicknessScale:\s*([0-9.]+),/);
       const arMatch  = src.match(/key:\s*['"]water['"][\s\S]*?absorptionR:\s*([0-9.]+)/);
-      const bhzMatch = src.match(/let\s+BOX_HALF_Z\s*=\s*([0-9.]+);/);
+      // v134: pull the *runtime* default from readBoxDepth() — the
+      // `let BOX_HALF_Z = 0.052` declaration is just a placeholder that
+      // initAndRun overwrites with BOX_DEPTH_INITIAL on startup.
+      const bhzMatch = src.match(/function\s+readBoxDepth[\s\S]*?return\s+([0-9.]+)\s*;/);
       assert(tsMatch && arMatch && bhzMatch, 'failed to extract calibration constants');
       const thicknessScale = parseFloat(tsMatch[1]);
       const absorptionR   = parseFloat(arMatch[1]);

@@ -678,15 +678,13 @@
   // catch top-level breakage without a WebGPU context. Node-only because
   // they need fs to read the sibling HTML file.
 
-  function readMpmScript() {
+  function readMpmHtml() {
     let html;
     if (isNode) {
       const fs = require('fs');
       const path = require('path');
       html = fs.readFileSync(path.resolve(__dirname, 'gpu-mpm.html'), 'utf8');
     } else {
-      // Synchronous XHR in the browser. Deprecated but lets us keep the test
-      // framework synchronous; the request finishes well under a frame.
       const xhr = new XMLHttpRequest();
       xhr.open('GET', './gpu-mpm.html?t=' + Date.now(), false);
       xhr.send(null);
@@ -695,6 +693,10 @@
       }
       html = xhr.responseText;
     }
+    return html;
+  }
+  function readMpmScript() {
+    const html = readMpmHtml();
     const m = html.match(/<script>([\s\S]*?)<\/script>/);
     if (!m) throw new Error('no <script> block in gpu-mpm.html');
     return m[1];
@@ -1391,8 +1393,9 @@
         'caustic dispatch must be gated by state.toggles.caustics');
     });
 
-    test('gpu-mpm v121: phase-preset dropdown with multiple canned configurations', () => {
+    test('gpu-mpm v121/v123: phase-preset chips with multiple canned configurations', () => {
       const src = readMpmScript();
+      const html = readMpmHtml();
       assert(src.indexOf('TOGGLE_PRESETS') >= 0,
         'TOGGLE_PRESETS dictionary must exist');
       // Must include at least these named presets.
@@ -1401,11 +1404,34 @@
         assert(src.indexOf(name + ':') >= 0 || src.indexOf("'" + name + "'") >= 0,
           'TOGGLE_PRESETS must include "' + name + '" preset');
       }
-      // UI panel must exist.
-      assert(src.indexOf('phases-preset-select') >= 0,
-        'Phases panel must include a preset <select> element');
+      // v123: presets are now tappable chip buttons (data-preset="…"),
+      // not a <select>. Each preset must be wired as a button in the HTML body.
+      for (const name of required) {
+        assert(html.indexOf('data-preset="' + name + '"') >= 0,
+          'preset "' + name + '" must be wired as a tappable button with data-preset attribute');
+      }
       assert(src.indexOf("getElementById('phases-btn')") >= 0,
         'Phases-panel toggle button must be wired in JS');
+    });
+
+    test('gpu-mpm v123: each pipeline phase has a tappable touch button (not a checkbox)', () => {
+      const html = readMpmHtml();
+      const phaseKeys = ['smoothing','curvatureFlow','caustics','beerLambert',
+                         'subsurface','refraction','fresnel','spec',
+                         'iblAmbient','cubemapReflect','toneMap'];
+      for (const k of phaseKeys) {
+        assert(html.indexOf('data-toggle="' + k + '"') >= 0,
+          'each phase must be a button with data-toggle="' + k + '"');
+      }
+      // Buttons not checkboxes.
+      assert(html.match(/<input\s+type="checkbox"\s+data-toggle/) === null,
+        'v123 must not use <input type=checkbox> for phase toggles anymore');
+      // The chip styling must define a .on active state.
+      assert(html.indexOf('button.phase.on') >= 0,
+        'CSS must define `.phase.on` for active state styling');
+      // Bulk shortcuts.
+      assert(html.indexOf('data-bulk="on"') >= 0 && html.indexOf('data-bulk="off"') >= 0,
+        'v123 must expose "All on" / "All off" bulk-shortcut buttons');
     });
 
     test('gpu-mpm regression: PARTICLE_RADIUS in sensible range (silhouette stays smooth)', () => {

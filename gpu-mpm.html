@@ -140,25 +140,72 @@
   }
   #phases-panel.open { display: block; }
   #phases-panel h4 {
-    margin: 0 0 8px; font-size: 11px; opacity: 0.65;
+    margin: 12px 0 6px; font-size: 11px; opacity: 0.65;
     text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600;
   }
-  #phases-panel label.phase {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 4px; border-radius: 6px;
-    cursor: pointer; -webkit-tap-highlight-color: transparent;
-    min-height: 30px;
-  }
-  #phases-panel label.phase:active { background: rgba(74,163,255,0.12); }
-  #phases-panel input[type=checkbox] { width: 16px; height: 16px; accent-color: #4aa3ff; }
-  #phases-panel select {
-    width: 100%; margin: 4px 0 10px;
+  #phases-panel h4:first-of-type { margin-top: 0; }
+  /* v123: every toggle is a touch button. Min 38pt height (iOS guideline ~44),
+     active state shown by blue background + filled dot, inactive dimmed.
+     Replaces the v121 checkbox-with-label rows so each toggle is a single
+     thumb-sized tap target. */
+  #phases-panel button.phase {
     appearance: none; -webkit-appearance: none;
-    background: rgba(74,163,255,0.10);
-    border: 1px solid rgba(74,163,255,0.30);
-    color: #e8f1ff; padding: 8px 10px; border-radius: 8px;
-    font-family: inherit; font-size: 13px;
+    display: block; width: 100%;
+    margin: 4px 0; padding: 9px 12px; min-height: 40px;
+    border: 1px solid rgba(74,163,255,0.15);
+    background: rgba(255,255,255,0.04);
+    color: rgba(232,241,255,0.55);
+    font-family: inherit; font-size: 13px; font-weight: 600;
+    text-align: left; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    border-radius: 10px;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
   }
+  #phases-panel button.phase::before {
+    content: "○"; display: inline-block;
+    width: 16px; margin-right: 8px;
+    color: rgba(74,163,255,0.4); font-weight: 700; font-size: 14px;
+  }
+  #phases-panel button.phase.on {
+    background: rgba(74,163,255,0.22);
+    color: #e8f1ff;
+    border-color: rgba(74,163,255,0.55);
+  }
+  #phases-panel button.phase.on::before {
+    content: "●"; color: #4aa3ff;
+  }
+  #phases-panel button.phase:active { transform: scale(0.985); }
+  /* Preset chips: same chip style, distinct colour, two-up grid. */
+  #phases-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
+  #phases-panel button.preset {
+    appearance: none; -webkit-appearance: none;
+    padding: 9px 8px; min-height: 38px;
+    background: rgba(160,90,255,0.10);
+    border: 1px solid rgba(160,90,255,0.30);
+    color: #efe6ff;
+    font-family: inherit; font-size: 12px; font-weight: 600;
+    border-radius: 10px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    text-align: center;
+  }
+  #phases-panel button.preset.active {
+    background: rgba(160,90,255,0.30);
+    border-color: rgba(160,90,255,0.65);
+  }
+  #phases-panel button.preset:active { transform: scale(0.985); }
+  /* Bulk row: all-on / all-off side by side. */
+  #phases-bulk { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 4px; }
+  #phases-panel button.bulk {
+    appearance: none; -webkit-appearance: none;
+    padding: 8px 8px; min-height: 36px;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.05);
+    color: #e8f1ff;
+    font-family: inherit; font-size: 12px; font-weight: 600;
+    border-radius: 8px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  #phases-panel button.bulk:active { transform: scale(0.985); }
   #settings-panel {
     position: fixed;
     top: calc(env(safe-area-inset-top, 8px) + 80px);
@@ -267,32 +314,35 @@
 </div>
 <button id="phases-btn" title="Render phases">🎚</button>
 <div id="phases-panel">
-  <h4>Phase preset</h4>
-  <select id="phases-preset-select">
-    <option value="">(pick a preset…)</option>
-    <option value="reference">Reference — all phases on</option>
-    <option value="minimalist">Minimalist — body + Fresnel</option>
-    <option value="caustics">Caustics showcase</option>
-    <option value="mirror">Mirror surface (no body)</option>
-    <option value="body_only">Body only (no reflection)</option>
-    <option value="glassy_mirror">Glassy mirror (no absorption)</option>
-    <option value="raw_depth">Raw depth (no smoothing/effects)</option>
-  </select>
+  <h4>Phase preset (tap to apply)</h4>
+  <div id="phases-presets">
+    <button class="preset" data-preset="reference">Reference</button>
+    <button class="preset" data-preset="minimalist">Minimalist</button>
+    <button class="preset" data-preset="caustics">Caustics</button>
+    <button class="preset" data-preset="mirror">Mirror</button>
+    <button class="preset" data-preset="body_only">Body only</button>
+    <button class="preset" data-preset="glassy_mirror">Glassy</button>
+    <button class="preset" data-preset="raw_depth">Raw depth</button>
+  </div>
+  <div id="phases-bulk">
+    <button class="bulk" data-bulk="on">All on</button>
+    <button class="bulk" data-bulk="off">All off</button>
+  </div>
   <h4>Pipeline (depth → surface)</h4>
-  <label class="phase"><input type="checkbox" data-toggle="smoothing"> Smoothing — bilateral Gaussian</label>
-  <label class="phase"><input type="checkbox" data-toggle="curvatureFlow"> Curvature flow</label>
-  <label class="phase"><input type="checkbox" data-toggle="caustics"> Caustics — ray-traced sun</label>
+  <button class="phase" data-toggle="smoothing">Smoothing — bilateral Gauss</button>
+  <button class="phase" data-toggle="curvatureFlow">Curvature flow</button>
+  <button class="phase" data-toggle="caustics">Caustics — ray-traced sun</button>
   <h4>Body shading</h4>
-  <label class="phase"><input type="checkbox" data-toggle="beerLambert"> Beer-Lambert absorption</label>
-  <label class="phase"><input type="checkbox" data-toggle="subsurface"> Subsurface scatter</label>
-  <label class="phase"><input type="checkbox" data-toggle="refraction"> Refraction warp</label>
+  <button class="phase" data-toggle="beerLambert">Beer-Lambert absorption</button>
+  <button class="phase" data-toggle="subsurface">Subsurface scatter</button>
+  <button class="phase" data-toggle="refraction">Refraction warp</button>
   <h4>Surface shading</h4>
-  <label class="phase"><input type="checkbox" data-toggle="fresnel"> Fresnel reflection</label>
-  <label class="phase"><input type="checkbox" data-toggle="spec"> Spec highlight</label>
-  <label class="phase"><input type="checkbox" data-toggle="iblAmbient"> IBL ambient (vs flat)</label>
-  <label class="phase"><input type="checkbox" data-toggle="cubemapReflect"> Cubemap reflection sample</label>
+  <button class="phase" data-toggle="fresnel">Fresnel reflection</button>
+  <button class="phase" data-toggle="spec">Spec highlight</button>
+  <button class="phase" data-toggle="iblAmbient">IBL ambient (vs flat)</button>
+  <button class="phase" data-toggle="cubemapReflect">Cubemap reflection sample</button>
   <h4>Post</h4>
-  <label class="phase"><input type="checkbox" data-toggle="toneMap"> ACES tone mapping</label>
+  <button class="phase" data-toggle="toneMap">ACES tone mapping</button>
 </div>
 <button id="presets-btn" title="Fluid preset">💧</button>
 <div id="presets-panel">
@@ -336,7 +386,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v122 (2026-05-12 — numerical RenderMath test suite: 22 new tests covering Schlick, Beer-Lambert, Snell, ACES, linearize, curvature Laplacian + 5 integration tests pulling live constants. 109/109 passing.)';
+const APP_VERSION = 'mpm-v123 (2026-05-12 — touch-button toggle UI: 11 phase chips + 7 preset chips + All-on/All-off bulk. ≥38pt tap targets, on/off via blue fill + ●/○ dot. Tap 🎚 to open.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -715,33 +765,60 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
   applyPreset(state.preset);
 })();
 
-// v121: render-phase toggle UI. Open button + panel with one checkbox
-// per pipeline phase + a preset dropdown for quick A/B configurations.
+// v121/v123: render-phase touch buttons. Each pipeline phase is one
+// tap-sized chip; tap toggles state and updates classes for the
+// active/inactive look. Preset chips apply named TOGGLE_PRESETS in one
+// tap. Bulk "All on / All off" shortcuts. State persists in localStorage.
 (function () {
   const btn = document.getElementById('phases-btn');
   const panel = document.getElementById('phases-panel');
-  const presetSel = document.getElementById('phases-preset-select');
   btn.addEventListener('click', function () { panel.classList.toggle('open'); });
+
+  function presetMatches(p) {
+    for (const k of Object.keys(p)) {
+      if ((state.toggles[k] !== false) !== p[k]) return false;
+    }
+    return true;
+  }
   function syncUI() {
-    for (const cb of document.querySelectorAll('#phases-panel input[type=checkbox][data-toggle]')) {
-      const key = cb.getAttribute('data-toggle');
-      cb.checked = state.toggles[key] !== false;
+    for (const b of document.querySelectorAll('#phases-panel button.phase[data-toggle]')) {
+      const key = b.getAttribute('data-toggle');
+      b.classList.toggle('on', state.toggles[key] !== false);
+    }
+    // Highlight the preset chip that currently matches state.toggles.
+    for (const b of document.querySelectorAll('#phases-panel button.preset[data-preset]')) {
+      const preset = TOGGLE_PRESETS[b.getAttribute('data-preset')];
+      b.classList.toggle('active', preset && presetMatches(preset));
     }
   }
-  for (const cb of document.querySelectorAll('#phases-panel input[type=checkbox][data-toggle]')) {
-    cb.addEventListener('change', function () {
-      state.toggles[cb.getAttribute('data-toggle')] = cb.checked;
+  // Per-phase tap → flip the boolean, update class, save, refresh preset highlight.
+  for (const b of document.querySelectorAll('#phases-panel button.phase[data-toggle]')) {
+    b.addEventListener('click', function () {
+      const key = b.getAttribute('data-toggle');
+      state.toggles[key] = !(state.toggles[key] !== false);
       saveTogglesToStorage();
-      presetSel.value = '';   // user diverged from any preset
+      syncUI();
     });
   }
-  presetSel.addEventListener('change', function () {
-    const preset = TOGGLE_PRESETS[presetSel.value];
-    if (!preset) return;
-    for (const k of Object.keys(preset)) state.toggles[k] = preset[k];
-    syncUI();
-    saveTogglesToStorage();
-  });
+  // Preset chip → apply the named configuration.
+  for (const b of document.querySelectorAll('#phases-panel button.preset[data-preset]')) {
+    b.addEventListener('click', function () {
+      const preset = TOGGLE_PRESETS[b.getAttribute('data-preset')];
+      if (!preset) return;
+      for (const k of Object.keys(preset)) state.toggles[k] = preset[k];
+      saveTogglesToStorage();
+      syncUI();
+    });
+  }
+  // All-on / All-off bulk shortcuts.
+  for (const b of document.querySelectorAll('#phases-panel button.bulk[data-bulk]')) {
+    b.addEventListener('click', function () {
+      const on = b.getAttribute('data-bulk') === 'on';
+      for (const k of Object.keys(state.toggles)) state.toggles[k] = on;
+      saveTogglesToStorage();
+      syncUI();
+    });
+  }
   syncUI();
 })();
 

@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v101</span>
+    <span class="tag">v102</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v101 perf: thickness pipeline runs at half resolution — particle thickness pass + 2 blur passes drop to ¼ the pixel count. Thickness feeds an exponential Beer's law and is heavily gaussian-blurred anyway, so the resolution loss is invisible. alphaScale 4× to keep absorption calibration.</div>
+  <div class="desc">MLS-MPM on the GPU. v102 perf: bilateral depth blur radius 32 → 24. v100 dropped DPR cap so kernel now covers the same world area at smaller pixel radius — 25% fewer samples per pass, identical visual coverage.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v101 (2026-05-11 — half-res thickness pass (4x fewer thickness pixels))';
+const APP_VERSION = 'mpm-v102 (2026-05-11 — depth bilateral R 32->24 (proportional to v100 DPR reduction))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1050,13 +1050,13 @@ fn blur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
   // v80: R 20 -> 26 + depthThresh 0.025 -> 0.05 (anti-dimple).
   // v96: R 26 -> 32 + depthThresh 0.05 -> 0.07 — wall-adjacent particle
   // columns showed residual per-particle bumps because the bilateral
-  // didn't reach far enough INTO the fluid mass at the silhouette
-  // edge. Wider R + looser thresh bridges them at the cost of slightly
-  // less silhouette sharpness (still cut off cleanly at the 0.99999
-  // background short-circuit above).
-  let R: i32 = 32;
+  // didn't reach far enough INTO the fluid mass at the silhouette edge.
+  // v102 perf: v100 dropped DPR cap 2 -> 1.5, so the kernel now covers
+  // the SAME world-space area at R=24 that it did at R=32 before.
+  // ~25% fewer samples per pixel per pass at identical visual coverage.
+  let R: i32 = 24;
   let depthThresh: f32 = 0.07;
-  let sigma2_inv: f32 = 1.0 / 340.0;
+  let sigma2_inv: f32 = 1.0 / 200.0;
   var sum: f32 = center;
   var totalW: f32 = 1.0;
   for (var i: i32 = 1; i <= R; i = i + 1) {

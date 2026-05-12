@@ -323,6 +323,7 @@
     <button class="preset" data-preset="body_only">Body only</button>
     <button class="preset" data-preset="glassy_mirror">Glassy</button>
     <button class="preset" data-preset="raw_depth">Raw depth</button>
+    <button class="preset" data-preset="deck_thickness">Deck thickness</button>
   </div>
   <div id="phases-bulk">
     <button class="bulk" data-bulk="on">All on</button>
@@ -332,6 +333,7 @@
   <button class="phase" data-toggle="smoothing">Smoothing — bilateral Gauss</button>
   <button class="phase" data-toggle="curvatureFlow">Curvature flow</button>
   <button class="phase" data-toggle="caustics">Caustics — ray-traced sun</button>
+  <button class="phase" data-toggle="additiveThickness">Additive thickness (deck-25)</button>
   <h4>Body shading</h4>
   <button class="phase" data-toggle="beerLambert">Beer-Lambert absorption</button>
   <button class="phase" data-toggle="subsurface">Subsurface scatter</button>
@@ -386,7 +388,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v123 (2026-05-12 — touch-button toggle UI: 11 phase chips + 7 preset chips + All-on/All-off bulk. ≥38pt tap targets, on/off via blue fill + ●/○ dot. Tap 🎚 to open.)';
+const APP_VERSION = 'mpm-v124 (2026-05-12 — deck-25 additive-sprite thickness restored as a toggle. Tap "Additive thickness (deck-25)" in 🎚 to switch from physical two-layer pathLen to the NVIDIA deck\'s exact additive-Gaussian-splat method.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -643,17 +645,19 @@ const state = {
   // in localStorage so reloads keep the user's A/B setup. Defaults
   // match the v120 visual baseline (everything on).
   toggles: {
-    smoothing:      true,  // Gaussian + bilateral depth pre-smooth (slide 18-19)
-    curvatureFlow:  true,  // Müller curvature flow refinement (slide 19+)
-    caustics:       true,  // Ray-traced refracted-sun caustic splatting
-    beerLambert:    true,  // Body absorption by view-space thickness (slide 23)
-    subsurface:     true,  // Body internal scatter glow
-    refraction:     true,  // Normal-warped bg sample (slide 25)
-    fresnel:        true,  // Body → sky reflection mix (slide 22)
-    spec:           true,  // Blinn-Phong sun specular
-    iblAmbient:     true,  // Cubemap-sampled ambient irradiance (slide 20)
-    cubemapReflect: true,  // Sample cubemap for reflectedV (vs. flat grey)
-    toneMap:        true,  // ACES Filmic at end of composite
+    smoothing:         true,  // Gaussian + bilateral depth pre-smooth (slide 18-19)
+    curvatureFlow:     true,  // Müller curvature flow refinement (slide 19+)
+    caustics:          true,  // Ray-traced refracted-sun caustic splatting
+    beerLambert:       true,  // Body absorption by view-space thickness (slide 23)
+    subsurface:        true,  // Body internal scatter glow
+    refraction:        true,  // Normal-warped bg sample (slide 25)
+    fresnel:           true,  // Body → sky reflection mix (slide 22)
+    spec:              true,  // Blinn-Phong sun specular
+    iblAmbient:        true,  // Cubemap-sampled ambient irradiance (slide 20)
+    cubemapReflect:    true,  // Sample cubemap for reflectedV (vs. flat grey)
+    toneMap:           true,  // ACES Filmic at end of composite
+    additiveThickness: false, // v124: false = two-layer pathLen (v107+);
+                              //       true  = deck-25 additive sprite splat
   },
 };
 (function loadTogglesFromStorage() {
@@ -668,13 +672,17 @@ function saveTogglesToStorage() {
   try { localStorage.setItem('water-box-toggles', JSON.stringify(state.toggles)); } catch (_) {}
 }
 const TOGGLE_PRESETS = {
-  reference:    { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true  },
-  minimalist:   { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: false, refraction: true,  fresnel: true,  spec: false, iblAmbient: false, cubemapReflect: true,  toneMap: true  },
-  caustics:     { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: false, refraction: true,  fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: true  },
-  mirror:       { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: false, fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true  },
-  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false },
-  body_only:    { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: true,  refraction: false, fresnel: false, spec: false, iblAmbient: true,  cubemapReflect: false, toneMap: true  },
-  glassy_mirror:{ smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: true,  fresnel: true,  spec: true,  iblAmbient: false, cubemapReflect: true,  toneMap: true  },
+  reference:    { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false },
+  minimalist:   { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: false, refraction: true,  fresnel: true,  spec: false, iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
+  caustics:     { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: false, refraction: true,  fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: true,  additiveThickness: false },
+  mirror:       { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: false, fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false },
+  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false, additiveThickness: false },
+  body_only:    { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: true,  refraction: false, fresnel: false, spec: false, iblAmbient: true,  cubemapReflect: false, toneMap: true,  additiveThickness: false },
+  glassy_mirror:{ smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: true,  fresnel: true,  spec: true,  iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
+  // v124: deck-faithful preset — additive-sprite thickness on top of
+  // all the other v123 stages. Lets the user A/B against the default
+  // (two-layer pathLen) by tapping just this one preset.
+  deck_thickness:{ smoothing: true, curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: true  },
 };
 
 const DEG = Math.PI / 180;
@@ -1313,12 +1321,98 @@ fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
 }
 `;
 
-// v107: additive-sprite thickness pass (WGSL_THICKNESS) + half-res
-// thickness-blur pipeline (WGSL_THICKNESS_BLUR) removed. Both are
-// superseded by the back-face depth pass — thickness is now the
-// physical view-space distance between front and back faces, computed
-// inline in the composite shader. Net pipeline savings: 1 fewer
-// per-particle pass + 2 fewer full-screen blur passes.
+// v53/v124: additive-sprite thickness — the NVIDIA SSF deck slide 25
+// method. "Render particles using additive blending (no depth test).
+// Store in off-screen render target. Render smooth Gaussian splats."
+// Removed at v107 in favour of two-layer view-space path length, but
+// brought back in v124 as a side-by-side toggle so the user can A/B
+// the two methods. Half-res render target (deck explicitly recommends
+// rendering at lower resolution; thickness signal is low-frequency).
+const WGSL_THICKNESS = `
+struct RenderParams {
+  viewProj: mat4x4<f32>,
+  cameraRight: vec3<f32>, particleSize: f32,
+  cameraUp: vec3<f32>, alphaScale: f32,
+};
+
+@group(0) @binding(0) var<storage, read> pos: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> R: RenderParams;
+
+struct VOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32,
+           @builtin(instance_index) ii: u32) -> VOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0)
+  );
+  let q = quad[vi];
+  let center = pos[ii].xyz;
+  // Imposter widened to 1.6× the depth radius so overlaps are generous —
+  // matches the v78 calibration that made the sprite signal smooth even
+  // before the separable blur.
+  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * (R.particleSize * 1.6);
+  var out: VOut;
+  out.position = R.viewProj * vec4<f32>(wp, 1.0);
+  out.uv = q;
+  return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.uv, in.uv);
+  if (r2 > 1.0) { discard; }
+  // (1 - r²) falloff. Integrated area ≈ π/2 per particle ⇒ accumulator
+  // value is a smooth proxy for view-ray particle density.
+  let t = (1.0 - r2) * R.alphaScale;
+  return vec4<f32>(t, 0.0, 0.0, 0.0);
+}
+`;
+
+// v73/v124: separable Gaussian blur on the additive thickness texture.
+// Kills per-particle "dimple" structure that would otherwise show up
+// through the Beer-Lambert exponential as a visible grid.
+const WGSL_THICKNESS_BLUR = `
+@group(0) @binding(0) var src: texture_2d<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 3.0, -1.0), vec2<f32>(-1.0,  3.0)
+  );
+  return vec4<f32>(p[vi], 0.0, 1.0);
+}
+
+fn tblur1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
+  let R: i32 = 20;
+  let sigma2_inv: f32 = 1.0 / 130.0;
+  var sum: f32 = textureLoad(src, coord, 0).r;
+  var totalW: f32 = 1.0;
+  for (var i: i32 = 1; i <= R; i = i + 1) {
+    let w = exp(-f32(i * i) * sigma2_inv);
+    let sR = textureLoad(src, coord + dir * i, 0).r;
+    let sL = textureLoad(src, coord - dir * i, 0).r;
+    sum = sum + (sR + sL) * w;
+    totalW = totalW + 2.0 * w;
+  }
+  return sum / totalW;
+}
+
+@fragment
+fn fs_h(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let v = tblur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(1, 0));
+  return vec4<f32>(v, 0.0, 0.0, 1.0);
+}
+@fragment
+fn fs_v(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let v = tblur1D(vec2<i32>(i32(frag.x), i32(frag.y)), vec2<i32>(0, 1));
+  return vec4<f32>(v, 0.0, 0.0, 1.0);
+}
+`;
 
 // v109/v110/v114: view-invariant BILATERAL depth filter per NVIDIA SSF
 // deck slides 18-19. Two view-invariant properties:
@@ -1662,7 +1756,10 @@ struct CompositeParams {
 struct RenderToggles {
   beerLambert: f32, subsurface: f32, refraction: f32, fresnel: f32,
   spec: f32, iblAmbient: f32, toneMap: f32, cubemapReflect: f32,
-  _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32,
+  // v124: additiveThickness = 1.0 swaps the Beer-Lambert thickness
+  // source from physical two-layer view-space pathLen to the deck-25
+  // additive-sprite render target. Lets the user A/B both methods.
+  additiveThickness: f32, _pad1: f32, _pad2: f32, _pad3: f32,
   _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
 };
 
@@ -1673,6 +1770,7 @@ struct RenderToggles {
 @group(0) @binding(4) var skyCube: texture_cube<f32>;
 @group(0) @binding(5) var skySampler: sampler;
 @group(0) @binding(6) var<uniform> T: RenderToggles;
+@group(0) @binding(7) var spriteThicknessTex: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -1780,9 +1878,17 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let backDepthN = textureLoad(backDepthTex, coord, 0);
   let backViewZ = P.near * P.far / (backDepthN * (P.far - P.near) - P.far);
   let pathLen = max(0.0, viewPos.z - backViewZ);
-  let thickness = pathLen * P.thicknessScale;
-  // v121: Beer-Lambert toggle — when off, absorption = identity (water
-  // transmits 100%, body becomes glass-clear).
+  // v107 thickness: physical view-space path length × calibrated scale.
+  let pathThickness = pathLen * P.thicknessScale;
+  // v124: additive-sprite thickness (deck-25). Half-res tex, sampled
+  // with nearest upsample; the signal is already blurred so coord/2 is
+  // visually fine. Pre-multiplied by an additive-mode calibration scale
+  // (0.10, from the v53-v107 era) so it lives in the same effective
+  // Beer-Lambert units as pathThickness.
+  let spriteRaw = textureLoad(spriteThicknessTex, coord / 2, 0).r;
+  let spriteThickness = spriteRaw * 0.10;
+  // v124: which thickness drives Beer-Lambert? toggle picks.
+  let thickness = mix(pathThickness, spriteThickness, T.additiveThickness);
   let absorption_on = vec3<f32>(
     exp(-P.absorptionR * thickness),
     exp(-P.absorptionG * thickness),
@@ -2158,6 +2264,48 @@ async function initAndRun() {
     ],
   });
 
+  // v124: deck-25 additive-sprite thickness pipeline. Half-res r16float
+  // target with additive blending, no depth test (deck explicitly says
+  // "no depth test"). Followed by a separable H+V Gaussian to wash out
+  // the per-particle grid pattern before Beer-Lambert.
+  const THICKNESS_FORMAT = 'r16float';
+  const thicknessModule = device.createShaderModule({ code: WGSL_THICKNESS });
+  const thicknessPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: thicknessModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: thicknessModule, entryPoint: 'fs_main',
+      targets: [{
+        format: THICKNESS_FORMAT,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const thicknessBindGroup = device.createBindGroup({
+    layout: thicknessPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: posBuf } },
+      { binding: 1, resource: { buffer: renderParamsBuf } },
+    ],
+  });
+  const thicknessBlurModule = device.createShaderModule({ code: WGSL_THICKNESS_BLUR });
+  const thicknessBlurH = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: thicknessBlurModule, entryPoint: 'vs_main' },
+    fragment: { module: thicknessBlurModule, entryPoint: 'fs_h', targets: [{ format: THICKNESS_FORMAT }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+  const thicknessBlurV = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: thicknessBlurModule, entryPoint: 'vs_main' },
+    fragment: { module: thicknessBlurModule, entryPoint: 'fs_v', targets: [{ format: THICKNESS_FORMAT }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+  });
+
   // v109/v110: view-invariant BILATERAL depth pre-smooth (NVIDIA SSF deck
   // slides 18-19). Two pipelines (H + V) sharing one module, both writing
   // to a depth32float target via @builtin(frag_depth). Runs separable
@@ -2480,6 +2628,8 @@ async function initAndRun() {
   // dropped the additive-thickness texture in favour of two-layer depth.
   let depthRaw = null, depthA = null, depthB = null;
   let backDepthTex = null;
+  let spriteThicknessTex = null, spriteThicknessH = null, spriteThicknessV = null;
+  let spriteBlurHBind = null, spriteBlurVBind = null;
   let backgroundTex = null;
   let compositeBindGroup = null;
   let curv0 = null, curv1 = null, curv2 = null;
@@ -2493,6 +2643,9 @@ async function initAndRun() {
     if (depthA) depthA.destroy();
     if (depthB) depthB.destroy();
     if (backDepthTex) backDepthTex.destroy();
+    if (spriteThicknessTex) spriteThicknessTex.destroy();
+    if (spriteThicknessH) spriteThicknessH.destroy();
+    if (spriteThicknessV) spriteThicknessV.destroy();
     if (backgroundTex) backgroundTex.destroy();
     const opts = {
       size: { width: w, height: h },
@@ -2508,6 +2661,27 @@ async function initAndRun() {
     // sphere intersection per pixel. Composite reads it to compute view-
     // space path length for Beer's-law absorption.
     backDepthTex = device.createTexture(opts);
+    // v124: additive-sprite thickness render targets — half-res r16float.
+    // Three textures so we can ping-pong the separable Gaussian blur
+    // (thickness → spriteH → spriteV ⇒ composite reads spriteV).
+    const halfTW = Math.max(1, Math.floor(w / 2));
+    const halfTH = Math.max(1, Math.floor(h / 2));
+    const thicknessOpts = {
+      size: { width: halfTW, height: halfTH },
+      format: THICKNESS_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    };
+    spriteThicknessTex = device.createTexture(thicknessOpts);
+    spriteThicknessH   = device.createTexture(thicknessOpts);
+    spriteThicknessV   = device.createTexture(thicknessOpts);
+    spriteBlurHBind = device.createBindGroup({
+      layout: thicknessBlurH.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: spriteThicknessTex.createView() }],
+    });
+    spriteBlurVBind = device.createBindGroup({
+      layout: thicknessBlurV.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: spriteThicknessH.createView() }],
+    });
     // v59: the background texture holds the box wireframe + clear colour.
     // Rendered each frame before the fluid composite, then sampled
     // (warped by surface normal) by the composite for refraction.
@@ -2550,6 +2724,7 @@ async function initAndRun() {
         { binding: 4, resource: skyCubeTex.createView({ dimension: 'cube' }) },
         { binding: 5, resource: skySampler },
         { binding: 6, resource: { buffer: togglesParamsBuf } },
+        { binding: 7, resource: spriteThicknessV.createView() },
       ],
     });
     // v108: caustic pass reads the curvature-flowed depth (depthB) to
@@ -2849,7 +3024,8 @@ async function initAndRun() {
     togBuf[5]  = state.toggles.iblAmbient     ? 1.0 : 0.0;
     togBuf[6]  = state.toggles.toneMap        ? 1.0 : 0.0;
     togBuf[7]  = state.toggles.cubemapReflect ? 1.0 : 0.0;
-    for (let i = 8; i < 16; i++) togBuf[i] = 0;
+    togBuf[8]  = state.toggles.additiveThickness ? 1.0 : 0.0;
+    for (let i = 9; i < 16; i++) togBuf[i] = 0;
     device.queue.writeBuffer(togglesParamsBuf, 0, togBuf);
 
     // v108: caustic-pass uniform. Sun direction shares the composite
@@ -2922,6 +3098,48 @@ async function initAndRun() {
       });
       p.setPipeline(backDepthPipeline); p.setBindGroup(0, backDepthBindGroup);
       p.draw(6, N); p.end();
+    }
+    // v124: deck-25 additive-sprite thickness — conditional. Runs ONLY
+    // when the additiveThickness toggle is on. Half-res additive splat
+    // pass + separable Gaussian (spriteTex → spriteH → spriteV). The
+    // composite then reads spriteV via @binding(7).
+    if (state.toggles.additiveThickness) {
+      // Additive splat pass — every particle imposter writes a (1-r²)
+      // Gaussian falloff with one-to-one additive blending.
+      {
+        const p = enc2.beginRenderPass({
+          colorAttachments: [{
+            view: spriteThicknessTex.createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear', storeOp: 'store',
+          }],
+        });
+        p.setPipeline(thicknessPipeline); p.setBindGroup(0, thicknessBindGroup);
+        p.draw(6, N); p.end();
+      }
+      // Separable Gaussian H + V over the accumulated splats.
+      {
+        const p = enc2.beginRenderPass({
+          colorAttachments: [{
+            view: spriteThicknessH.createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear', storeOp: 'store',
+          }],
+        });
+        p.setPipeline(thicknessBlurH); p.setBindGroup(0, spriteBlurHBind);
+        p.draw(3, 1); p.end();
+      }
+      {
+        const p = enc2.beginRenderPass({
+          colorAttachments: [{
+            view: spriteThicknessV.createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear', storeOp: 'store',
+          }],
+        });
+        p.setPipeline(thicknessBlurV); p.setBindGroup(0, spriteBlurVBind);
+        p.draw(3, 1); p.end();
+      }
     }
     // v109: view-invariant Gaussian pre-smooth (NVIDIA SSF deck slide 18).
     // Two separable passes — kills per-particle imposter noise with a

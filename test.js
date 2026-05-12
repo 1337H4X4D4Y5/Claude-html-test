@@ -1055,24 +1055,28 @@
       }
     });
 
-    test('gpu-mpm v107: thickness blur pipeline removed (back-face depth supersedes it)', () => {
-      // v107 dropped the v53 additive-thickness texture + the v73-v101
-      // separable thickness blur because two-layer depth gives a smooth
-      // view-space path length directly. Verify both are gone.
+    test('gpu-mpm v107+v124: two-layer back-depth is the default thickness path', () => {
+      // v107 made two-layer back-face depth the primary thickness source;
+      // v124 brought the v53 additive-sprite pipeline back as an
+      // alternative (gated by the additiveThickness toggle). The
+      // two-layer path must remain the *default* — composite must still
+      // bind backDepthTex and compute pathLen, and the composite bind
+      // group must include it.
       const src = readMpmScript();
-      assert(src.indexOf('const WGSL_THICKNESS_BLUR') < 0,
-        'const WGSL_THICKNESS_BLUR declaration should be removed in v107');
-      assert(src.match(/\bthicknessBlurH\b/) === null && src.match(/\bthicknessBlurV\b/) === null,
-        'thicknessBlurH/V pipeline objects should be removed in v107');
-      assert(src.match(/\bthicknessTex\b/) === null,
-        'thicknessTex (additive r16float texture) should be removed in v107');
-      // Composite must bind backDepthTex at the slot where it used to
-      // bind thicknessV.
       const compIdx = src.indexOf('compositePipeline.getBindGroupLayout(0)');
       assert(compIdx >= 0, 'compositeBindGroup not found');
-      const bgSlice = src.slice(compIdx, compIdx + 500);
+      const bgSlice = src.slice(compIdx, compIdx + 600);
       assert(bgSlice.indexOf('backDepthTex.createView()') >= 0,
-        'composite must sample backDepthTex (back-face depth) in v107');
+        'composite must sample backDepthTex (back-face depth — the v107 default)');
+      // composite shader must still compute pathLen / pathThickness.
+      const cIdx = src.indexOf('const WGSL_COMPOSITE');
+      const cEnd = src.indexOf('`;', cIdx);
+      const compositeSrc = src.slice(cIdx, cEnd);
+      assert(compositeSrc.indexOf('pathLen') >= 0,
+        'composite must compute pathLen from back-depth (two-layer thickness path)');
+      // additiveThickness toggle gates the alternative source.
+      assert(compositeSrc.indexOf('T.additiveThickness') >= 0,
+        'composite must consume T.additiveThickness to switch between thickness sources');
     });
 
     test('gpu-mpm v59: refraction wiring — backgroundTex pass + composite samples it', () => {
@@ -1412,6 +1416,40 @@
       }
       assert(src.indexOf("getElementById('phases-btn')") >= 0,
         'Phases-panel toggle button must be wired in JS');
+    });
+
+    test('gpu-mpm v124: deck-25 additive-sprite thickness brought back as a toggle', () => {
+      // The deck's exact "render particles using additive blending with
+      // Gaussian splats, no depth test, half-res" method removed at v107
+      // is restored as a togglable phase alongside the two-layer default.
+      const src = readMpmScript();
+      assert(src.indexOf('const WGSL_THICKNESS') >= 0,
+        'WGSL_THICKNESS must be restored in v124');
+      assert(src.indexOf('const WGSL_THICKNESS_BLUR') >= 0,
+        'WGSL_THICKNESS_BLUR (separable Gaussian) must be restored in v124');
+      assert(src.indexOf('thicknessPipeline') >= 0,
+        'thicknessPipeline (additive splat) must be created');
+      assert(src.indexOf('thicknessBlurH') >= 0 && src.indexOf('thicknessBlurV') >= 0,
+        'thicknessBlurH / thicknessBlurV must be created');
+      assert(src.indexOf('spriteThicknessTex') >= 0,
+        'spriteThicknessTex half-res target must exist');
+      // The additive pass MUST be conditional on the toggle (perf-critical).
+      assert(src.match(/if\s*\(\s*state\.toggles\.additiveThickness\s*\)/) !== null,
+        'additive thickness pass must be JS-conditional on state.toggles.additiveThickness');
+      // The toggle must drive a uniform flag the composite consumes.
+      const cIdx = src.indexOf('const WGSL_COMPOSITE');
+      const cEnd = src.indexOf('`;', cIdx);
+      const compositeSrc = src.slice(cIdx, cEnd);
+      assert(compositeSrc.match(/additiveThickness\s*:\s*f32/) !== null,
+        'RenderToggles must declare additiveThickness: f32');
+      assert(compositeSrc.indexOf('spriteThicknessTex') >= 0,
+        'composite must bind spriteThicknessTex to read the additive thickness');
+      assert(compositeSrc.match(/mix\(\s*pathThickness\s*,\s*spriteThickness\s*,\s*T\.additiveThickness\s*\)/) !== null,
+        'composite must mix pathThickness ↔ spriteThickness by T.additiveThickness');
+      // UI chip must exist.
+      const html = readMpmHtml();
+      assert(html.indexOf('data-toggle="additiveThickness"') >= 0,
+        'UI must include a touch button with data-toggle="additiveThickness"');
     });
 
     test('gpu-mpm v123: each pipeline phase has a tappable touch button (not a checkbox)', () => {

@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v104 (2026-05-12 — NVIDIA SSF: curvature-flow depth, stripped fBm/caustics/bloom, sun-disk sky for Fresnel)';
+const APP_VERSION = 'mpm-v105 (2026-05-12 — sky cubemap (baked), 5-tap silhouette-aware normal, ACES tone mapping)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1221,6 +1221,8 @@ struct CompositeParams {
 @group(0) @binding(1) var<uniform> P: CompositeParams;
 @group(0) @binding(2) var thicknessTex: texture_2d<f32>;
 @group(0) @binding(3) var backgroundTex: texture_2d<f32>;
+@group(0) @binding(4) var skyCube: texture_cube<f32>;
+@group(0) @binding(5) var skySampler: sampler;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -1239,27 +1241,48 @@ fn viewPosFromDepth(fragXY: vec2<f32>, depth: f32) -> vec3<f32> {
   return vec3<f32>(viewX, viewY, viewZ);
 }
 
-// v104: procedural sky environment — acts as the cubemap the NVIDIA
-// SSF deck samples with the reflection vector. Three-stop vertical
-// gradient (ground → horizon → zenith) plus a sun disk + glow in the
-// keylight direction, so Fresnel highlights read as "reflected sun on
-// water" instead of a flat blue rim. Everything is procedural, no
-// texture upload, ALU is cheap.
-fn sampleSky(dir: vec3<f32>, sunDir: vec3<f32>) -> vec3<f32> {
-  let zenith  = vec3<f32>(0.45, 0.65, 0.95);
-  let horizon = vec3<f32>(0.78, 0.85, 0.95);
-  let ground  = vec3<f32>(0.16, 0.18, 0.22);
-  let dn = normalize(dir);
-  let downT = smoothstep(-0.35, 0.0,  dn.y);
-  let upT   = smoothstep( 0.0,  0.55, dn.y);
-  var col = mix(ground, mix(horizon, zenith, upT), downT);
-  // Sun disk + soft halo in the (reflected) sun direction.
-  let sunDot = max(0.0, dot(dn, normalize(sunDir)));
-  let sunCore = smoothstep(0.9965, 1.0, sunDot);
-  let sunGlow = pow(sunDot, 90.0);
-  col = col + sunCore * vec3<f32>(2.6, 2.3, 1.8)
-            + sunGlow * vec3<f32>(0.55, 0.48, 0.38);
-  return col;
+// v105: silhouette-aware 5-tap normal reconstruction. dpdx/dpdy worked
+// for the deep interior of the fluid but produced visible 2×2 quad
+// blockiness on smooth surfaces and bad cross-silhouette derivatives.
+// 5-tap reads view positions at all four axial neighbours and picks
+// whichever neighbour on each axis has the smaller |Δz| (the standard
+// "closer-to-the-surface wins" trick from the NVIDIA SSF deck). Costs
+// 4 extra depth reads per fluid pixel but the normal is dramatically
+// cleaner at crests, troughs, and silhouettes — exactly the geometry
+// the curvature flow now resolves correctly.
+fn reconstructNormal(coord: vec2<i32>, fragXY: vec2<f32>, viewC: vec3<f32>, depthC: f32) -> vec3<f32> {
+  let dL = textureLoad(depthTex, coord + vec2<i32>(-1,  0), 0);
+  let dR = textureLoad(depthTex, coord + vec2<i32>( 1,  0), 0);
+  let dU = textureLoad(depthTex, coord + vec2<i32>( 0, -1), 0);
+  let dD = textureLoad(depthTex, coord + vec2<i32>( 0,  1), 0);
+  let zL = select(dL, depthC, dL >= 0.99999);
+  let zR = select(dR, depthC, dR >= 0.99999);
+  let zU = select(dU, depthC, dU >= 0.99999);
+  let zD = select(dD, depthC, dD >= 0.99999);
+  let vL = viewPosFromDepth(vec2<f32>(fragXY.x - 1.0, fragXY.y      ), zL);
+  let vR = viewPosFromDepth(vec2<f32>(fragXY.x + 1.0, fragXY.y      ), zR);
+  let vU = viewPosFromDepth(vec2<f32>(fragXY.x,       fragXY.y - 1.0), zU);
+  let vD = viewPosFromDepth(vec2<f32>(fragXY.x,       fragXY.y + 1.0), zD);
+  let ddxR = vR - viewC;
+  let ddxL = viewC - vL;
+  let ddyD = vD - viewC;
+  let ddyU = viewC - vU;
+  let ddx = select(ddxR, ddxL, abs(ddxR.z) > abs(ddxL.z));
+  let ddy = select(ddyD, ddyU, abs(ddyD.z) > abs(ddyU.z));
+  return normalize(cross(ddy, ddx));
+}
+
+// v105: ACES Filmic tone mapping. Compresses bright highlights (sun
+// reflection + spec) into displayable range with a natural roll-off
+// instead of clipping to white. Matches the photographic look of the
+// NVIDIA SSF deck's reference renders.
+fn acesFilm(x: vec3<f32>) -> vec3<f32> {
+  let a: f32 = 2.51;
+  let b: f32 = 0.03;
+  let c: f32 = 2.43;
+  let d: f32 = 0.59;
+  let e: f32 = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 @fragment
@@ -1271,17 +1294,17 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   }
 
   let viewPos = viewPosFromDepth(frag.xy, depth);
-  // v104: curvature-flow-smoothed depth means dpdx/dpdy already gives a
-  // clean normal — no procedural ripple needed. The geometry IS the
-  // surface detail.
-  let n = normalize(cross(dpdy(viewPos), dpdx(viewPos)));
+  // v105: silhouette-aware 5-tap normal — see reconstructNormal() above.
+  let n = reconstructNormal(coord, frag.xy, viewPos, depth);
 
   let viewDir = -normalize(viewPos);
   let lightDir = normalize(vec3<f32>(P.lightDirX, P.lightDirY, P.lightDirZ));
   let halfDir = normalize(viewDir + lightDir);
 
   let diffuse = max(0.0, dot(n, lightDir));
-  let spec = pow(max(0.0, dot(n, halfDir)), 160.0);
+  // v105: spec tightened (160 → 220) and boosted (×0.95 → ×1.6) to make
+  // up for the bloom being gone; ACES tone mapping reins in the peak.
+  let spec = pow(max(0.0, dot(n, halfDir)), 220.0);
   let nv = max(0.0, dot(n, viewDir));
   let fresnel = pow(1.0 - nv, 5.0);
 
@@ -1316,15 +1339,16 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let absorbedBg = bg * absorption;
   let transmitted = mix(absorbedBg, litBase, opacity);
 
-  // Environment reflection (Fresnel). Procedural sky cubemap, sampled
-  // by the reflected view direction. Sun direction shares the keylight
-  // so the Fresnel highlight reads as a real sun reflection.
+  // v105: real cubemap sample for Fresnel reflection (was procedural
+  // in v104). The cube texture is baked once at init with the same
+  // gradient + sun-disk content, so the per-pixel cost drops from
+  // ~10 ALU + branch to a single textureSampleLevel.
   let reflectedV = reflect(-viewDir, n);
-  let sky = sampleSky(reflectedV, lightDir);
+  let sky = textureSampleLevel(skyCube, skySampler, reflectedV, 0.0).rgb;
 
   let outColor = mix(transmitted, sky, fresnelMasked)
-               + vec3<f32>(1.0, 0.97, 0.92) * specMasked * 0.95;
-  return vec4<f32>(outColor, 1.0);
+               + vec3<f32>(1.0, 0.97, 0.92) * specMasked * 1.6;
+  return vec4<f32>(acesFilm(outColor), 1.0);
 }
 `;
 
@@ -1654,6 +1678,96 @@ async function initAndRun() {
   });
   const curvBufScratch = new Float32Array(CURV_PARAMS_SIZE / 4);
 
+  // v105: procedural sky cubemap, baked once. The composite samples this
+  // through a linear-filter sampler when computing the Fresnel reflection
+  // — same content as v104's inline sampleSky() but as a real cube
+  // texture, replacing ~10 ALU + branches per fluid pixel with a single
+  // textureSampleLevel. Sun direction is set to the keylight in view
+  // space; for our fixed-camera scene that matches the world keylight,
+  // so reflections appear to come from a sun that stays put as the
+  // user tilts the phone.
+  const SKY_CUBE_SIZE = 128;
+  const skyCubeTex = device.createTexture({
+    size: { width: SKY_CUBE_SIZE, height: SKY_CUBE_SIZE, depthOrArrayLayers: 6 },
+    format: 'rgba8unorm',
+    dimension: '2d',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  const skySampler = device.createSampler({
+    magFilter: 'linear', minFilter: 'linear',
+    addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge',
+  });
+  (function bakeSkyCube() {
+    // Match the v104 inline sampleSky() content exactly — three-stop
+    // vertical gradient (ground/horizon/zenith) plus a sun disk + halo
+    // in the keylight direction. Keylight in view space = (0.35, 0.80,
+    // 0.50) world-normalized for our fixed-orientation camera.
+    const sunDirW = [0.35, 0.80, 0.50];
+    const sl = Math.hypot(sunDirW[0], sunDirW[1], sunDirW[2]);
+    const sunDir = [sunDirW[0]/sl, sunDirW[1]/sl, sunDirW[2]/sl];
+    const zenith  = [0.45, 0.65, 0.95];
+    const horizon = [0.78, 0.85, 0.95];
+    const ground  = [0.16, 0.18, 0.22];
+    function sampleSky(dx, dy, dz) {
+      const dl = Math.hypot(dx, dy, dz) || 1;
+      const nx = dx/dl, ny = dy/dl, nz = dz/dl;
+      const sm = function (e0, e1, t) {
+        const x = Math.min(1, Math.max(0, (t - e0) / (e1 - e0)));
+        return x * x * (3 - 2 * x);
+      };
+      const downT = sm(-0.35, 0.0,  ny);
+      const upT   = sm( 0.0,  0.55, ny);
+      const horizonZ = [
+        horizon[0] + (zenith[0] - horizon[0]) * upT,
+        horizon[1] + (zenith[1] - horizon[1]) * upT,
+        horizon[2] + (zenith[2] - horizon[2]) * upT,
+      ];
+      let col = [
+        ground[0] + (horizonZ[0] - ground[0]) * downT,
+        ground[1] + (horizonZ[1] - ground[1]) * downT,
+        ground[2] + (horizonZ[2] - ground[2]) * downT,
+      ];
+      const sunDot = Math.max(0, nx*sunDir[0] + ny*sunDir[1] + nz*sunDir[2]);
+      const sunCore = sm(0.9965, 1.0, sunDot);
+      const sunGlow = Math.pow(sunDot, 90.0);
+      col[0] += sunCore * 2.6 + sunGlow * 0.55;
+      col[1] += sunCore * 2.3 + sunGlow * 0.48;
+      col[2] += sunCore * 1.8 + sunGlow * 0.38;
+      return col;
+    }
+    const size = SKY_CUBE_SIZE;
+    for (let face = 0; face < 6; face++) {
+      const data = new Uint8Array(size * size * 4);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const u = (x + 0.5) / size * 2 - 1;
+          const v = (y + 0.5) / size * 2 - 1;
+          let dx, dy, dz;
+          switch (face) {
+            case 0: dx =  1; dy = -v; dz = -u; break; // +X
+            case 1: dx = -1; dy = -v; dz =  u; break; // -X
+            case 2: dx =  u; dy =  1; dz =  v; break; // +Y
+            case 3: dx =  u; dy = -1; dz = -v; break; // -Y
+            case 4: dx =  u; dy = -v; dz =  1; break; // +Z
+            case 5: dx = -u; dy = -v; dz = -1; break; // -Z
+          }
+          const c = sampleSky(dx, dy, dz);
+          const i = (y * size + x) * 4;
+          data[i + 0] = Math.min(255, Math.max(0, Math.round(c[0] * 255)));
+          data[i + 1] = Math.min(255, Math.max(0, Math.round(c[1] * 255)));
+          data[i + 2] = Math.min(255, Math.max(0, Math.round(c[2] * 255)));
+          data[i + 3] = 255;
+        }
+      }
+      device.queue.writeTexture(
+        { texture: skyCubeTex, origin: { x: 0, y: 0, z: face } },
+        data,
+        { bytesPerRow: size * 4 },
+        { width: size, height: size, depthOrArrayLayers: 1 }
+      );
+    }
+  })();
+
   // v73: separable colour blur for the r16float thickness texture.
   const thicknessBlurModule = device.createShaderModule({ code: WGSL_THICKNESS_BLUR });
   const thicknessBlurH = device.createRenderPipeline({
@@ -1874,6 +1988,8 @@ async function initAndRun() {
         { binding: 1, resource: { buffer: compositeParamsBuf } },
         { binding: 2, resource: thicknessV.createView() },
         { binding: 3, resource: backgroundTex.createView() },
+        { binding: 4, resource: skyCubeTex.createView({ dimension: 'cube' }) },
+        { binding: 5, resource: skySampler },
       ],
     });
     lastW = w; lastH = h;

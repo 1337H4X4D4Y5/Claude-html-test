@@ -1116,8 +1116,11 @@
         'composite shader does not apply Beer law exp(-coef * thickness)');
       assert(compositeSrc.indexOf('reflect(-viewDir, n)') >= 0,
         'composite shader does not compute reflected view direction');
-      assert(compositeSrc.indexOf('sampleSky') >= 0,
-        'composite shader does not sample procedural sky');
+      // v105: procedural sky cubemap. Composite samples a real cube
+      // texture instead of the v104 inline sampleSky() helper.
+      assert(compositeSrc.indexOf('textureSampleLevel(skyCube') >= 0 ||
+             compositeSrc.indexOf('textureSample(skyCube') >= 0,
+        'composite shader does not sample the sky cubemap (skyCube)');
     });
 
     test('gpu-mpm v76: cs_g2p uses velocity-adaptive damping', () => {
@@ -1184,12 +1187,13 @@
         'composite must not apply ripple perturbation in v104');
       assert(compositeSrc.indexOf('curvatureAmp') < 0,
         'composite must not gate caustics on curvatureAmp in v104 (whole caustic block is gone)');
-      // sampleSky stays (used for Fresnel reflection); takes the
-      // reflection vector and the keylight direction as the sun dir.
-      assert(compositeSrc.indexOf('fn sampleSky') >= 0,
-        'composite must keep sampleSky() for procedural environment reflection');
-      assert(compositeSrc.indexOf('sampleSky(reflectedV, lightDir)') >= 0,
-        'sampleSky must be called with the reflection vector and the sun direction');
+      // v105: sampleSky function was hoisted out to a real cubemap
+      // texture baked once at init. The composite no longer defines
+      // or calls a procedural sampleSky helper.
+      assert(compositeSrc.indexOf('fn sampleSky') < 0,
+        'composite must not define an inline sampleSky() helper anymore (cubemap supersedes it)');
+      assert(compositeSrc.indexOf('texture_cube<f32>') >= 0,
+        'composite must bind a texture_cube<f32> for environment reflection');
     });
 
     test('gpu-mpm v104: depth blur replaced with screen-space curvature flow', () => {
@@ -1234,21 +1238,20 @@
         'curvParamsBuf must be written from JS each frame');
     });
 
-    test('gpu-mpm v93: composite normal uses dpdx/dpdy, refraction is single-tap', () => {
-      // v76 introduced 5-tap normal + chromatic refraction; v93 reverted
-      // both for perf (5 depth reads + 3 bg reads → 0 + 1 per pixel).
-      // The wider v80 bilateral depth blur keeps the dpdx/dpdy normal
-      // smooth enough, and the v89 thinClamp masks silhouette artifacts.
+    test('gpu-mpm v105: composite uses silhouette-aware 5-tap normal + single-tap refraction', () => {
+      // v105 brought back the 5-tap normal reconstruction (the
+      // canonical SSF technique from the NVIDIA deck). dpdx/dpdy gave
+      // 2×2-quad blockiness on smooth curvature-flow surfaces.
       const src = readMpmScript();
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
       const compEnd = src.indexOf('`;', compIdx);
       const compositeSrc = src.slice(compIdx, compEnd);
-      assert(compositeSrc.indexOf('dpdx(viewPos)') >= 0 &&
-             compositeSrc.indexOf('dpdy(viewPos)') >= 0,
-        'composite normal should be derived from dpdx/dpdy(viewPos)');
-      // Two textureLoad calls expected: one in the no-fluid branch (unwarped
-      // blit) and one in the fluid branch (warped refraction). v76's
-      // chromatic variant had three (one per channel) — that's gone.
+      assert(compositeSrc.indexOf('fn reconstructNormal') >= 0,
+        'composite must define reconstructNormal() helper for silhouette-aware 5-tap normal');
+      assert(compositeSrc.indexOf('reconstructNormal(coord') >= 0,
+        'composite must call reconstructNormal() to derive the surface normal');
+      // Single-tap refraction (background sampled at most twice — once
+      // in the no-fluid blit, once warped in the fluid branch).
       let bgSamples = 0;
       let i = 0;
       while ((i = compositeSrc.indexOf('textureLoad(backgroundTex', i)) >= 0) {
@@ -1256,6 +1259,24 @@
       }
       assert(bgSamples <= 2,
         'composite should sample backgroundTex at most 2 times (no chromatic refraction); got ' + bgSamples);
+    });
+
+    test('gpu-mpm v105: procedural sky cubemap baked once + composite tone-maps via ACES', () => {
+      const src = readMpmScript();
+      // Cubemap texture is created with the cube dimension via createView.
+      assert(src.indexOf('skyCubeTex') >= 0, 'skyCubeTex texture not created');
+      assert(src.indexOf("dimension: 'cube'") >= 0,
+        'composite bind group must view skyCubeTex with dimension: "cube"');
+      assert(src.indexOf('writeTexture') >= 0,
+        'sky cubemap faces must be uploaded via writeTexture');
+      // ACES tone mapping at the end of the composite.
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.indexOf('fn acesFilm') >= 0,
+        'composite must define acesFilm() tone-mapping helper');
+      assert(compositeSrc.indexOf('acesFilm(outColor)') >= 0,
+        'composite must tone-map the final colour through acesFilm()');
     });
 
     test('gpu-mpm v98 perf: MPM substep loop has zero submits inside', () => {

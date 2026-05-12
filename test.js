@@ -744,6 +744,10 @@
         addEventListener() {}, appendChild() {}, setAttribute() {},
         getAttribute() { return ''; },
         value: '', textContent: '', className: '', innerHTML: '',
+        // v131: sliders set dataset.tunable; dataset must be assignable.
+        dataset: {},
+        // v131: range inputs assign type/min/max/step/value.
+        type: '', min: '', max: '', step: '',
       };
       const stubDoc = {
         getElementById() { return stubEl; },
@@ -961,7 +965,10 @@
       const src = readMpmScript();
       const structMatch = src.match(/struct\s+CompositeParams\s*{([\s\S]*?)}/);
       assert(structMatch, 'CompositeParams WGSL struct not found');
-      const fields = structMatch[1]
+      // Strip // line comments before splitting so explanatory text
+      // inside the struct doesn't get counted as a field.
+      const body = structMatch[1].replace(/\/\/[^\n]*/g, '');
+      const fields = body
         .split(',')
         .map(s => s.trim())
         .filter(Boolean)
@@ -971,7 +978,7 @@
         'resolutionX', 'resolutionY', 'thicknessScale', 'refractStrength',
         'lightDirX', 'lightDirY', 'lightDirZ', '_pad1',
         'absorptionR', 'absorptionG', 'absorptionB', '_pad2',
-        'baseColorR', 'baseColorG', 'baseColorB', 'time',
+        'baseColorR', 'baseColorG', 'baseColorB', 'R0_water',
       ];
       assert(fields.length === expectedWgsl.length,
         'CompositeParams has ' + fields.length + ' fields, expected ' + expectedWgsl.length);
@@ -1418,6 +1425,50 @@
         'Phases-panel toggle button must be wired in JS');
     });
 
+    test('gpu-mpm v131: live tunable sliders + debug-report extensions', () => {
+      const src = readMpmScript();
+      // state.tunables exists with the 5 expected keys.
+      const required = ['worldSigma', 'worldRangeSigma', 'thicknessScale', 'R0_water', 'refractStrength'];
+      for (const key of required) {
+        assert(src.indexOf(key + ':') >= 0,
+          'state.tunables.' + key + ' default must be declared');
+      }
+      // TUNABLE_DEFS describes the slider ranges.
+      assert(src.indexOf('TUNABLE_DEFS') >= 0,
+        'TUNABLE_DEFS array (slider descriptors) must exist');
+      // Frame loop reads from state.tunables (not hardcoded constants).
+      assert(src.indexOf('state.tunables.worldSigma') >= 0,
+        'gauss uniform write must read state.tunables.worldSigma');
+      assert(src.indexOf('state.tunables.thicknessScale') >= 0,
+        'composite uniform write must read state.tunables.thicknessScale');
+      assert(src.indexOf('state.tunables.R0_water') >= 0,
+        'composite uniform write must read state.tunables.R0_water (slot 19)');
+      assert(src.indexOf('state.tunables.refractStrength') >= 0,
+        'composite uniform write must read state.tunables.refractStrength');
+      // Composite shader reads R0_water from the uniform (P.R0_water).
+      const cIdx = src.indexOf('const WGSL_COMPOSITE');
+      const cEnd = src.indexOf('`;', cIdx);
+      const compositeSrc = src.slice(cIdx, cEnd);
+      assert(compositeSrc.indexOf('P.R0_water') >= 0,
+        'composite shader must read R0_water from the uniform');
+      // CompositeParams struct has R0_water (replacing the old "time" pad).
+      assert(compositeSrc.indexOf('R0_water: f32') >= 0,
+        'CompositeParams must declare R0_water: f32');
+      // buildDebugReport includes toggle state + tunable values + computed stats.
+      assert(src.indexOf("'--- render toggles") >= 0,
+        'debug report must include a render-toggles section');
+      assert(src.indexOf("'--- live tunables") >= 0,
+        'debug report must include a live-tunables section');
+      assert(src.indexOf("'--- empirical render stats") >= 0,
+        'debug report must include an empirical-render-stats section');
+      // UI: tunables host + reset button.
+      const html = readMpmHtml();
+      assert(html.indexOf('id="phases-tunables"') >= 0,
+        'UI must include a #phases-tunables container');
+      assert(html.indexOf('id="tunables-reset"') >= 0,
+        'UI must include a #tunables-reset button');
+    });
+
     test('gpu-mpm v130: gaussianOnly toggle degrades bilateral to pure Gaussian (deck-18)', () => {
       // The deck shows a smoothing progression: pure Gaussian (slide
       // 17-18) → bilateral (slide 19) → curvature flow (slide 19+).
@@ -1678,20 +1729,19 @@
     });
 
     test('gpu-mpm regression: Gaussian σ ≥ PARTICLE_RADIUS (kernel spans particle features)', () => {
-      // If worldSigma < PARTICLE_RADIUS the depth-smoothing Gaussian
-      // can't actually blur across particle imposters — surface keeps
-      // visible per-particle bumps (the v109-v114 bug).
+      // v131: worldSigma is now a live tunable. Extract the DEFAULT
+      // value from the state.tunables initialiser and compare against
+      // PARTICLE_RADIUS. If the default is bad, the surface stays
+      // bumpy out of the box (the v109-v114 bug).
       const src = readMpmScript();
-      const wsMatch = src.match(/gaussBuf\[6\]\s*=\s*([0-9.]+);/);
-      assert(wsMatch, 'gaussBuf[6] (worldSigma) assignment not found');
+      const wsMatch = src.match(/worldSigma:\s*([0-9.]+),/);
+      assert(wsMatch, 'state.tunables.worldSigma default not found');
       const worldSigma = parseFloat(wsMatch[1]);
       const prMatch = src.match(/const\s+PARTICLE_RADIUS\s*=\s*([0-9.]+);/);
-      assert(prMatch, 'PARTICLE_RADIUS constant not found');
       const particleRadius = parseFloat(prMatch[1]);
       assert(worldSigma >= particleRadius,
-        'worldSigma (' + worldSigma + ') must be ≥ PARTICLE_RADIUS (' +
-        particleRadius + ') so the Gaussian kernel can smooth particle-' +
-        'scale imposter noise — otherwise the surface stays visibly bumpy');
+        'worldSigma default (' + worldSigma + ') must be ≥ PARTICLE_RADIUS (' +
+        particleRadius + ')');
     });
 
     test('gpu-mpm regression: bilateral range σ ≥ 3 × PARTICLE_RADIUS (no over-preservation)', () => {
@@ -1703,15 +1753,15 @@
       // smoothing while still preserving true intra-fluid edges (e.g.
       // separate sloshes).
       const src = readMpmScript();
-      const wrMatch = src.match(/gaussBuf\[8\]\s*=\s*([0-9.]+);/);
-      assert(wrMatch, 'gaussBuf[8] (worldRangeSigma) assignment not found');
+      // v131: worldRangeSigma is now a live tunable; check the default.
+      const wrMatch = src.match(/worldRangeSigma:\s*([0-9.]+),/);
+      assert(wrMatch, 'state.tunables.worldRangeSigma default not found');
       const worldRangeSigma = parseFloat(wrMatch[1]);
       const prMatch = src.match(/const\s+PARTICLE_RADIUS\s*=\s*([0-9.]+);/);
       const particleRadius = parseFloat(prMatch[1]);
       assert(worldRangeSigma >= 3 * particleRadius,
-        'worldRangeSigma (' + worldRangeSigma + ') must be ≥ 3 × PARTICLE_RADIUS (' +
-        (3 * particleRadius).toFixed(3) + ') — otherwise the bilateral preserves ' +
-        'every particle outline as a fake edge and the surface stays bumpy');
+        'worldRangeSigma default (' + worldRangeSigma + ') must be ≥ 3 × PARTICLE_RADIUS (' +
+        (3 * particleRadius).toFixed(3) + ')');
     });
 
     test('gpu-mpm regression: Gaussian truncation reaches ≥ 2σ', () => {
@@ -1735,24 +1785,19 @@
       // was tuned for the old additive-sprite range. If they drift apart,
       // water reads as glass-clear (the v113 bug).
       const src = readMpmScript();
-      const tsMatch = src.match(/compBuf\[6\]\s*=\s*([0-9.]+);/);
-      assert(tsMatch, 'thicknessScale (compBuf[6]) not found');
+      // v131: thicknessScale is now a live tunable; check the default.
+      const tsMatch = src.match(/thicknessScale:\s*([0-9.]+),/);
+      assert(tsMatch, 'state.tunables.thicknessScale default not found');
       const thicknessScale = parseFloat(tsMatch[1]);
-      // Water preset is the first FLUID_PRESETS entry.
       const apMatch = src.match(/key:\s*['"]water['"][\s\S]*?absorptionR:\s*([0-9.]+)/);
-      assert(apMatch, 'water preset absorptionR not found');
       const absorptionR = parseFloat(apMatch[1]);
-      // BOX_HALF_Z bounds the max view-ray path length ≈ 2 × BOX_HALF_Z.
       const bhzMatch = src.match(/let\s+BOX_HALF_Z\s*=\s*([0-9.]+);/);
-      assert(bhzMatch, 'BOX_HALF_Z initial value not found');
       const boxHalfZ = parseFloat(bhzMatch[1]);
-      const maxPathLen = 2 * boxHalfZ;
-      const maxThickness = maxPathLen * thicknessScale;
+      const maxThickness = 2 * boxHalfZ * thicknessScale;
       const redAbsorbed = 1 - Math.exp(-absorptionR * maxThickness);
       assert(redAbsorbed >= 0.30,
-        'Beer-Lambert too weak at max depth: only ' + (redAbsorbed * 100).toFixed(1) +
-        '% red absorbed (thicknessScale=' + thicknessScale + ', BOX_HALF_Z=' +
-        boxHalfZ + ', absorptionR=' + absorptionR + '). Water will look clear.');
+        'Beer-Lambert too weak at max depth (default thicknessScale): ' +
+        (redAbsorbed * 100).toFixed(1) + '% red absorbed. Water will look clear.');
     });
 
     test('gpu-mpm regression: thinClamp saturates within half of max pathLen', () => {
@@ -1850,19 +1895,22 @@
     });
 
     test('gpu-mpm regression: Schlick R₀ baseline present (non-zero at normal incidence)', () => {
-      // v112 fix. Without R₀ the Fresnel goes to 0 at normal incidence
-      // and the body has zero reflection looking straight down.
+      // v112 added R₀; v131 promoted it to a live tunable (uniform
+      // slot 19, formerly the unused 'time' slot). Verify both the
+      // tunable default is sensible and the shader uses Schlick's form.
       const src = readMpmScript();
+      const r0Match = src.match(/R0_water:\s*([0-9.]+),/);
+      assert(r0Match, 'state.tunables.R0_water default must be declared');
+      const r0 = parseFloat(r0Match[1]);
+      assert(r0 > 0.0 && r0 < 0.5,
+        'R0_water default must be a small positive value (got ' + r0 +
+        '); physical water is ~0.02');
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
       const compEnd = src.indexOf('`;', compIdx);
       const compositeSrc = src.slice(compIdx, compEnd);
-      const r0Match = compositeSrc.match(/R0_water\s*:\s*f32\s*=\s*([0-9.]+)/);
-      assert(r0Match, 'R0_water constant must be declared (Schlick baseline)');
-      const r0 = parseFloat(r0Match[1]);
-      assert(r0 > 0.0 && r0 < 0.5,
-        'R0_water must be a small positive value (got ' + r0 +
-        '); physical water is ~0.02');
-      // Formula must add R0 baseline to the (1-cosθ)⁵ angular term.
+      // Shader must read R0_water from the uniform (P.R0_water).
+      assert(compositeSrc.indexOf('P.R0_water') >= 0,
+        'composite shader must read R0_water from the CompositeParams uniform (v131)');
       assert(compositeSrc.match(/R0_water\s*\+\s*\(\s*1\.0\s*-\s*R0_water\s*\)\s*\*\s*pow/) !== null,
         'Fresnel must use the full Schlick form: R₀ + (1-R₀) × pow(1-cosθ, 5)');
     });
@@ -1972,13 +2020,13 @@
       // range. Net: Beer-Lambert + Fresnel both suppressed nearly to
       // zero; water looked clear. v113 recalibrates.
       const src = readMpmScript();
-      // compBuf[6] = thicknessScale must be at least 1.0 to give visible
-      // absorption with the path-length thickness.
-      const tsMatch = src.match(/compBuf\[6\]\s*=\s*([0-9.]+);/);
-      assert(tsMatch, 'thicknessScale (compBuf[6]) assignment not found');
+      // v131: thicknessScale is now a state.tunables default value;
+      // must be ≥ 1.0 to give visible Beer-Lambert at max box depth.
+      const tsMatch = src.match(/thicknessScale:\s*([0-9.]+),/);
+      assert(tsMatch, 'state.tunables.thicknessScale default not found');
       const ts = parseFloat(tsMatch[1]);
       assert(ts >= 1.0,
-        'thicknessScale must be >= 1.0 for path-length thickness (got ' + ts + ')');
+        'thicknessScale default must be >= 1.0 for path-length thickness (got ' + ts + ')');
       // thinClamp multiplier must scale to saturate within the box's
       // pathLen range (~0.10). 25× saturates at pathLen ≈ 0.04, sensible.
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
@@ -2017,7 +2065,9 @@
              compositeSrc.match(/R0\s*\+\s*\(1\.0\s*-\s*R0\)\s*\*\s*pow\(1\.0\s*-\s*nv/) !== null,
         'composite must compute fresnel = R₀ + (1-R₀)·pow(1-cosθ, 5)');
       // R₀ for water must be sensible (around 0.02 — IOR 1.33).
-      const r0Match = compositeSrc.match(/R0_water\s*:\s*f32\s*=\s*(0\.0\d+)/) ||
+      // v131: the live tunable default lives in state.tunables.
+      const r0Match = src.match(/R0_water:\s*(0\.0\d+),/) ||
+                      compositeSrc.match(/R0_water\s*:\s*f32\s*=\s*(0\.0\d+)/) ||
                       compositeSrc.match(/let\s+R0\s*=\s*(0\.0\d+)/);
       if (r0Match) {
         const r0 = parseFloat(r0Match[1]);
@@ -2391,7 +2441,8 @@
       // absorbed fraction at the deepest point of the box. Should be
       // in the "visibly blue" range — 30-85%.
       const src = readMpmScript();
-      const tsMatch  = src.match(/compBuf\[6\]\s*=\s*([0-9.]+);/);
+      // v131: thicknessScale is now a state.tunables default value.
+      const tsMatch  = src.match(/thicknessScale:\s*([0-9.]+),/);
       const arMatch  = src.match(/key:\s*['"]water['"][\s\S]*?absorptionR:\s*([0-9.]+)/);
       const bhzMatch = src.match(/let\s+BOX_HALF_Z\s*=\s*([0-9.]+);/);
       assert(tsMatch && arMatch && bhzMatch, 'failed to extract calibration constants');
@@ -2409,8 +2460,9 @@
 
     test('Integration: Schlick R0 from source gives ~2% reflection at normal incidence', () => {
       const src = readMpmScript();
-      const r0Match = src.match(/R0_water\s*:\s*f32\s*=\s*([0-9.]+)/);
-      assert(r0Match, 'R0_water constant not found in composite');
+      // v131: live-tunable default in state.tunables.R0_water.
+      const r0Match = src.match(/R0_water:\s*([0-9.]+),/);
+      assert(r0Match, 'R0_water default not found in state.tunables');
       const R0 = parseFloat(r0Match[1]);
       const F_normal = RenderMath.schlick(1.0, R0);
       assert(Math.abs(F_normal - R0) < 1e-9);
@@ -2457,7 +2509,8 @@
       // here we also check the screen-space radius using the camera
       // projection numerics.)
       const src = readMpmScript();
-      const wsMatch = src.match(/gaussBuf\[6\]\s*=\s*([0-9.]+);/);
+      // v131: worldSigma is a state.tunables default.
+      const wsMatch = src.match(/worldSigma:\s*([0-9.]+),/);
       const prMatch = src.match(/const\s+PARTICLE_RADIUS\s*=\s*([0-9.]+);/);
       const worldSigma   = parseFloat(wsMatch[1]);
       const particleRadius = parseFloat(prMatch[1]);

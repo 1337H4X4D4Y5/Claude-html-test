@@ -179,6 +179,33 @@
     content: "●"; color: #4aa3ff;
   }
   #phases-panel button.phase:active { transform: scale(0.985); }
+  /* v131: per-tunable slider row inside the Tunables section. */
+  #phases-tunables .tunable {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 8px;
+    align-items: center; padding: 4px 2px;
+  }
+  #phases-tunables .tunable-name {
+    font-size: 12px; font-weight: 600; color: rgba(232,241,255,0.85);
+  }
+  #phases-tunables .tunable-val {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; color: #cfe6ff;
+    text-align: right; min-width: 56px;
+  }
+  #phases-tunables input[type="range"] {
+    grid-column: 1 / span 2;
+    width: 100%; margin: 0; accent-color: #f0a050;
+    -webkit-appearance: none; appearance: none;
+    background: rgba(220,140,80,0.20);
+    height: 22px; border-radius: 11px;
+  }
+  #phases-tunables input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 22px; height: 22px; border-radius: 11px;
+    background: #f0a050; border: 2px solid rgba(0,0,0,0.2);
+    cursor: pointer;
+  }
+
   /* v129: cycle chip — multi-state debug toggle. Distinct orange tint
      when the cycle is active (any non-zero mode); off-state matches
      the regular .phase look. Dot ::before replaced with an arrow to
@@ -371,6 +398,9 @@
   <button class="phase" data-toggle="cubemapReflect">Cubemap reflection sample</button>
   <h4>Post</h4>
   <button class="phase" data-toggle="toneMap">ACES tone mapping</button>
+  <h4>Tunables</h4>
+  <div id="phases-tunables"></div>
+  <button class="bulk" id="tunables-reset" style="margin-top: 6px;">Reset tunables</button>
   <h4>Diagnostics</h4>
   <button class="phase cycle" id="debug-viz-cycle">Debug viz: off</button>
 </div>
@@ -416,7 +446,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v130 (2026-05-12 — gaussianOnly toggle: collapses the bilateral filter to a pure Gaussian (deck slide 17-18) so the user can A/B against the full v110 bilateral (slide 19). New "Gaussian only" preset; 5 deck-section smoothing combinations accessible via 3 chips.)';
+const APP_VERSION = 'mpm-v131 (2026-05-12 — live tunable sliders: worldSigma / worldRangeSigma / thicknessScale / R0_water / refractStrength all exposed as orange sliders in a Tunables section. R0_water promoted to a uniform slot. Debug report extended with toggle state + tunable values + computed empirical render stats.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -705,7 +735,26 @@ const state = {
   debugVizLabels: ['Debug viz: off', 'Debug viz: depth',
                    'Debug viz: normal', 'Debug viz: thickness',
                    'Debug viz: noise', 'Debug viz: back-depth'],
+
+  // v131: live-tunable artistic constants. Each binds to a slider in
+  // the FX panel and is consumed by the uniform writes each frame.
+  // Persisted to localStorage so the user's tuning survives a reload.
+  tunables: {
+    worldSigma:      0.030,
+    worldRangeSigma: 0.15,
+    thicknessScale:  1.8,
+    R0_water:        0.020,
+    refractStrength: 35.0,
+  },
 };
+// Slider range + step descriptors for each tunable, used to build the UI.
+const TUNABLE_DEFS = [
+  { key: 'worldSigma',      label: 'Gauss σ',         min: 0.005, max: 0.080, step: 0.001, fmt: v => v.toFixed(3) },
+  { key: 'worldRangeSigma', label: 'Bilateral σ_z',   min: 0.010, max: 0.500, step: 0.005, fmt: v => v.toFixed(3) },
+  { key: 'thicknessScale',  label: 'Thickness ×',     min: 0.1,   max: 6.0,   step: 0.1,   fmt: v => v.toFixed(1) },
+  { key: 'R0_water',        label: 'Fresnel R₀',      min: 0.000, max: 0.100, step: 0.002, fmt: v => v.toFixed(3) },
+  { key: 'refractStrength', label: 'Refract strength',min: 0,     max: 80,    step: 1,     fmt: v => v.toFixed(0) },
+];
 (function loadTogglesFromStorage() {
   try {
     const saved = JSON.parse(localStorage.getItem('water-box-toggles') || '{}');
@@ -716,12 +765,22 @@ const state = {
     if (Number.isInteger(saved.__debugViz)) {
       state.debugViz = Math.max(0, Math.min(5, saved.__debugViz));
     }
+    // v131: live tunable values (floats).
+    if (saved.__tunables && typeof saved.__tunables === 'object') {
+      for (const def of TUNABLE_DEFS) {
+        const v = saved.__tunables[def.key];
+        if (typeof v === 'number' && Number.isFinite(v) && v >= def.min && v <= def.max) {
+          state.tunables[def.key] = v;
+        }
+      }
+    }
   } catch (_) {}
 })();
 function saveTogglesToStorage() {
   try {
     const obj = Object.assign({}, state.toggles);
     obj.__debugViz = state.debugViz;
+    obj.__tunables = state.tunables;
     localStorage.setItem('water-box-toggles', JSON.stringify(obj));
   } catch (_) {}
 }
@@ -895,6 +954,49 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
       syncUI();
     });
   }
+  // v131: build the tunable sliders. Each TUNABLE_DEF becomes a 2-row
+  // grid (label + numeric value + the slider itself spanning both).
+  // Live values written into state.tunables on input; frame loop reads
+  // from there.
+  const tunablesHost = document.getElementById('phases-tunables');
+  function buildTunables() {
+    if (!tunablesHost) return;
+    tunablesHost.innerHTML = '';
+    for (const def of TUNABLE_DEFS) {
+      const wrap = document.createElement('div');
+      wrap.className = 'tunable';
+      const name = document.createElement('div');
+      name.className = 'tunable-name'; name.textContent = def.label;
+      const val = document.createElement('div');
+      val.className = 'tunable-val';
+      val.textContent = def.fmt(state.tunables[def.key]);
+      const slider = document.createElement('input');
+      slider.type = 'range'; slider.min = def.min; slider.max = def.max;
+      slider.step = def.step; slider.value = state.tunables[def.key];
+      slider.dataset.tunable = def.key;
+      slider.addEventListener('input', function () {
+        const v = parseFloat(slider.value);
+        state.tunables[def.key] = v;
+        val.textContent = def.fmt(v);
+        saveTogglesToStorage();
+      });
+      wrap.appendChild(name); wrap.appendChild(val); wrap.appendChild(slider);
+      tunablesHost.appendChild(wrap);
+    }
+  }
+  buildTunables();
+  // Reset button restores tunables to their last-committed defaults.
+  const resetBtn = document.getElementById('tunables-reset');
+  if (resetBtn) resetBtn.addEventListener('click', function () {
+    state.tunables.worldSigma      = 0.030;
+    state.tunables.worldRangeSigma = 0.15;
+    state.tunables.thicknessScale  = 1.8;
+    state.tunables.R0_water        = 0.020;
+    state.tunables.refractStrength = 35.0;
+    buildTunables();
+    saveTogglesToStorage();
+  });
+
   // v129: debug-viz cycle chip. Increments state.debugViz 0-5, updates
   // the label, marks .on whenever the mode is non-zero so the user
   // sees the cycle is active.
@@ -1987,7 +2089,10 @@ struct CompositeParams {
   resolutionX: f32, resolutionY: f32, thicknessScale: f32, refractStrength: f32,
   lightDirX: f32, lightDirY: f32, lightDirZ: f32, _pad1: f32,
   absorptionR: f32, absorptionG: f32, absorptionB: f32, _pad2: f32,
-  baseColorR: f32, baseColorG: f32, baseColorB: f32, time: f32,
+  // v131: slot 19 (formerly the v79 'time' field, unused since v104)
+  // is now R0_water — Schlick reflectance at normal incidence,
+  // sourced from state.tunables.R0_water so the user can tune it live.
+  baseColorR: f32, baseColorG: f32, baseColorB: f32, R0_water: f32,
 };
 
 // v121: RenderToggles — per-effect on/off floats (0.0 = bypass, 1.0 = on).
@@ -2134,7 +2239,10 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   // at normal incidence — physically wrong: water still reflects ~2%
   // straight on, and that baseline gives the body a faint sky tint
   // even when viewed from directly above.
-  let R0_water: f32 = 0.020;
+  // v131: R0_water now comes from the live-tunable uniform slot, so
+  // the user can slide it between ~0 (no baseline reflection) and
+  // ~0.10 (glass / oil look). Physical water = 0.020.
+  let R0_water: f32 = P.R0_water;
   let fresnel = R0_water + (1.0 - R0_water) * pow(1.0 - nv, 5.0);
 
   // v107: two-layer thickness — Beer-Lambert path length is the
@@ -3415,7 +3523,10 @@ async function initAndRun() {
     // Box depth ≈ 0.10 world units; with absorption coefs 5.0/2.5/0.8
     // and pathLen up to 0.10, scale 1.8 gives ~60% red absorption at
     // mid-body — visible blue tint instead of clear water.
-    compBuf[6] = 1.8;  compBuf[7] = SIM_TUNE.refractStrength;
+    // v131: live from state.tunables instead of fixed v113 (1.8) /
+    // SIM_TUNE.refractStrength so the user can tune both via sliders.
+    compBuf[6] = state.tunables.thicknessScale;
+    compBuf[7] = state.tunables.refractStrength;
     const Lw = [0.35, 0.80, 0.50];
     const Lv = [
       cam.right[0]*Lw[0] + cam.right[1]*Lw[1] + cam.right[2]*Lw[2],
@@ -3438,7 +3549,7 @@ async function initAndRun() {
     compBuf[18] = SIM_TUNE.baseColorB;
     // v104: slot 19 (formerly time) is unused after the v104 strip of
     // animated noise/caustics. Kept in the layout for ABI stability.
-    compBuf[19] = 0;
+    compBuf[19] = state.tunables.R0_water;
     device.queue.writeBuffer(compositeParamsBuf, 0, compBuf);
 
     // v104: curvature-flow uniform. Cx, Cy are the physical scale of one
@@ -3481,9 +3592,9 @@ async function initAndRun() {
     gaussBuf[0] = 0.1; gaussBuf[1] = 100;
     gaussBuf[2] = f / aspect; gaussBuf[3] = f;
     gaussBuf[4] = canvas.width; gaussBuf[5] = canvas.height;
-    gaussBuf[6] = 0.030;
+    gaussBuf[6] = state.tunables.worldSigma;
     gaussBuf[7] = 50.0;
-    gaussBuf[8] = 0.15;
+    gaussBuf[8] = state.tunables.worldRangeSigma;
     // v121: enabled flag (1.0 = run; 0.0 = passthrough).
     gaussBuf[9] = state.toggles.smoothing ? 1.0 : 0.0;
     // v130: gaussianOnly flag — when on, the bilateral collapses to
@@ -3916,6 +4027,38 @@ updateDebug();
 function buildDebugReport() {
   const soundC = Math.sqrt(SIM_TUNE.pressureK / SIM_TUNE.restDensity);
   const cflDt = CELL_SIZE / soundC;
+
+  // v131: empirical render-pipeline stats. These are CPU-computable
+  // from the active state.tunables + scene geometry — let me reason
+  // about visual problems from raw numbers instead of needing a photo.
+  const PR = PARTICLE_RADIUS;
+  const maxPathLen = 2 * BOX_HALF_Z;
+  const T = state.tunables;
+  const maxThickness = maxPathLen * T.thicknessScale;
+  const absorbR = (1 - Math.exp(-SIM_TUNE.absorptionR * maxThickness)) * 100;
+  const absorbG = (1 - Math.exp(-SIM_TUNE.absorptionG * maxThickness)) * 100;
+  const absorbB = (1 - Math.exp(-SIM_TUNE.absorptionB * maxThickness)) * 100;
+  const fresnelNormal = T.R0_water;
+  const fresnel60 = T.R0_water + (1 - T.R0_water) * Math.pow(1 - 0.5, 5);
+  const fresnelGrazing = 1.0;
+  // Screen-space σ at a typical viewing depth (used in the bilateral
+  // pass). Reproduces the runtime calculation.
+  const fovY = 50 * Math.PI / 180;
+  const f = 1 / Math.tan(fovY / 2);
+  const aspect = canvas ? canvas.width / canvas.height : 0.46;
+  const fAspect = f / aspect;
+  const resX = canvas ? canvas.width : 585;
+  const viewZ = 2.2;
+  const pixelView = 2 * viewZ / (fAspect * resX);
+  const sigmaScreen = T.worldSigma / pixelView;
+  const Rscreen = Math.min(3 * sigmaScreen, 50);
+  const thinSatPath = 1 / 25; // thinClamp multiplier
+  const togglesOn = Object.keys(state.toggles)
+    .filter(k => state.toggles[k])
+    .join(', ') || '(none)';
+  const togglesOff = Object.keys(state.toggles)
+    .filter(k => !state.toggles[k])
+    .join(', ') || '(none)';
   return [
     '=== Water Box MPM debug ===',
     'version: ' + APP_VERSION,
@@ -3937,7 +4080,7 @@ function buildDebugReport() {
     'gravity y: ' + state.gravity.y.toFixed(3),
     'gravity z: ' + state.gravity.z.toFixed(3),
     '',
-    '--- tunable constants ---',
+    '--- sim tunables ---',
     'EOS:           ' + SIM_TUNE.eos,
     'pressureK:     ' + SIM_TUNE.pressureK,
     'restDensity:   ' + SIM_TUNE.restDensity,
@@ -3953,6 +4096,33 @@ function buildDebugReport() {
     'CFL dt < cellSize/c       = ' + cflDt.toFixed(5),
     'substep dt cap (1/300)    = ' + (1/300).toFixed(5),
     'CFL margin                = ' + (cflDt / (1/300)).toFixed(2) + 'x',
+    '',
+    '--- render toggles (v121+) ---',
+    'ON:  ' + togglesOn,
+    'OFF: ' + togglesOff,
+    'debugViz:        ' + (state.debugVizLabels[state.debugViz] || 'off'),
+    '',
+    '--- live tunables (v131) ---',
+    'worldSigma:      ' + T.worldSigma.toFixed(3) + '   (Gaussian σ in world units)',
+    'worldRangeSigma: ' + T.worldRangeSigma.toFixed(3) + '   (bilateral edge σ in view-space depth)',
+    'thicknessScale:  ' + T.thicknessScale.toFixed(2) + '    (Beer-Lambert calibration)',
+    'R0_water:        ' + T.R0_water.toFixed(3) + '   (Schlick reflectance at normal incidence)',
+    'refractStrength: ' + T.refractStrength.toFixed(1) + '    (refraction-warp pixels at thickness=1)',
+    '',
+    '--- empirical render stats (computed from above) ---',
+    'PARTICLE_RADIUS:      ' + PR.toFixed(3),
+    'worldSigma / PR:      ' + (T.worldSigma / PR).toFixed(2) + 'x  (>1 ⇒ kernel spans ≥1 particle)',
+    'rangeSigma / (2·PR):  ' + (T.worldRangeSigma / (2 * PR)).toFixed(2) + 'x  (>1 ⇒ bilateral smooths across particle boundaries)',
+    'pixelView@typical-z:  ' + pixelView.toFixed(5) + '  (view-space size of 1 screen pixel at viewZ=-' + viewZ + ')',
+    'σ_screen @ typical-z: ' + sigmaScreen.toFixed(1) + ' px  (Gaussian σ on screen)',
+    'R (truncation):       ' + Rscreen.toFixed(0) + ' px  (3σ, clamped to maxScreenRadius=50)',
+    'max pathLen:          ' + maxPathLen.toFixed(3) + '  (= 2·BOX_HALF_Z)',
+    'max optical thickness:' + maxThickness.toFixed(3) + '  (= pathLen × thicknessScale)',
+    'absorption @ max:     R=' + absorbR.toFixed(1) + '%  G=' + absorbG.toFixed(1) + '%  B=' + absorbB.toFixed(1) + '%',
+    'Fresnel @ normal inc: ' + (fresnelNormal * 100).toFixed(2) + '%',
+    'Fresnel @ 60°:        ' + (fresnel60 * 100).toFixed(2) + '%',
+    'Fresnel @ grazing:    ' + (fresnelGrazing * 100).toFixed(2) + '%',
+    'thinClamp saturates:  pathLen=' + thinSatPath.toFixed(3) + '  (' + (thinSatPath / maxPathLen * 100).toFixed(1) + '% of max pathLen)',
     '',
     'init error: ' + (state.initError || 'none'),
     'gpu error:  ' + (state.gpuError || 'none'),

@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v130</span>
+    <span class="tag">v131</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v130: gaussianOnly smoothing toggle — collapses the v110 bilateral filter to a pure Gaussian (deck slide 17-18) when on, so the user can A/B against the full bilateral (slide 19) and curvature flow (slide 19+) directly. New "Gaussian only" preset chip applies it. 5 deck-section smoothing combinations now accessible via 3 chips.</div>
+  <div class="desc">MLS-MPM on the GPU. v131: live tunable sliders — the FX panel now has a Tunables section with five orange range sliders for worldSigma, worldRangeSigma, thicknessScale, R0_water, and refractStrength. R0_water promoted from shader constant to a CompositeParams uniform slot. Debug report extended with toggle state + tunable values + computed empirical render stats (Gaussian σ in screen px, absorption % at max path, Fresnel at each cosθ, thinClamp saturation point, etc.).</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

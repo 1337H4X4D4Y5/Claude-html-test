@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v135</span>
+    <span class="tag">v136</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v135: perf audit now reports stderr alongside the on/off delta. The v134 report's negative phase costs (toggle ON makes the sim FASTER, physically impossible) were JS-side measurement noise dwarfing the sub-ms per-phase cost on Apple GPU — Welford-online variance plus a 1.96·σ noise-floor clamp surfaces those as "< noise" instead of printing a misleading sign. Sample count bumped 30 → 120 to halve stderr.</div>
+  <div class="desc">MLS-MPM on the GPU. v136: fix toneMap-off making the fluid invisible. The off-branch was clamp(linearOut, 0, 1), but linearOut is HDR (sky×fresnel up to ~3.5 at the silhouette, spec ~5) so highlights and the silhouette clipped to pure white — indistinguishable from the white-tile backdrop. Replaced with the exposure curve 1 - exp(-linearOut) which saturates smoothly to 1.0 without clipping; the toggle is now a genuine A/B between exposure and ACES Filmic.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

@@ -397,7 +397,7 @@
   <button class="phase" data-toggle="iblAmbient">IBL ambient (vs flat)</button>
   <button class="phase" data-toggle="cubemapReflect">Cubemap reflection sample</button>
   <h4>Post</h4>
-  <button class="phase" data-toggle="toneMap">ACES tone mapping</button>
+  <button class="phase" data-toggle="toneMap">Tone map: ACES vs exposure</button>
   <h4>Tunables</h4>
   <div id="phases-tunables"></div>
   <button class="bulk" id="tunables-reset" style="margin-top: 6px;">Reset tunables</button>
@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v135 (2026-05-12 — perf audit honest-about-noise. Negative phase costs in the v134 report ("flowNoise: −0.20 ms") were the JS-side measurement noise floor exceeding the per-phase cost on Apple GPU. v135 adds Welford-online variance per side, computes the standard error of the mean delta, and labels any |Δ| < 1.96·σ as "< noise" instead of printing the misleading sign. AUDIT_SAMPLES bumped 30 → 120 (halves stderr; run time ~64s).)';
+const APP_VERSION = 'mpm-v136 (2026-05-12 — fix: toneMap-off made the fluid invisible on the white-tile backdrop. The off-branch was clamp(linearOut, 0, 1), but linearOut is HDR (sky×fresnel up to ~3.5 at the silhouette, spec up to ~5) so highlights + silhouette clipped to pure white — indistinguishable from the bg. v136 swaps the off-branch to an exposure curve 1 - exp(-linearOut) which saturates smoothly to 1.0 without clipping. The toneMap toggle is now a genuine A/B between exposure-curve and ACES Filmic.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2520,10 +2520,16 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let specEff = specMasked * T.spec;
   let linearOut = mix(transmitted, sky, fresnelEff)
                 + vec3<f32>(1.0, 0.97, 0.92) * specEff * 1.0;
-  // v121: tone-map toggle — off = clamped linear (no compression),
-  // on = ACES Filmic.
-  let mappedOut = mix(clamp(linearOut, vec3<f32>(0.0), vec3<f32>(1.0)),
-                      acesFilm(linearOut), T.toneMap);
+  // v136: toneMap-off used to be clamp(linearOut, 0, 1) — but linearOut
+  // is HDR (sky×fresnel reaches 1.5-3.5 near the silhouette, spec hits
+  // ~5 in the highlight region) so the clamp clipped the body
+  // silhouette + highlights to pure white. Against the white-tile
+  // backdrop the fluid appeared to vanish. v136 makes off = exposure
+  // curve 1 - exp(-x): smooth saturation toward 1, no clipping, visibly
+  // different from ACES (slightly darker mid-tones, gentler shoulder)
+  // so the A/B is meaningful.
+  let exposureOut = vec3<f32>(1.0) - exp(-linearOut);
+  let mappedOut = mix(exposureOut, acesFilm(linearOut), T.toneMap);
 
   // v129: debug visualisation override. Selected by integer T.debugViz
   // (0 = off, 1=depth, 2=normal, 3=thickness, 4=noise, 5=back depth).

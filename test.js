@@ -2486,6 +2486,29 @@
       }
     });
 
+    test('gpu-mpm v136: toneMap off branch uses exposure curve, not hard clamp', () => {
+      // v121-v135 had `clamp(linearOut, 0, 1)` for the toneMap-off path.
+      // linearOut is HDR (sky×fresnel ~ 1.5-3.5 at silhouette, spec
+      // can hit 5) so the clamp clipped highlights and silhouette to
+      // pure white — fluid disappeared on the white-tile backdrop.
+      // v136 swaps in `1 - exp(-linearOut)` which saturates smoothly.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      // The off-branch of the toneMap mix() must call exp(-linearOut),
+      // and there must be no clamp(linearOut, 0, 1) clamping the body.
+      assert(compositeSrc.match(/vec3<f32>\(1\.0\)\s*-\s*exp\(\s*-\s*linearOut\s*\)/) !== null,
+        'toneMap-off branch must use 1 - exp(-linearOut), not clamp(linearOut, 0, 1)');
+      assert(compositeSrc.indexOf('clamp(linearOut, vec3<f32>(0.0), vec3<f32>(1.0))') < 0,
+        'toneMap-off must not hard-clamp linearOut (it clips HDR highlights to white)');
+      // Sanity-check the math: exposure(0)=0, exposure(1)≈0.63, exposure(5)≈0.99.
+      const exposure = x => 1 - Math.exp(-x);
+      assert(Math.abs(exposure(0) - 0) < 1e-9, 'exposure(0) should be 0');
+      assert(Math.abs(exposure(1) - 0.6321) < 0.01, 'exposure(1) should be ≈ 0.632');
+      assert(exposure(5) > 0.99, 'exposure(5) should saturate near 1.0');
+    });
+
     test('RenderMath: curvature Laplacian = 0 on a flat surface', () => {
       const zc = 0.5;
       const L = RenderMath.laplacian5(zc, zc, zc, zc, zc);

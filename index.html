@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v111</span>
+    <span class="tag">v112</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v111: image-based ambient irradiance — sample the HDR sky cubemap in the surface-normal direction (clamped to avoid sun-core blow-out) for true environment-lit ambient instead of a flat 0.30 constant. Confirms NVIDIA SSF deck slide 20: surface position + normal both derived from the same smoothed depth (Gaussian + bilateral + curvature flow). v110 bilateral, v109 view-invariant Gaussian, v108 ray-traced caustics, v107 two-layer thickness, v106 HDR cubemap underneath.</div>
+  <div class="desc">MLS-MPM on the GPU. v112: full Schlick Fresnel (NVIDIA SSF deck slide 22) — R₀ + (1−R₀)·(1−cosθ)⁵ with R₀ = 0.020 for water (IOR 1.33). Previous versions used only the angular term, so flat water from straight above had ZERO reflection; now it correctly reflects 2% at normal incidence. v111 IBL ambient, v110 bilateral, v109 view-invariant Gaussian, v108 ray-traced caustics underneath.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

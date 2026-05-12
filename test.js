@@ -1389,6 +1389,33 @@
         'frame loop must write gaussBuf[8] = worldRangeSigma');
     });
 
+    test('gpu-mpm v112: full Schlick Fresnel R₀ + (1-R₀)·(1-cosθ)⁵ (slide 22)', () => {
+      // Previous versions used only the angular term pow(1-cosθ, 5),
+      // which yields ZERO reflection at normal incidence. Schlick's
+      // full approximation adds an R₀ baseline so flat water still
+      // reflects ~2% straight on (R₀ = ((n-1)/(n+1))² ≈ 0.02 for
+      // water at IOR 1.33). The slide explicitly calls this out.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.indexOf('R0_water') >= 0 ||
+             compositeSrc.match(/let\s+R0/) !== null,
+        'composite must declare an R₀ baseline (reflectance at normal incidence)');
+      // The full Schlick form must add R0 + (1-R0)*pow(1-nv, 5).
+      assert(compositeSrc.match(/R0_water\s*\+\s*\(\s*1\.0\s*-\s*R0_water\s*\)\s*\*\s*pow\(\s*1\.0\s*-\s*nv/) !== null ||
+             compositeSrc.match(/R0\s*\+\s*\(1\.0\s*-\s*R0\)\s*\*\s*pow\(1\.0\s*-\s*nv/) !== null,
+        'composite must compute fresnel = R₀ + (1-R₀)·pow(1-cosθ, 5)');
+      // R₀ for water must be sensible (around 0.02 — IOR 1.33).
+      const r0Match = compositeSrc.match(/R0_water\s*:\s*f32\s*=\s*(0\.0\d+)/) ||
+                      compositeSrc.match(/let\s+R0\s*=\s*(0\.0\d+)/);
+      if (r0Match) {
+        const r0 = parseFloat(r0Match[1]);
+        assert(r0 > 0.005 && r0 < 0.06,
+          'R₀ for water should be ~0.020 (IOR 1.33); got ' + r0);
+      }
+    });
+
     test('gpu-mpm v111: image-based ambient irradiance (sample sky cubemap with surface normal)', () => {
       // v111 implements NVIDIA SSF deck slide 20 "shade as usual" with
       // a real IBL ambient term: ambient = clamp(textureSample(skyCube, n))

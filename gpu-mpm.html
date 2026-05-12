@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v111 (2026-05-12 — surface shading: image-based ambient irradiance — sample sky cubemap in normal direction for ambient (replaces flat 0.30); confirms slide-20 position+normal consistency)';
+const APP_VERSION = 'mpm-v112 (2026-05-12 — full Schlick Fresnel (NVIDIA SSF slide 22): R₀ + (1-R₀)·(1-cos θ)⁵ with R₀ = 0.020 for water (n=1.33). Was only (1-cos θ)⁵.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1496,7 +1496,15 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   // up for the bloom being gone; ACES tone mapping reins in the peak.
   let spec = pow(max(0.0, dot(n, halfDir)), 220.0);
   let nv = max(0.0, dot(n, viewDir));
-  let fresnel = pow(1.0 - nv, 5.0);
+  // v112: full Schlick's approximation (NVIDIA SSF deck slide 22).
+  //   F(θ) = R₀ + (1 − R₀) · (1 − cos θ)⁵
+  // R₀ for water at IOR 1.33: ((n-1)/(n+1))² ≈ 0.020. Earlier versions
+  // used only the (1-cos θ)⁵ angular term, which means zero reflection
+  // at normal incidence — physically wrong: water still reflects ~2%
+  // straight on, and that baseline gives the body a faint sky tint
+  // even when viewed from directly above.
+  let R0_water: f32 = 0.020;
+  let fresnel = R0_water + (1.0 - R0_water) * pow(1.0 - nv, 5.0);
 
   // v107: two-layer thickness — Beer-Lambert path length is the
   // physical view-space distance between front and back fluid faces,

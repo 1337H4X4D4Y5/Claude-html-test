@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v124</span>
+    <span class="tag">v125</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v124: deck-25 additive-sprite thickness restored as a toggle — runs alongside the v107 two-layer pathLen, switchable in one tap. Tap "Additive thickness (deck-25)" in 🎚 to A/B against the physical method. New "Deck thickness" preset chip applies the full deck-faithful look. WGSL_THICKNESS + WGSL_THICKNESS_BLUR + half-res r16float targets are back behind a toggle.</div>
+  <div class="desc">MLS-MPM on the GPU. v125: deck-38 surface-detail flow noise — particle imposters re-render in a noise pass, sampling procedural 3D value-noise at their world centres (depth-tested against the front depth). Composite reads the resulting noise field, takes its screen-space gradient, perturbs the surface normal. Gated by the new "Flow noise (deck-38)" chip + "Flow detail" preset.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

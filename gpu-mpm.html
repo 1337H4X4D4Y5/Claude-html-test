@@ -324,6 +324,7 @@
     <button class="preset" data-preset="glassy_mirror">Glassy</button>
     <button class="preset" data-preset="raw_depth">Raw depth</button>
     <button class="preset" data-preset="deck_thickness">Deck thickness</button>
+    <button class="preset" data-preset="flow_detail">Flow detail</button>
   </div>
   <div id="phases-bulk">
     <button class="bulk" data-bulk="on">All on</button>
@@ -334,6 +335,7 @@
   <button class="phase" data-toggle="curvatureFlow">Curvature flow</button>
   <button class="phase" data-toggle="caustics">Caustics — ray-traced sun</button>
   <button class="phase" data-toggle="additiveThickness">Additive thickness (deck-25)</button>
+  <button class="phase" data-toggle="flowNoise">Flow noise (deck-38)</button>
   <h4>Body shading</h4>
   <button class="phase" data-toggle="beerLambert">Beer-Lambert absorption</button>
   <button class="phase" data-toggle="subsurface">Subsurface scatter</button>
@@ -388,7 +390,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v124 (2026-05-12 — deck-25 additive-sprite thickness restored as a toggle. Tap "Additive thickness (deck-25)" in 🎚 to switch from physical two-layer pathLen to the NVIDIA deck\'s exact additive-Gaussian-splat method.)';
+const APP_VERSION = 'mpm-v125 (2026-05-12 — deck-38 flow noise: particle imposters sample procedural 3D value-noise at their world centres, composite gradient-perturbs the surface normal. Tap "Flow noise (deck-38)" or "Flow detail" preset.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -658,6 +660,8 @@ const state = {
     toneMap:           true,  // ACES Filmic at end of composite
     additiveThickness: false, // v124: false = two-layer pathLen (v107+);
                               //       true  = deck-25 additive sprite splat
+    flowNoise:         false, // v125: deck-38 surface detail via 3D noise
+                              //       sampled at particle world centres.
   },
 };
 (function loadTogglesFromStorage() {
@@ -676,13 +680,17 @@ const TOGGLE_PRESETS = {
   minimalist:   { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: false, refraction: true,  fresnel: true,  spec: false, iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
   caustics:     { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: false, refraction: true,  fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: true,  additiveThickness: false },
   mirror:       { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: false, fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false },
-  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false, additiveThickness: false },
+  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false, additiveThickness: false, flowNoise: false },
   body_only:    { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: true,  refraction: false, fresnel: false, spec: false, iblAmbient: true,  cubemapReflect: false, toneMap: true,  additiveThickness: false },
   glassy_mirror:{ smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: true,  fresnel: true,  spec: true,  iblAmbient: false, cubemapReflect: true,  toneMap: true,  additiveThickness: false },
   // v124: deck-faithful preset — additive-sprite thickness on top of
   // all the other v123 stages. Lets the user A/B against the default
   // (two-layer pathLen) by tapping just this one preset.
-  deck_thickness:{ smoothing: true, curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: true  },
+  deck_thickness:{ smoothing: true, curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: true,  flowNoise: false },
+  // v125: deck-38 surface-detail preset — flow noise on top of the
+  // reference render so the user can see the noise-driven flow detail
+  // immediately. Same Reference look + flowNoise = true.
+  flow_detail:  { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false, flowNoise: true  },
 };
 
 const DEG = Math.PI / 180;
@@ -1414,6 +1422,97 @@ fn fs_v(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 }
 `;
 
+// v125: deck-38 "Adding Surface Detail" — render spheres again, sampling
+// a 3D noise field in object-space at each particle's world centre.
+// Output goes into a noise render target. Composite reads it and uses
+// the screen-space gradient to perturb the surface normal, giving the
+// fluid visible "flow" detail without resampling at sub-particle scale.
+//
+// Deck phrasing: "Surface can be too smooth. Doesn't show flow well.
+// Solution: add noise. Render spheres again, using 3D noise texture in
+// object-space. Moves with fluid. Store in noise render target. Can be
+// used during surface shading to perturb normal."
+//
+// The deck specifies a 3D noise *texture*. We compute the equivalent
+// value-noise procedurally in the fragment so no texture upload + no
+// 256-byte-row alignment dance. Linear-trilinear value noise from a
+// floor/fract hash is visually identical to a baked 3D texture sampled
+// with linear filtering, at the cost of ~8 hashes per particle pixel.
+const WGSL_NOISE = `
+struct RenderParams {
+  viewProj: mat4x4<f32>,
+  cameraRight: vec3<f32>, particleSize: f32,
+  cameraUp: vec3<f32>, alphaScale: f32,
+};
+
+@group(0) @binding(0) var<storage, read> pos: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> R: RenderParams;
+
+struct VOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) worldCenter: vec3<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32,
+           @builtin(instance_index) ii: u32) -> VOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0)
+  );
+  let q = quad[vi];
+  let center = pos[ii].xyz;
+  let wp = center + (R.cameraRight * q.x + R.cameraUp * q.y) * R.particleSize;
+  var out: VOut;
+  out.position = R.viewProj * vec4<f32>(wp, 1.0);
+  out.uv = q;
+  out.worldCenter = center;
+  return out;
+}
+
+// 3D value noise: hash unit-cube corners, trilinear-blend with smoothstep.
+fn hash3(p: vec3<f32>) -> f32 {
+  let h = dot(p, vec3<f32>(127.1, 311.7, 74.7));
+  return fract(sin(h) * 43758.5453);
+}
+fn noise3(p: vec3<f32>) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let c000 = hash3(i);
+  let c100 = hash3(i + vec3<f32>(1.0, 0.0, 0.0));
+  let c010 = hash3(i + vec3<f32>(0.0, 1.0, 0.0));
+  let c110 = hash3(i + vec3<f32>(1.0, 1.0, 0.0));
+  let c001 = hash3(i + vec3<f32>(0.0, 0.0, 1.0));
+  let c101 = hash3(i + vec3<f32>(1.0, 0.0, 1.0));
+  let c011 = hash3(i + vec3<f32>(0.0, 1.0, 1.0));
+  let c111 = hash3(i + vec3<f32>(1.0, 1.0, 1.0));
+  let x00 = mix(c000, c100, u.x);
+  let x10 = mix(c010, c110, u.x);
+  let x01 = mix(c001, c101, u.x);
+  let x11 = mix(c011, c111, u.x);
+  let y0  = mix(x00, x10, u.y);
+  let y1  = mix(x01, x11, u.y);
+  return mix(y0, y1, u.z);
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.uv, in.uv);
+  if (r2 > 1.0) { discard; }
+  // Particle world centre × 10 = noise frequency. Higher = finer flow
+  // detail. Each particle gets one noise value across its imposter;
+  // adjacent particles have different values because their centres are
+  // ~PARTICLE_RADIUS apart in world space.
+  let n = noise3(in.worldCenter * 10.0);
+  // Falloff so the noise field is continuous across the imposter.
+  let falloff = 1.0 - r2;
+  // R = noise, G = unused (could store a second octave later).
+  return vec4<f32>(n * falloff, 0.0, 0.0, 1.0);
+}
+`;
+
 // v109/v110/v114: view-invariant BILATERAL depth filter per NVIDIA SSF
 // deck slides 18-19. Two view-invariant properties:
 //   1. SPATIAL kernel σ is constant in world space (slide 18) — the
@@ -1756,10 +1855,11 @@ struct CompositeParams {
 struct RenderToggles {
   beerLambert: f32, subsurface: f32, refraction: f32, fresnel: f32,
   spec: f32, iblAmbient: f32, toneMap: f32, cubemapReflect: f32,
-  // v124: additiveThickness = 1.0 swaps the Beer-Lambert thickness
-  // source from physical two-layer view-space pathLen to the deck-25
-  // additive-sprite render target. Lets the user A/B both methods.
-  additiveThickness: f32, _pad1: f32, _pad2: f32, _pad3: f32,
+  additiveThickness: f32,
+  // v125: flowNoise = 1.0 perturbs the surface normal by the screen-
+  // space gradient of the noise field (deck slide 38).
+  flowNoise: f32,
+  _pad2: f32, _pad3: f32,
   _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
 };
 
@@ -1771,6 +1871,7 @@ struct RenderToggles {
 @group(0) @binding(5) var skySampler: sampler;
 @group(0) @binding(6) var<uniform> T: RenderToggles;
 @group(0) @binding(7) var spriteThicknessTex: texture_2d<f32>;
+@group(0) @binding(8) var noiseTex: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -1846,7 +1947,29 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 
   let viewPos = viewPosFromDepth(frag.xy, depth);
   // v105: silhouette-aware 5-tap normal — see reconstructNormal() above.
-  let n = reconstructNormal(coord, frag.xy, viewPos, depth);
+  let nGeo = reconstructNormal(coord, frag.xy, viewPos, depth);
+
+  // v125: deck-38 surface-detail perturbation. Read the noise field at
+  // this pixel (half-res, coord/2), finite-difference its 4-neighbour
+  // gradient, project the gradient into the surface tangent plane,
+  // add as a small normal offset. Gated by T.flowNoise so the effect
+  // is exactly off when the toggle is off.
+  let nC = textureLoad(noiseTex, coord / 2, 0).r;
+  let nL = textureLoad(noiseTex, vec2<i32>(coord.x / 2 - 1, coord.y / 2), 0).r;
+  let nR = textureLoad(noiseTex, vec2<i32>(coord.x / 2 + 1, coord.y / 2), 0).r;
+  let nU = textureLoad(noiseTex, vec2<i32>(coord.x / 2, coord.y / 2 - 1), 0).r;
+  let nD = textureLoad(noiseTex, vec2<i32>(coord.x / 2, coord.y / 2 + 1), 0).r;
+  let noiseGradX = (nR - nL) * 0.5;
+  let noiseGradY = (nD - nU) * 0.5;
+  // Tangent basis around the geometric normal — pick world-up as the
+  // anchor; the +tiny perturbation prevents the cross from collapsing
+  // when nGeo happens to be vertical.
+  let upWorld = vec3<f32>(0.0, 1.0, 0.0);
+  let tangent = normalize(cross(nGeo, upWorld) + vec3<f32>(1e-4, 0.0, 0.0));
+  let bitangent = cross(nGeo, tangent);
+  // 0.7 strength = visible but not aliased; tune in JS later if needed.
+  let perturb = (tangent * noiseGradX + bitangent * noiseGradY) * 0.7;
+  let n = normalize(nGeo + perturb * T.flowNoise);
 
   let viewDir = -normalize(viewPos);
   let lightDir = normalize(vec3<f32>(P.lightDirX, P.lightDirY, P.lightDirZ));
@@ -2306,6 +2429,34 @@ async function initAndRun() {
     primitive: { topology: 'triangle-list', cullMode: 'none' },
   });
 
+  // v125: noise pass pipeline. Particle imposters sample procedural 3D
+  // value-noise at their world centre, write into a half-res r16float
+  // target. Depth-tested against the front depth (depthRaw) so only
+  // the visible particle's noise survives per pixel. Same THICKNESS_FORMAT
+  // since we just need a smooth scalar field.
+  const noiseModule = device.createShaderModule({ code: WGSL_NOISE });
+  const noisePipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: noiseModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: noiseModule, entryPoint: 'fs_main',
+      targets: [{ format: THICKNESS_FORMAT }],
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: {
+      format: 'depth32float',
+      depthWriteEnabled: false,
+      depthCompare: 'less-equal',
+    },
+  });
+  const noiseBindGroup = device.createBindGroup({
+    layout: noisePipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: posBuf } },
+      { binding: 1, resource: { buffer: renderParamsBuf } },
+    ],
+  });
+
   // v109/v110: view-invariant BILATERAL depth pre-smooth (NVIDIA SSF deck
   // slides 18-19). Two pipelines (H + V) sharing one module, both writing
   // to a depth32float target via @builtin(frag_depth). Runs separable
@@ -2630,6 +2781,7 @@ async function initAndRun() {
   let backDepthTex = null;
   let spriteThicknessTex = null, spriteThicknessH = null, spriteThicknessV = null;
   let spriteBlurHBind = null, spriteBlurVBind = null;
+  let noiseTex = null;
   let backgroundTex = null;
   let compositeBindGroup = null;
   let curv0 = null, curv1 = null, curv2 = null;
@@ -2646,6 +2798,7 @@ async function initAndRun() {
     if (spriteThicknessTex) spriteThicknessTex.destroy();
     if (spriteThicknessH) spriteThicknessH.destroy();
     if (spriteThicknessV) spriteThicknessV.destroy();
+    if (noiseTex) noiseTex.destroy();
     if (backgroundTex) backgroundTex.destroy();
     const opts = {
       size: { width: w, height: h },
@@ -2682,6 +2835,8 @@ async function initAndRun() {
       layout: thicknessBlurV.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: spriteThicknessH.createView() }],
     });
+    // v125: noise render target, half-res to match thickness budget.
+    noiseTex = device.createTexture(thicknessOpts);
     // v59: the background texture holds the box wireframe + clear colour.
     // Rendered each frame before the fluid composite, then sampled
     // (warped by surface normal) by the composite for refraction.
@@ -2725,6 +2880,7 @@ async function initAndRun() {
         { binding: 5, resource: skySampler },
         { binding: 6, resource: { buffer: togglesParamsBuf } },
         { binding: 7, resource: spriteThicknessV.createView() },
+        { binding: 8, resource: noiseTex.createView() },
       ],
     });
     // v108: caustic pass reads the curvature-flowed depth (depthB) to
@@ -3025,7 +3181,8 @@ async function initAndRun() {
     togBuf[6]  = state.toggles.toneMap        ? 1.0 : 0.0;
     togBuf[7]  = state.toggles.cubemapReflect ? 1.0 : 0.0;
     togBuf[8]  = state.toggles.additiveThickness ? 1.0 : 0.0;
-    for (let i = 9; i < 16; i++) togBuf[i] = 0;
+    togBuf[9]  = state.toggles.flowNoise ? 1.0 : 0.0;
+    for (let i = 10; i < 16; i++) togBuf[i] = 0;
     device.queue.writeBuffer(togglesParamsBuf, 0, togBuf);
 
     // v108: caustic-pass uniform. Sun direction shares the composite
@@ -3140,6 +3297,27 @@ async function initAndRun() {
         p.setPipeline(thicknessBlurV); p.setBindGroup(0, spriteBlurVBind);
         p.draw(3, 1); p.end();
       }
+    }
+    // v125: deck-38 noise render pass — particle imposters sample
+    // procedural 3D value-noise at their world centres, writing into
+    // noiseTex (half-res). Depth-tested against depthRaw with
+    // depthCompare='less-equal' + depthWrite=false so only the visible
+    // sphere's noise survives per pixel. Skipped entirely when the
+    // flowNoise toggle is off — saves a full-particle pass.
+    if (state.toggles.flowNoise) {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [{
+          view: noiseTex.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear', storeOp: 'store',
+        }],
+        depthStencilAttachment: {
+          view: depthRaw.createView(),
+          depthLoadOp: 'load', depthStoreOp: 'store',
+        },
+      });
+      p.setPipeline(noisePipeline); p.setBindGroup(0, noiseBindGroup);
+      p.draw(6, N); p.end();
     }
     // v109: view-invariant Gaussian pre-smooth (NVIDIA SSF deck slide 18).
     // Two separable passes — kills per-particle imposter noise with a

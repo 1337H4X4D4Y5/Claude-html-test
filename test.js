@@ -1418,6 +1418,49 @@
         'Phases-panel toggle button must be wired in JS');
     });
 
+    test('gpu-mpm v125: deck-38 flow-noise pass + composite perturbation', () => {
+      // The deck (slide 38, "Adding Surface Detail") says: render
+      // spheres again, sample 3D noise in object-space, store in a
+      // noise render target, perturb the surface normal during shading.
+      // v125 implements this with procedural 3D value-noise sampled at
+      // each particle's world centre (no texture upload needed).
+      const src = readMpmScript();
+      assert(src.indexOf('const WGSL_NOISE') >= 0,
+        'WGSL_NOISE shader must be declared');
+      const noiseIdx = src.indexOf('const WGSL_NOISE');
+      const noiseEnd = src.indexOf('`;', noiseIdx);
+      const noiseSrc = src.slice(noiseIdx, noiseEnd);
+      assert(noiseSrc.indexOf('fn noise3') >= 0 || noiseSrc.indexOf('fn hash3') >= 0,
+        'noise shader must define hash3/noise3 helpers for procedural 3D noise');
+      assert(noiseSrc.indexOf('worldCenter') >= 0,
+        'noise shader must consume the particle world centre (object-space noise sampling)');
+      // Pipeline and texture wired in JS.
+      assert(src.indexOf('noisePipeline') >= 0, 'noisePipeline must be created');
+      assert(src.indexOf('noiseBindGroup') >= 0, 'noiseBindGroup must be created');
+      assert(src.indexOf('noiseTex') >= 0, 'noiseTex render target must exist');
+      assert(src.match(/if\s*\(\s*state\.toggles\.flowNoise\s*\)/) !== null,
+        'noise pass must be JS-conditional on state.toggles.flowNoise');
+      // Composite reads it and perturbs the normal under the toggle.
+      const cIdx = src.indexOf('const WGSL_COMPOSITE');
+      const cEnd = src.indexOf('`;', cIdx);
+      const compositeSrc = src.slice(cIdx, cEnd);
+      assert(compositeSrc.match(/flowNoise\s*:\s*f32/) !== null,
+        'RenderToggles must declare flowNoise: f32');
+      assert(compositeSrc.indexOf('noiseTex') >= 0,
+        'composite must bind noiseTex (@binding(8)) for the gradient read');
+      assert(compositeSrc.match(/noiseGradX/) !== null &&
+             compositeSrc.match(/noiseGradY/) !== null,
+        'composite must compute screen-space gradient noiseGradX/noiseGradY');
+      assert(compositeSrc.indexOf('* T.flowNoise') >= 0,
+        'normal perturbation must be multiplied by T.flowNoise so toggle off ⇒ no effect');
+      // UI chip + preset.
+      const html = readMpmHtml();
+      assert(html.indexOf('data-toggle="flowNoise"') >= 0,
+        'UI must include a touch button with data-toggle="flowNoise"');
+      assert(html.indexOf('data-preset="flow_detail"') >= 0,
+        'UI must include a "Flow detail" preset chip');
+    });
+
     test('gpu-mpm v124: deck-25 additive-sprite thickness brought back as a toggle', () => {
       // The deck's exact "render particles using additive blending with
       // Gaussian splats, no depth test, half-res" method removed at v107

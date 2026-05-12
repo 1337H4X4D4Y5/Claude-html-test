@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v132</span>
+    <span class="tag">v133</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v132: automated per-toggle perf audit. New "Run perf audit (~16s)" button cycles each of 16 toggles ON for 45 frames then OFF for 45 frames, measures frame-ms delta, attributes the cost to that toggle. Each chip label updates with its measured cost ("Smoothing  ·  1.20 ms") and the debug report ranks the costs descending so the heaviest phases bubble to the top.</div>
+  <div class="desc">MLS-MPM on the GPU. v133: two fixes. (1) buildDebugReport was throwing "Can't find variable: canvas" because the canvas const lives inside initAndRun and the report runs at the top-level — the Copy + Share buttons silently failed. Now uses document.getElementById('gpu-canvas') with safe fallbacks. (2) The light-depth texture (v127) was uninitialised when the translucent-shadow toggle was off, triggering "encoder state is not valid" on iOS Safari when the backdrop bound it. Now always cleared each frame; the particle draw is still conditional on the toggle.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

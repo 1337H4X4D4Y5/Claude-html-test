@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v132 (2026-05-12 — automated per-toggle perf audit. "Run perf audit" cycles each of 16 toggles on/off for 45 frames each, measures frame-ms delta, attributes cost. Result lands on chip labels ("Smoothing  ·  1.2 ms") and in the debug report ranked by cost.)';
+const APP_VERSION = 'mpm-v133 (2026-05-12 — fix: JS error in buildDebugReport ("Can\'t find variable: canvas" — looked up by DOM now). Fix: GPU encoder error when translucentShadow OFF — lightDepthTex now always cleared so the backdrop\'s bind group reads a valid texture state.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -3874,12 +3874,16 @@ async function initAndRun() {
     }
 
     const enc2 = device.createCommandEncoder();
-    // v127: deck-30 light-space depth pass — renders fluid sphere
+    // v127/v133: deck-30 light-space depth pass — renders fluid sphere
     // imposters from the sun's POV into a fixed-size depth texture.
-    // The backdrop pass then projects floor pixels back into light NDC
-    // to determine which are occluded. Conditional on the toggle so
-    // skipping costs nothing.
-    if (state.toggles.translucentShadow) {
+    // The backdrop projects floor pixels back into light NDC and
+    // attenuates if occluded.
+    // v133: the clear pass ALWAYS runs (cheap) so lightDepthTex is
+    // in a valid sampled state for the backdrop binding regardless of
+    // the toggle. Without this, iOS Safari emitted "encoder state is
+    // not valid" when the backdrop bound the never-written texture.
+    // The particle draw is still conditional on the toggle.
+    {
       const p = enc2.beginRenderPass({
         colorAttachments: [],
         depthStencilAttachment: {
@@ -3887,8 +3891,11 @@ async function initAndRun() {
           depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store',
         },
       });
-      p.setPipeline(lightDepthPipeline); p.setBindGroup(0, lightDepthBindGroup);
-      p.draw(6, N); p.end();
+      if (state.toggles.translucentShadow) {
+        p.setPipeline(lightDepthPipeline); p.setBindGroup(0, lightDepthBindGroup);
+        p.draw(6, N);
+      }
+      p.end();
     }
     // Background pass (v59 + v82): procedural white-tile backdrop first,
     // then box wireframe on top. The composite shader samples this with a
@@ -4175,12 +4182,16 @@ function buildDebugReport() {
   const fresnel60 = T.R0_water + (1 - T.R0_water) * Math.pow(1 - 0.5, 5);
   const fresnelGrazing = 1.0;
   // Screen-space σ at a typical viewing depth (used in the bilateral
-  // pass). Reproduces the runtime calculation.
+  // pass). Reproduces the runtime calculation. v131-fixup: the `canvas`
+  // variable is initAndRun-local, so we must look it up via the DOM
+  // here at the top-level — referencing the local would throw a
+  // ReferenceError every time the report builds.
   const fovY = 50 * Math.PI / 180;
   const f = 1 / Math.tan(fovY / 2);
-  const aspect = canvas ? canvas.width / canvas.height : 0.46;
+  const cnv = (typeof document !== 'undefined') ? document.getElementById('gpu-canvas') : null;
+  const aspect = (cnv && cnv.width && cnv.height) ? cnv.width / cnv.height : 0.46;
   const fAspect = f / aspect;
-  const resX = canvas ? canvas.width : 585;
+  const resX = (cnv && cnv.width) ? cnv.width : 585;
   const viewZ = 2.2;
   const pixelView = 2 * viewZ / (fAspect * resX);
   const sigmaScreen = T.worldSigma / pixelView;

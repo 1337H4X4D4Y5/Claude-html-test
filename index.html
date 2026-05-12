@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v105</span>
+    <span class="tag">v106</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v105 rendering: continuing the NVIDIA GDC 2010 SSF push — real cube-mapped sky (procedurally baked at init, sampled per-pixel for Fresnel reflection), silhouette-aware 5-tap normal reconstruction, ACES Filmic tone mapping on the composite. v104 (curvature flow / stripped fBm + caustics + bloom) underneath.</div>
+  <div class="desc">MLS-MPM on the GPU. v106: HDR sky cubemap (rgba16float, sun core ~9x brightness uncapped by 8-bit unorm so ACES tone-mapping actually has highlights to compress) + cheap subsurface-scatter glow inside the fluid body. Builds on v104's curvature-flow depth + stripped fBm/caustics/bloom and v105's 5-tap silhouette-aware normal.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

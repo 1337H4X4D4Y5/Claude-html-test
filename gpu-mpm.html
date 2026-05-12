@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v105 (2026-05-12 — sky cubemap (baked), 5-tap silhouette-aware normal, ACES tone mapping)';
+const APP_VERSION = 'mpm-v106 (2026-05-12 — HDR sky cubemap (rgba16float), subsurface scatter glow)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1337,7 +1337,15 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let avgAbsorb = (absorption.r + absorption.g + absorption.b) * (1.0 / 3.0);
   let opacity = 1.0 - avgAbsorb;
   let absorbedBg = bg * absorption;
-  let transmitted = mix(absorbedBg, litBase, opacity);
+  // v106: cheap subsurface-scatter approximation. Inside thicker fluid
+  // the body picks up a gentle internal glow tinted by baseColor —
+  // light is bouncing around, not just being absorbed. Peaks at
+  // medium thickness (Henyey-Greenstein-ish "phase peak") then dies
+  // off as absorption dominates. Subtle: just enough to keep the body
+  // from looking flat at depth, the way the NVIDIA reference reads.
+  let scatterPeak = thickness * exp(-thickness * 0.6);
+  let sss = baseColor * scatterPeak * (0.35 + 0.55 * diffuse) * 0.65;
+  let transmitted = mix(absorbedBg, litBase, opacity) + sss;
 
   // v105: real cubemap sample for Fresnel reflection (was procedural
   // in v104). The cube texture is baked once at init with the same
@@ -1678,18 +1686,18 @@ async function initAndRun() {
   });
   const curvBufScratch = new Float32Array(CURV_PARAMS_SIZE / 4);
 
-  // v105: procedural sky cubemap, baked once. The composite samples this
-  // through a linear-filter sampler when computing the Fresnel reflection
-  // — same content as v104's inline sampleSky() but as a real cube
-  // texture, replacing ~10 ALU + branches per fluid pixel with a single
-  // textureSampleLevel. Sun direction is set to the keylight in view
-  // space; for our fixed-camera scene that matches the world keylight,
-  // so reflections appear to come from a sun that stays put as the
-  // user tilts the phone.
+  // v106: procedural sky cubemap, baked once, NOW HDR (rgba16float).
+  // The v105 rgba8unorm version clipped the sun core (which we author
+  // at >1.0 luminance) down to white, so the ACES tone mapper had
+  // nothing to compress and the highlight roll-off looked flat. f16
+  // gives ~65504 max value — plenty of headroom for a 10x-brightness
+  // sun without saturating. Same procedural content (three-stop sky +
+  // sun disk + halo) but the sun core is now ~9.0 instead of 2.6 so
+  // Fresnel highlights pop the way the NVIDIA reference renders do.
   const SKY_CUBE_SIZE = 128;
   const skyCubeTex = device.createTexture({
     size: { width: SKY_CUBE_SIZE, height: SKY_CUBE_SIZE, depthOrArrayLayers: 6 },
-    format: 'rgba8unorm',
+    format: 'rgba16float',
     dimension: '2d',
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
@@ -1698,16 +1706,36 @@ async function initAndRun() {
     addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge',
   });
   (function bakeSkyCube() {
-    // Match the v104 inline sampleSky() content exactly — three-stop
-    // vertical gradient (ground/horizon/zenith) plus a sun disk + halo
-    // in the keylight direction. Keylight in view space = (0.35, 0.80,
-    // 0.50) world-normalized for our fixed-orientation camera.
+    // IEEE 754 binary16 (f16) encoder for the rgba16float upload.
+    // Handles 0, normals, denormals, infs and overflows — overkill for
+    // sky values but cheap and correct.
+    const f32buf = new ArrayBuffer(4);
+    const f32arr = new Float32Array(f32buf);
+    const u32arr = new Uint32Array(f32buf);
+    function f32tof16(val) {
+      f32arr[0] = val;
+      const x = u32arr[0];
+      const sign = (x >>> 16) & 0x8000;
+      const exp32 = (x >>> 23) & 0xff;
+      const mantissa = x & 0x7fffff;
+      if (exp32 === 0) return sign;
+      if (exp32 === 0xff) return sign | 0x7c00 | (mantissa ? 1 : 0);
+      const exp16 = exp32 - 127 + 15;
+      if (exp16 >= 0x1f) return sign | 0x7c00;
+      if (exp16 <= 0) {
+        if (exp16 < -10) return sign;
+        const m = (mantissa | 0x800000) >>> (1 - exp16);
+        return sign | ((m + 0x1000) >>> 13);
+      }
+      return sign | (exp16 << 10) | ((mantissa + 0x1000) >>> 13);
+    }
+
     const sunDirW = [0.35, 0.80, 0.50];
     const sl = Math.hypot(sunDirW[0], sunDirW[1], sunDirW[2]);
     const sunDir = [sunDirW[0]/sl, sunDirW[1]/sl, sunDirW[2]/sl];
     const zenith  = [0.45, 0.65, 0.95];
-    const horizon = [0.78, 0.85, 0.95];
-    const ground  = [0.16, 0.18, 0.22];
+    const horizon = [0.82, 0.88, 0.97];
+    const ground  = [0.18, 0.20, 0.24];
     function sampleSky(dx, dy, dz) {
       const dl = Math.hypot(dx, dy, dz) || 1;
       const nx = dx/dl, ny = dy/dl, nz = dz/dl;
@@ -1728,16 +1756,18 @@ async function initAndRun() {
         ground[2] + (horizonZ[2] - ground[2]) * downT,
       ];
       const sunDot = Math.max(0, nx*sunDir[0] + ny*sunDir[1] + nz*sunDir[2]);
-      const sunCore = sm(0.9965, 1.0, sunDot);
-      const sunGlow = Math.pow(sunDot, 90.0);
-      col[0] += sunCore * 2.6 + sunGlow * 0.55;
-      col[1] += sunCore * 2.3 + sunGlow * 0.48;
-      col[2] += sunCore * 1.8 + sunGlow * 0.38;
+      // v106: HDR sun. Core 9.0 (was clipped to 1.0 in rgba8unorm) so
+      // tone-mapped Fresnel highlights gain a hot but not-clipped peak.
+      const sunCore = sm(0.9960, 1.0, sunDot);
+      const sunGlow = Math.pow(sunDot, 80.0);
+      col[0] += sunCore * 9.0  + sunGlow * 1.2;
+      col[1] += sunCore * 8.2  + sunGlow * 1.05;
+      col[2] += sunCore * 6.5  + sunGlow * 0.85;
       return col;
     }
     const size = SKY_CUBE_SIZE;
     for (let face = 0; face < 6; face++) {
-      const data = new Uint8Array(size * size * 4);
+      const data = new Uint16Array(size * size * 4);
       for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
           const u = (x + 0.5) / size * 2 - 1;
@@ -1753,16 +1783,16 @@ async function initAndRun() {
           }
           const c = sampleSky(dx, dy, dz);
           const i = (y * size + x) * 4;
-          data[i + 0] = Math.min(255, Math.max(0, Math.round(c[0] * 255)));
-          data[i + 1] = Math.min(255, Math.max(0, Math.round(c[1] * 255)));
-          data[i + 2] = Math.min(255, Math.max(0, Math.round(c[2] * 255)));
-          data[i + 3] = 255;
+          data[i + 0] = f32tof16(c[0]);
+          data[i + 1] = f32tof16(c[1]);
+          data[i + 2] = f32tof16(c[2]);
+          data[i + 3] = f32tof16(1.0);
         }
       }
       device.queue.writeTexture(
         { texture: skyCubeTex, origin: { x: 0, y: 0, z: face } },
         data,
-        { bytesPerRow: size * 4 },
+        { bytesPerRow: size * 8 },
         { width: size, height: size, depthOrArrayLayers: 1 }
       );
     }

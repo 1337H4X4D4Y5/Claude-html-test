@@ -1279,6 +1279,32 @@
         'composite must tone-map the final colour through acesFilm()');
     });
 
+    test('gpu-mpm v106: sky cubemap is HDR (rgba16float) + composite has subsurface scatter', () => {
+      const src = readMpmScript();
+      // Cubemap format must be rgba16float so the sun core (authored
+      // >1.0) survives into the texture instead of clamping to white.
+      const skyTexBlock = src.slice(src.indexOf('skyCubeTex = device.createTexture'),
+                                     src.indexOf('skyCubeTex = device.createTexture') + 400);
+      assert(skyTexBlock.indexOf("'rgba16float'") >= 0,
+        'sky cubemap must be created with rgba16float format (v106 HDR upgrade)');
+      // f16 encoder must exist so the JS bake can write into the f16 texture.
+      assert(src.indexOf('f32tof16') >= 0,
+        'sky cubemap bake must include an IEEE binary16 (f32tof16) encoder');
+      // bytesPerRow must be width*8 for rgba16float (2 bytes per channel).
+      assert(src.indexOf('bytesPerRow: size * 8') >= 0,
+        'writeTexture for the rgba16float cubemap must use bytesPerRow = size * 8');
+      // Subsurface scatter term in the composite.
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.indexOf('scatterPeak') >= 0,
+        'composite must compute a scatterPeak term for subsurface scattering');
+      assert(compositeSrc.indexOf('let sss') >= 0,
+        'composite must add an `sss` (subsurface scatter) contribution to the body');
+      assert(compositeSrc.indexOf('+ sss') >= 0,
+        'composite must add the sss term to the transmitted body colour');
+    });
+
     test('gpu-mpm v98 perf: MPM substep loop has zero submits inside', () => {
       // v98 combined per-substep submits into one. Verify the
       // substep loop body contains no device.queue.submit calls.

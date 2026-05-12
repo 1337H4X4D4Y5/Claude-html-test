@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v112 (2026-05-12 — full Schlick Fresnel (NVIDIA SSF slide 22): R₀ + (1-R₀)·(1-cos θ)⁵ with R₀ = 0.020 for water (n=1.33). Was only (1-cos θ)⁵.)';
+const APP_VERSION = 'mpm-v113 (2026-05-12 — thickness shading recalibration (NVIDIA SSF slide 23): thicknessScale 0.10 → 1.8 for v107 path-length units; thinClamp ×6 → ×25; Fresnel unmasked. Water was "clear" because Beer-Lambert + Fresnel were both calibrated to old units.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1524,15 +1524,21 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     exp(-P.absorptionB * thickness)
   );
 
-  // Thin-water mask: silhouette pixels have ≈ 0 path length, would
-  // otherwise fire glancing-angle Fresnel/spec. thicknessScale=1 → the
-  // raw pathLen is in view-space distance units (≈ 0..BOX_HALF_Z*2).
-  let thinClamp = clamp(pathLen * 6.0, 0.0, 1.0);
-  let fresnelMasked = fresnel * thinClamp;
+  // v113: thinClamp recalibrated. v107 switched thickness from additive-
+  // sprite values to view-space path length (units of BOX_HALF_Z*2 ≈
+  // 0.10 max), but the 6.0 multiplier was tuned for the old units —
+  // it never saturated, so EVERY pixel had thinClamp < 1 and Fresnel/
+  // spec/refraction were suppressed everywhere. Bumping 6 → 25 makes
+  // thinClamp saturate at pathLen ≈ 0.04, leaving only true thin-water
+  // silhouette pixels masked. Fresnel is now UNMASKED — the bilateral
+  // (v110) + curvature flow (v104) preserve silhouettes well enough
+  // that bright Fresnel at the rim reads as "wet glass," exactly the
+  // look the NVIDIA SSF deck shows.
+  let thinClamp = clamp(pathLen * 25.0, 0.0, 1.0);
   let specMasked    = spec    * thinClamp;
 
-  // Single-tap refraction; warp the background sample by the projected
-  // normal scaled by thinClamp so the silhouette doesn't yank off-screen.
+  // Refraction warp: still scaled by thinClamp so thin-water silhouettes
+  // don't yank the bg sample off-screen via a nearly-horizontal normal.
   let strength = P.refractStrength * thinClamp;
   let resMax = vec2<i32>(i32(P.resolutionX) - 1, i32(P.resolutionY) - 1);
   let warp = vec2<i32>(i32(n.x * strength), i32(-n.y * strength));
@@ -1571,7 +1577,10 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let reflectedV = reflect(-viewDir, n);
   let sky = textureSampleLevel(skyCube, skySampler, reflectedV, 0.0).rgb;
 
-  let outColor = mix(transmitted, sky, fresnelMasked)
+  // v113: Fresnel applied unmasked. The body→sky mix is what makes
+  // water look reflective; masking it with thinClamp killed sky
+  // reflection everywhere there wasn't very deep fluid.
+  let outColor = mix(transmitted, sky, fresnel)
                + vec3<f32>(1.0, 0.97, 0.92) * specMasked * 1.6;
   return vec4<f32>(acesFilm(outColor), 1.0);
 }
@@ -2466,10 +2475,13 @@ async function initAndRun() {
     // v53: thicknessScale maps the additive-blended raw thickness texture
     // value into Beer's-law absorption units.
     // v59: compBuf[7] is now refractStrength (per-preset, in pixels).
-    // v72: 0.18 -> 0.10 so per-cell thickness variation doesn't get
-    // amplified into visible colour stripes through the exponential.
-    // Deep regions still tint blue but with less harsh contrast.
-    compBuf[6] = 0.10; compBuf[7] = SIM_TUNE.refractStrength;
+    // v113: thicknessScale 0.10 → 1.8 to recalibrate for v107's
+    // view-space path-length thickness (slide 23 — "shade fluid as
+    // semi-opaque using thickness through volume to attenuate color").
+    // Box depth ≈ 0.10 world units; with absorption coefs 5.0/2.5/0.8
+    // and pathLen up to 0.10, scale 1.8 gives ~60% red absorption at
+    // mid-body — visible blue tint instead of clear water.
+    compBuf[6] = 1.8;  compBuf[7] = SIM_TUNE.refractStrength;
     const Lw = [0.35, 0.80, 0.50];
     const Lv = [
       cam.right[0]*Lw[0] + cam.right[1]*Lw[1] + cam.right[2]*Lw[2],

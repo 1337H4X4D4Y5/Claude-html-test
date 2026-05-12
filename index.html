@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v112</span>
+    <span class="tag">v113</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v112: full Schlick Fresnel (NVIDIA SSF deck slide 22) — R₀ + (1−R₀)·(1−cosθ)⁵ with R₀ = 0.020 for water (IOR 1.33). Previous versions used only the angular term, so flat water from straight above had ZERO reflection; now it correctly reflects 2% at normal incidence. v111 IBL ambient, v110 bilateral, v109 view-invariant Gaussian, v108 ray-traced caustics underneath.</div>
+  <div class="desc">MLS-MPM on the GPU. v113: thickness-shading recalibration (NVIDIA SSF deck slide 23) — thicknessScale 0.10 → 1.8 to match v107's view-space path-length units (was tuned for old additive-sprite range, water appeared clear). thinClamp multiplier 6 → 25 so it saturates at proper depth; Fresnel un-masked. v112 Schlick, v111 IBL ambient, v110 bilateral, v108 caustics underneath.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

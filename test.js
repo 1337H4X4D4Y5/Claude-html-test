@@ -1389,6 +1389,36 @@
         'frame loop must write gaussBuf[8] = worldRangeSigma');
     });
 
+    test('gpu-mpm v113: thickness-shading recalibration for path-length units (slide 23)', () => {
+      // v107's two-layer thickness made `thickness` view-space path
+      // length (range ~0..0.10 for our box), but thicknessScale + the
+      // thinClamp multiplier had been tuned for the old additive-sprite
+      // range. Net: Beer-Lambert + Fresnel both suppressed nearly to
+      // zero; water looked clear. v113 recalibrates.
+      const src = readMpmScript();
+      // compBuf[6] = thicknessScale must be at least 1.0 to give visible
+      // absorption with the path-length thickness.
+      const tsMatch = src.match(/compBuf\[6\]\s*=\s*([0-9.]+);/);
+      assert(tsMatch, 'thicknessScale (compBuf[6]) assignment not found');
+      const ts = parseFloat(tsMatch[1]);
+      assert(ts >= 1.0,
+        'thicknessScale must be >= 1.0 for path-length thickness (got ' + ts + ')');
+      // thinClamp multiplier must scale to saturate within the box's
+      // pathLen range (~0.10). 25× saturates at pathLen ≈ 0.04, sensible.
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      const tcMatch = compositeSrc.match(/clamp\(\s*pathLen\s*\*\s*([0-9.]+)/);
+      assert(tcMatch, 'thinClamp clamp() expression not found');
+      const tcMul = parseFloat(tcMatch[1]);
+      assert(tcMul >= 15.0,
+        'thinClamp multiplier must be >= 15 so it saturates within the box (got ' + tcMul + ')');
+      // Fresnel must be applied UNMASKED to the body-sky mix. The
+      // composite's final mix() should call fresnel, not fresnelMasked.
+      assert(compositeSrc.match(/mix\(\s*transmitted\s*,\s*sky\s*,\s*fresnel\s*\)/) !== null,
+        'final body-sky mix should use raw fresnel (not fresnelMasked) — bilateral/curvature flow preserve silhouettes well enough');
+    });
+
     test('gpu-mpm v112: full Schlick Fresnel R₀ + (1-R₀)·(1-cosθ)⁵ (slide 22)', () => {
       // Previous versions used only the angular term pow(1-cosθ, 5),
       // which yields ZERO reflection at normal incidence. Schlick's

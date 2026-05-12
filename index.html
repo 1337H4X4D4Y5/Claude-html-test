@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v117</span>
+    <span class="tag">v118</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v117: Fresnel-aliasing fix — normal stencil ±3 → ±6 (averages across one particle width) and cubemap reflection sample clamped to min(·, 3.5). The HDR sun core (luminance ~9) was driving 10× brightness deltas between adjacent pixels via tiny normal variations, creating a fingerprint pattern. Capped reflection + wider gradient stencil = clean wet sheen.</div>
+  <div class="desc">MLS-MPM on the GPU. v118: Share button — one-tap iOS share sheet with the current canvas PNG + debug text attached, for easy bug reports. Uses navigator.share() with the files API; falls back to PNG download + clipboard text on browsers without that. Builds on v117 Fresnel-aliasing fix, v116 anti-spec stencil, v115 smoothing.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

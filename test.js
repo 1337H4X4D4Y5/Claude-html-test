@@ -1453,6 +1453,33 @@
         'NORMAL_STENCIL too wide will blur silhouettes (got ' + stencil + '; recommended 3-8)');
     });
 
+    test('gpu-mpm v118: share button captures canvas PNG + uses navigator.share', () => {
+      // The share button is the "one-tap bug report" path: it captures
+      // the current canvas as a PNG and opens the iOS share sheet with
+      // the screenshot + debug text attached.
+      const src = readMpmScript();
+      assert(src.indexOf("getElementById('share-btn')") >= 0,
+        'Share button element must be looked up in JS (proves the DOM element is bound)');
+      // The handler must call canvas.toBlob() to grab a PNG.
+      assert(src.indexOf('canvas.toBlob') >= 0,
+        'Share button must call canvas.toBlob() to capture the screenshot');
+      // The handler must attempt navigator.share for the iOS share sheet.
+      assert(src.indexOf('navigator.share') >= 0,
+        'Share button must use navigator.share() to open the iOS share sheet');
+      // The handler must pass both the debug text AND a files array.
+      const handlerIdx = src.indexOf("shareBtn.addEventListener");
+      assert(handlerIdx >= 0, 'Share button must have a click handler');
+      // Look in the next ~2000 chars for the navigator.share({...}) shape.
+      const handlerCtx = src.slice(handlerIdx, handlerIdx + 3000);
+      assert(handlerCtx.match(/navigator\.share\(\s*\{[\s\S]*?files\s*:/) !== null,
+        'navigator.share must be called with a files array (PNG attached)');
+      assert(handlerCtx.match(/navigator\.share\(\s*\{[\s\S]*?text\s*:/) !== null,
+        'navigator.share must be called with a text field (debug report)');
+      // Single source for the debug report (refactored out into a function).
+      assert(src.indexOf('function buildDebugReport') >= 0,
+        'Debug-report builder must be a shared function (both buttons use it)');
+    });
+
     test('gpu-mpm regression: cubemap reflection clamped in body→sky branch', () => {
       // v117 fix. The HDR cubemap has sun core at brightness ~9; small
       // normal variations between adjacent pixels can swing the

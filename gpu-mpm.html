@@ -87,9 +87,9 @@
      to expand the full debug payload + copy/reset buttons. */
   #debug.collapsed { padding: 6px 10px; opacity: 0.7; }
   #debug.collapsed #debug-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #debug.collapsed #copy-btn, #debug.collapsed #reset-btn { display: none; }
+  #debug.collapsed #copy-btn, #debug.collapsed #reset-btn, #debug.collapsed #share-btn { display: none; }
   #debug-text { cursor: pointer; -webkit-tap-highlight-color: transparent; }
-  #copy-btn, #reset-btn {
+  #copy-btn, #reset-btn, #share-btn {
     appearance: none; -webkit-appearance: none; border: none;
     display: block; width: 100%; min-height: 38px; margin-top: 6px;
     border-radius: 8px;
@@ -98,6 +98,7 @@
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
+  #share-btn { background: rgba(74,163,255,0.35); }
   #copy-btn { background: rgba(160,90,255,0.30); }
   #reset-btn { background: rgba(220,140,80,0.30); }
   #settings-btn {
@@ -225,7 +226,7 @@
   <button class="preset-btn" data-preset="mercury">Mercury<span class="preset-desc">dense, bouncy, inviscid</span></button>
   <button id="presets-close">Close</button>
 </div>
-<div id="debug"><div id="debug-text">initialising…</div><button id="copy-btn">Copy debug info</button><button id="reset-btn">Reset particles</button></div>
+<div id="debug"><div id="debug-text">initialising…</div><button id="share-btn">Share screenshot + debug</button><button id="copy-btn">Copy debug info</button><button id="reset-btn">Reset particles</button></div>
 
 <script>
 // Install a window-level error handler IMMEDIATELY so even errors that
@@ -258,7 +259,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v117 (2026-05-12 — Fresnel-aliasing fix: normal stencil ±3 → ±6, cubemap reflection clamped to min(·, 3.5). HDR sun core was driving 10× brightness deltas through small normal variations.)';
+const APP_VERSION = 'mpm-v118 (2026-05-12 — Share button: one-tap iOS share sheet with canvas PNG + debug text attached. Uses navigator.share() with files API; falls back to PNG download + clipboard text.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -486,6 +487,7 @@ const startBtn = document.getElementById('start-btn');
 const fpsEl = document.getElementById('fps');
 const debugTextEl = document.getElementById('debug-text');
 const copyBtn = document.getElementById('copy-btn');
+const shareBtn = document.getElementById('share-btn');
 
 const state = {
   gyroPermission: 'unknown',
@@ -2778,10 +2780,12 @@ function updateDebug() {
 }
 updateDebug();
 
-copyBtn.addEventListener('click', function () {
+// Single source for the debug payload — both the Copy button and the
+// Share button use it.
+function buildDebugReport() {
   const soundC = Math.sqrt(SIM_TUNE.pressureK / SIM_TUNE.restDensity);
   const cflDt = CELL_SIZE / soundC;
-  const report = [
+  return [
     '=== Water Box MPM debug ===',
     'version: ' + APP_VERSION,
     'preset:  ' + (state.presetLabel || state.preset),
@@ -2823,6 +2827,10 @@ copyBtn.addEventListener('click', function () {
     'gpu error:  ' + (state.gpuError || 'none'),
     'userAgent: ' + navigator.userAgent,
   ].join('\n');
+}
+
+copyBtn.addEventListener('click', function () {
+  const report = buildDebugReport();
   function ok() { copyBtn.textContent = 'Copied ✓'; setTimeout(function () { copyBtn.textContent = 'Copy debug info'; }, 1500); }
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(report).then(ok, function () {
@@ -2833,6 +2841,57 @@ copyBtn.addEventListener('click', function () {
     });
   }
 });
+
+// v118: Share button — captures the WebGPU canvas as a PNG and opens
+// the iOS share sheet with both the screenshot AND the debug text
+// attached. Makes it one tap to ship a complete bug report.
+// Falls back to "download PNG + copy text" on browsers without
+// navigator.share file support (most desktop browsers).
+shareBtn.addEventListener('click', function () {
+  const canvas = document.getElementById('gpu-canvas');
+  const report = buildDebugReport();
+  function reset() { shareBtn.textContent = 'Share screenshot + debug'; }
+  function ok(msg) { shareBtn.textContent = msg; setTimeout(reset, 1800); }
+  if (!canvas || typeof canvas.toBlob !== 'function') {
+    ok('Screenshot not supported, copying text…');
+    if (navigator.clipboard) navigator.clipboard.writeText(report);
+    return;
+  }
+  shareBtn.textContent = 'Capturing…';
+  // toBlob runs async; for a WebGPU canvas the captured PNG is the
+  // most recently presented frame.
+  canvas.toBlob(function (blob) {
+    if (!blob) { ok('Capture failed, copying text…'); if (navigator.clipboard) navigator.clipboard.writeText(report); return; }
+    const file = new File([blob], 'water-debug.png', { type: 'image/png' });
+    // Prefer the iOS share sheet — single tap to attach PNG + debug
+    // text into Messages, Mail, etc.
+    if (navigator.canShare && navigator.canShare({ files: [file] }) && navigator.share) {
+      navigator.share({ title: 'Water Box debug', text: report, files: [file] })
+        .then(function () { ok('Shared ✓'); })
+        .catch(function (err) {
+          // User cancelled — silently reset.
+          if (err && err.name === 'AbortError') { reset(); return; }
+          // Some other failure — fall back to download + copy.
+          downloadFallback(blob, report);
+          ok('Downloaded + copied');
+        });
+    } else {
+      downloadFallback(blob, report);
+      ok('Downloaded PNG + copied text');
+    }
+  }, 'image/png');
+});
+
+function downloadFallback(blob, report) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(report);
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'water-debug.png';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
 </script>
 </body>
 </html>

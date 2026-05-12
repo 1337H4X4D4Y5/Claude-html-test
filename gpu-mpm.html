@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v114 (2026-05-12 — fix Gaussian σ/R convention: worldSigma is the true world σ, R = 3σ. v109-v113 had σ = R/2 which meant effective σ_world was HALF the advertised value, smaller than a particle, so smoothing was undersized.)';
+const APP_VERSION = 'mpm-v115 (2026-05-12 — smoothing actually-smooths fix: worldSigma 0.018→0.030 + worldRangeSigma 0.05→0.15 so bilateral doesn\'t preserve every particle outline. + 7 numerical regression tests to catch this class of calibration bug.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2537,24 +2537,27 @@ async function initAndRun() {
     curvBuf[7] = 0;
     device.queue.writeBuffer(curvParamsBuf, 0, curvBuf);
 
-    // v114: view-invariant BILATERAL uniform with the corrected sigma
-    // convention.
-    //   worldSigma       = 0.018 (true σ in world space ≈ 1 particle
-    //                              width, so kernel actually smooths
-    //                              over multiple particles).
+    // v115: smoothing was still leaving visible per-particle bumps
+    // because (a) worldSigma at 0.018 was barely 1 particle wide so
+    // the spatial Gaussian smoothed WITHIN a particle but not ACROSS
+    // adjacent ones, and (b) worldRangeSigma at 0.05 was tighter than
+    // the particle-boundary depth jump (~0.034 = 2×PARTICLE_RADIUS)
+    // so the bilateral preserved every particle outline as if it
+    // were a real edge.
+    //   worldSigma       = 0.030 (≈ 1.8 × PARTICLE_RADIUS; spatial
+    //                              kernel spans 3-4 particles).
+    //   worldRangeSigma  = 0.15  (3 × particle-boundary jump; the
+    //                              bilateral now only preserves jumps
+    //                              substantially larger than imposter
+    //                              noise — true intra-fluid edges).
     //   maxScreenRadius  = 50    (deck-prescribed perf clamp).
-    //   worldRangeSigma  = 0.05  (range kernel: depth deltas in view-
-    //                              space units; preserves intra-fluid
-    //                              edges + background silhouette).
-    // Effective truncation R = 3σ_screen — kernel reaches the same
-    // physical extent regardless of view distance, exactly per slide 18.
     const gaussBuf = gaussBufScratch;
     gaussBuf[0] = 0.1; gaussBuf[1] = 100;
     gaussBuf[2] = f / aspect; gaussBuf[3] = f;
     gaussBuf[4] = canvas.width; gaussBuf[5] = canvas.height;
-    gaussBuf[6] = 0.018;
+    gaussBuf[6] = 0.030;
     gaussBuf[7] = 50.0;
-    gaussBuf[8] = 0.05;
+    gaussBuf[8] = 0.15;
     gaussBuf[9] = 0; gaussBuf[10] = 0; gaussBuf[11] = 0;
     device.queue.writeBuffer(gaussParamsBuf, 0, gaussBuf);
 

@@ -1317,6 +1317,144 @@
         'composite must add the sss term to the transmitted body colour');
     });
 
+    // -----------------------------------------------------------------
+    // v115 numerical regression tests for the SSF rendering calibration.
+    // These compute effective values from the source constants rather
+    // than pattern-matching, so they catch silent calibration drift
+    // (e.g. v107's units change, v114's σ/R convention bug).
+    // -----------------------------------------------------------------
+
+    test('gpu-mpm regression: Gaussian σ ≥ PARTICLE_RADIUS (kernel spans particle features)', () => {
+      // If worldSigma < PARTICLE_RADIUS the depth-smoothing Gaussian
+      // can't actually blur across particle imposters — surface keeps
+      // visible per-particle bumps (the v109-v114 bug).
+      const src = readMpmScript();
+      const wsMatch = src.match(/gaussBuf\[6\]\s*=\s*([0-9.]+);/);
+      assert(wsMatch, 'gaussBuf[6] (worldSigma) assignment not found');
+      const worldSigma = parseFloat(wsMatch[1]);
+      const prMatch = src.match(/const\s+PARTICLE_RADIUS\s*=\s*([0-9.]+);/);
+      assert(prMatch, 'PARTICLE_RADIUS constant not found');
+      const particleRadius = parseFloat(prMatch[1]);
+      assert(worldSigma >= particleRadius,
+        'worldSigma (' + worldSigma + ') must be ≥ PARTICLE_RADIUS (' +
+        particleRadius + ') so the Gaussian kernel can smooth particle-' +
+        'scale imposter noise — otherwise the surface stays visibly bumpy');
+    });
+
+    test('gpu-mpm regression: bilateral range σ ≥ 3 × PARTICLE_RADIUS (no over-preservation)', () => {
+      // Particle imposter creates depth bumps up to ~2 × PARTICLE_RADIUS
+      // between centers and gaps. If worldRangeSigma is too small, the
+      // bilateral preserves these as edges and the Gaussian can't smooth
+      // adjacent particles together. 3 × PARTICLE_RADIUS gives a range
+      // weight of ~exp(-0.44) = 0.65 on particle-boundary jumps — enough
+      // smoothing while still preserving true intra-fluid edges (e.g.
+      // separate sloshes).
+      const src = readMpmScript();
+      const wrMatch = src.match(/gaussBuf\[8\]\s*=\s*([0-9.]+);/);
+      assert(wrMatch, 'gaussBuf[8] (worldRangeSigma) assignment not found');
+      const worldRangeSigma = parseFloat(wrMatch[1]);
+      const prMatch = src.match(/const\s+PARTICLE_RADIUS\s*=\s*([0-9.]+);/);
+      const particleRadius = parseFloat(prMatch[1]);
+      assert(worldRangeSigma >= 3 * particleRadius,
+        'worldRangeSigma (' + worldRangeSigma + ') must be ≥ 3 × PARTICLE_RADIUS (' +
+        (3 * particleRadius).toFixed(3) + ') — otherwise the bilateral preserves ' +
+        'every particle outline as a fake edge and the surface stays bumpy');
+    });
+
+    test('gpu-mpm regression: Gaussian truncation reaches ≥ 2σ', () => {
+      // Standard cutoff for a Gaussian is 3σ (weight ~1.1%). At 2σ
+      // weight is still ~14% so smoothing still happens. Below 2σ the
+      // kernel is essentially the central peak only.
+      const src = readMpmScript();
+      const gIdx = src.indexOf('const WGSL_DEPTH_BILATERAL');
+      const gEnd = src.indexOf('`;', gIdx);
+      const shader = src.slice(gIdx, gEnd);
+      const rMatch = shader.match(/min\(\s*([0-9.]+)\s*\*\s*sigmaScreen/);
+      assert(rMatch, 'Gaussian truncation R formula not found');
+      const truncMult = parseFloat(rMatch[1]);
+      assert(truncMult >= 2.0,
+        'Gaussian truncation must reach at least 2σ (got R = ' + truncMult +
+        ' × σ); below 2σ the kernel is too narrow to actually smooth');
+    });
+
+    test('gpu-mpm regression: Beer-Lambert absorbs ≥ 30% red at max depth (Water preset)', () => {
+      // v107 switched to physical view-space path length; thicknessScale
+      // was tuned for the old additive-sprite range. If they drift apart,
+      // water reads as glass-clear (the v113 bug).
+      const src = readMpmScript();
+      const tsMatch = src.match(/compBuf\[6\]\s*=\s*([0-9.]+);/);
+      assert(tsMatch, 'thicknessScale (compBuf[6]) not found');
+      const thicknessScale = parseFloat(tsMatch[1]);
+      // Water preset is the first FLUID_PRESETS entry.
+      const apMatch = src.match(/key:\s*['"]water['"][\s\S]*?absorptionR:\s*([0-9.]+)/);
+      assert(apMatch, 'water preset absorptionR not found');
+      const absorptionR = parseFloat(apMatch[1]);
+      // BOX_HALF_Z bounds the max view-ray path length ≈ 2 × BOX_HALF_Z.
+      const bhzMatch = src.match(/let\s+BOX_HALF_Z\s*=\s*([0-9.]+);/);
+      assert(bhzMatch, 'BOX_HALF_Z initial value not found');
+      const boxHalfZ = parseFloat(bhzMatch[1]);
+      const maxPathLen = 2 * boxHalfZ;
+      const maxThickness = maxPathLen * thicknessScale;
+      const redAbsorbed = 1 - Math.exp(-absorptionR * maxThickness);
+      assert(redAbsorbed >= 0.30,
+        'Beer-Lambert too weak at max depth: only ' + (redAbsorbed * 100).toFixed(1) +
+        '% red absorbed (thicknessScale=' + thicknessScale + ', BOX_HALF_Z=' +
+        boxHalfZ + ', absorptionR=' + absorptionR + '). Water will look clear.');
+    });
+
+    test('gpu-mpm regression: thinClamp saturates within half of max pathLen', () => {
+      // If thinClamp saturates too LATE (multiplier too small for our
+      // pathLen range) the bulk fluid gets silent Fresnel/spec/refraction
+      // suppression. v113 bug.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      const tcMatch = compositeSrc.match(/clamp\(\s*pathLen\s*\*\s*([0-9.]+)/);
+      assert(tcMatch, 'thinClamp formula not found');
+      const tcMul = parseFloat(tcMatch[1]);
+      const bhzMatch = src.match(/let\s+BOX_HALF_Z\s*=\s*([0-9.]+);/);
+      const boxHalfZ = parseFloat(bhzMatch[1]);
+      const saturationPathLen = 1.0 / tcMul;
+      const maxPathLen = 2 * boxHalfZ;
+      assert(saturationPathLen <= 0.5 * maxPathLen,
+        'thinClamp saturates too late: at pathLen ' + saturationPathLen.toFixed(3) +
+        ' but max pathLen is ' + maxPathLen.toFixed(3) + '. Bulk fluid will get ' +
+        'Fresnel/spec/refraction suppression.');
+    });
+
+    test('gpu-mpm regression: body→sky mix uses raw fresnel (not thinClamp-masked)', () => {
+      // v113 fix. Masking Fresnel with thinClamp killed sky reflection
+      // across the whole body, not just at the silhouette.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.match(/mix\(\s*transmitted\s*,\s*sky\s*,\s*fresnel\s*\)/) !== null,
+        'Body→sky mix must use raw fresnel (not fresnelMasked). ' +
+        'Masking with thinClamp kills sky reflection in the bulk.');
+    });
+
+    test('gpu-mpm regression: Schlick R₀ baseline present (non-zero at normal incidence)', () => {
+      // v112 fix. Without R₀ the Fresnel goes to 0 at normal incidence
+      // and the body has zero reflection looking straight down.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      const r0Match = compositeSrc.match(/R0_water\s*:\s*f32\s*=\s*([0-9.]+)/);
+      assert(r0Match, 'R0_water constant must be declared (Schlick baseline)');
+      const r0 = parseFloat(r0Match[1]);
+      assert(r0 > 0.0 && r0 < 0.5,
+        'R0_water must be a small positive value (got ' + r0 +
+        '); physical water is ~0.02');
+      // Formula must add R0 baseline to the (1-cosθ)⁵ angular term.
+      assert(compositeSrc.match(/R0_water\s*\+\s*\(\s*1\.0\s*-\s*R0_water\s*\)\s*\*\s*pow/) !== null,
+        'Fresnel must use the full Schlick form: R₀ + (1-R₀) × pow(1-cosθ, 5)');
+    });
+
+    // -----------------------------------------------------------------
+
     test('gpu-mpm v109: view-invariant depth pre-smooth (NVIDIA SSF slide 18)', () => {
       // v109 added a separable depth blur ahead of the curvature-flow
       // loop. The kernel width is recomputed per-pixel from the local

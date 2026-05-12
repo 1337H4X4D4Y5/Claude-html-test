@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v114</span>
+    <span class="tag">v115</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v114: fixes the σ/R convention in the depth-smoothing filter (slide 18) — v109-v113 had σ = R/2 which meant the effective world-space σ was HALF the advertised value, smaller than a single particle. Now worldSigma is the true world σ and R = 3σ (standard Gaussian cutoff). Surface smoothing actually spans particle-scale features. v113 thickness recalibration, v112 Schlick, v111 IBL ambient underneath.</div>
+  <div class="desc">MLS-MPM on the GPU. v115: smoothing actually-smooths fix — bumped worldSigma 0.018→0.030 and worldRangeSigma 0.05→0.15 so the bilateral filter doesn't preserve every particle imposter boundary as a fake edge. Plus 7 numerical regression tests (worldSigma ≥ PARTICLE_RADIUS, Beer-Lambert ≥ 30% absorption, Schlick R₀ baseline, etc.) that catch silent calibration drift, not just code patterns.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

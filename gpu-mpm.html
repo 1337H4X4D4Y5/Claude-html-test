@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v136 (2026-05-12 — fix: toneMap-off made the fluid invisible on the white-tile backdrop. The off-branch was clamp(linearOut, 0, 1), but linearOut is HDR (sky×fresnel up to ~3.5 at the silhouette, spec up to ~5) so highlights + silhouette clipped to pure white — indistinguishable from the bg. v136 swaps the off-branch to an exposure curve 1 - exp(-linearOut) which saturates smoothly to 1.0 without clipping. The toneMap toggle is now a genuine A/B between exposure-curve and ACES Filmic.)';
+const APP_VERSION = 'mpm-v137 (2026-05-12 — caustics visibility overhaul. Pre-v137 splat intensity 0.025-0.045 was lost against the ~0.8-luma white-tile backdrop — caustics existed but you could not see them. Bumped to 0.18 per chromatic channel + 0.30 single (≈6-7× brighter). Lifted the WGSL_CAUSTIC footprint clip from 1× → 2× boxHalf so caustics extend onto the marble surrounding the water column (rainbow rim now lands where it should). Chromatic IOR spread widened 1.323/1.333/1.348 (±1%) → 1.305/1.333/1.365 (±2.5%) for a clearly visible R/G/B fringe at the silhouette.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2236,8 +2236,12 @@ fn vs_main(@builtin(vertex_index) vi: u32,
   if (t < 0.0) { out.position = OFF; return out; }
   let hit = worldPos + refractedDir * t;
 
-  // Clip to the box footprint — no floor exists outside.
-  if (abs(hit.x) > P.boxHalfX || abs(hit.z) > P.boxHalfZ) {
+  // v137: previously clipped to |hit| > boxHalf — but real caustics
+  // extend well beyond the water's silhouette onto the surrounding floor
+  // (most visibly as rainbow fringes from chromatic dispersion). We now
+  // clip much more generously: 2× the footprint in X/Z, so caustics
+  // splat onto the marble around the water column too.
+  if (abs(hit.x) > P.boxHalfX * 2.0 || abs(hit.z) > P.boxHalfZ * 2.0) {
     out.position = OFF; return out;
   }
 
@@ -3934,19 +3938,24 @@ async function initAndRun() {
       buf[17] = tintR; buf[18] = tintG; buf[19] = tintB;
     }
     if (state.toggles.chromaticCaustics) {
-      // n_R / n_G / n_B for water taken as 1.323 / 1.333 / 1.348 — the
-      // physical Abbe-number spread is much smaller (~1.328-1.337),
-      // exaggerated here so the dispersion reads visibly. Intensity
-      // halved per channel since we'll sum 3 passes.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.323, 1.0, 0.0, 0.0, 0.025);
-      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.025);
-      fillCausticBuf(causticBufScratchB, 1.0 / 1.348, 0.0, 0.0, 1.0, 0.025);
+      // v137: chromatic dispersion overhaul. Old 1.323 / 1.333 / 1.348
+      // (±1%) IOR spread produced barely-visible rainbow fringes. New
+      // values 1.305 / 1.333 / 1.365 (~±2.5%) push R/G/B refracted rays
+      // visibly apart at the water-column silhouette — that's where
+      // the surface normal varies fastest and dispersion shows up as
+      // bright rainbow edges. Intensity bumped 0.025 → 0.18 per channel
+      // (each pass paints ~63% of single-mode peak; three passes sum
+      // to ~2× single, which matches the reference's bright caustics).
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.18);
+      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.18);
+      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.18);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
       device.queue.writeBuffer(causticParamsBufG, 0, causticBufScratchG);
       device.queue.writeBuffer(causticParamsBufB, 0, causticBufScratchB);
     } else {
-      // Single warm-sunny pass — original v108 behaviour.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.045);
+      // v137: single warm-sunny pass — intensity 0.045 → 0.30 (≈7×) so
+      // caustics actually pop against the white-tile backdrop.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.30);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
     }
 

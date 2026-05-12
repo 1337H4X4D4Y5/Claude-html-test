@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v136</span>
+    <span class="tag">v137</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v136: fix toneMap-off making the fluid invisible. The off-branch was clamp(linearOut, 0, 1), but linearOut is HDR (sky×fresnel up to ~3.5 at the silhouette, spec ~5) so highlights and the silhouette clipped to pure white — indistinguishable from the white-tile backdrop. Replaced with the exposure curve 1 - exp(-linearOut) which saturates smoothly to 1.0 without clipping; the toggle is now a genuine A/B between exposure and ACES Filmic.</div>
+  <div class="desc">MLS-MPM on the GPU. v137: caustics visibility overhaul. Splat intensity bumped 0.025-0.045 → 0.18-0.30 (≈6-7×) so caustics actually register against the white-tile backdrop instead of being invisible. Footprint clip lifted from 1× → 2× boxHalf so caustics extend onto the marble surrounding the water column (where the chromatic rainbow rim lives). Chromatic IOR spread widened ±1% → ±2.5% (1.305/1.333/1.365) for a clearly visible R/G/B fringe at the silhouette.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

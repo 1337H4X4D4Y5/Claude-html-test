@@ -2209,6 +2209,47 @@
         'CAUSTIC_SOURCE_GRID_N should be in a sensible range (32-256); got ' + grid);
     });
 
+    test('gpu-mpm v137: caustic splat intensities calibrated for visibility on white backdrop', () => {
+      // Pre-v137 the splat intensity was 0.025 (chromatic) / 0.045
+      // (single) — invisible against a ~0.8-luma white-tile backdrop.
+      // v137 bumps both 6-8× so caustics actually pop and the
+      // chromatic-dispersion IOR spread is widened so the rainbow rim
+      // is visible (the user explicitly asked for the reference's
+      // bright caustics + chromatic edge halo).
+      const src = readMpmScript();
+      // Find both fillCausticBuf call sites by their tint signature.
+      const chromR = src.match(/fillCausticBuf\(\s*causticBufScratchR,\s*1\.0\s*\/\s*([0-9.]+),\s*1\.0,\s*0\.0,\s*0\.0,\s*([0-9.]+)\s*\)/);
+      const chromB = src.match(/fillCausticBuf\(\s*causticBufScratchB,\s*1\.0\s*\/\s*([0-9.]+),\s*0\.0,\s*0\.0,\s*1\.0,\s*([0-9.]+)\s*\)/);
+      const single = src.match(/fillCausticBuf\(\s*causticBufScratchR,\s*1\.0\s*\/\s*([0-9.]+),\s*1\.0,\s*0\.95,\s*0\.72,\s*([0-9.]+)\s*\)/);
+      assert(chromR && chromB && single,
+        'fillCausticBuf call sites not found — caustic config may have moved');
+      const chromIntensity = parseFloat(chromR[2]);
+      const singleIntensity = parseFloat(single[2]);
+      assert(chromIntensity >= 0.10,
+        'chromatic-caustic per-channel intensity must be ≥ 0.10 for visibility on white backdrop; got ' + chromIntensity);
+      assert(singleIntensity >= 0.20,
+        'single-caustic intensity must be ≥ 0.20 for visibility on white backdrop; got ' + singleIntensity);
+      // IOR spread must be wide enough that R-G dispersion produces a
+      // visibly chromatic rim. 1.305 → 1.365 = ~4.5% spread → ~3° angle
+      // diff at typical refraction → ~5-10 px shift between R and B
+      // splats. Earlier 1.323/1.348 was ~1.9% — barely visible.
+      const iorR = parseFloat(chromR[1]);
+      const iorB = parseFloat(chromB[1]);
+      assert(iorB - iorR >= 0.04,
+        'chromatic IOR spread (n_B - n_R) must be ≥ 0.04 for visible rainbow rim; got ' +
+        (iorB - iorR).toFixed(3));
+      // Footprint clip must be generous — caustics extend onto floor
+      // outside the water column. Pre-v137 it clipped at exactly the
+      // box footprint; v137 expands to 2× so the surrounding marble
+      // gets the rainbow halo.
+      const causticIdx = src.indexOf('const WGSL_CAUSTIC');
+      const causticEnd = src.indexOf('`;', causticIdx);
+      const causticSrc = src.slice(causticIdx, causticEnd);
+      assert(causticSrc.match(/abs\(hit\.x\)\s*>\s*P\.boxHalfX\s*\*\s*[1-9]\d*(\.\d+)?\b/) !== null ||
+             causticSrc.match(/abs\(hit\.x\)\s*>\s*[1-9]\d*(\.\d+)?\s*\*\s*P\.boxHalfX\b/) !== null,
+        'caustic footprint clip must be wider than 1× boxHalf so caustics extend onto surrounding floor');
+    });
+
     test('gpu-mpm v98 perf: MPM substep loop has zero submits inside', () => {
       // v98 combined per-substep submits into one. Verify the
       // substep loop body contains no device.queue.submit calls.

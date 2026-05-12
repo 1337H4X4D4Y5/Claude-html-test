@@ -1425,6 +1425,39 @@
         'Phases-panel toggle button must be wired in JS');
     });
 
+    test('gpu-mpm v132: automated per-toggle perf audit', () => {
+      // Per the user's request: each toggle is measured ON for N frames
+      // and OFF for N frames; the delta tells us the toggle's cost
+      // in ms. Results stored in state.phaseCosts and surfaced both
+      // in the debug report and as a suffix on each phase chip label.
+      const src = readMpmScript();
+      assert(src.indexOf('startPerfAudit') >= 0,
+        'startPerfAudit() entry point must exist');
+      assert(src.indexOf('stepPerfAudit') >= 0,
+        'stepPerfAudit() (called once per frame) must exist');
+      assert(src.indexOf('state.phaseCosts') >= 0,
+        'state.phaseCosts dictionary must exist');
+      assert(src.indexOf('state.auditState') >= 0,
+        'state.auditState (state-machine context) must exist');
+      assert(src.indexOf('AUDIT_WARMUP') >= 0 && src.indexOf('AUDIT_SAMPLES') >= 0,
+        'AUDIT_WARMUP + AUDIT_SAMPLES constants control frames per direction');
+      // Frame loop must call stepPerfAudit each frame.
+      assert(src.indexOf('stepPerfAudit(frameMs)') >= 0,
+        'frame loop must invoke stepPerfAudit(frameMs) after frame ms is measured');
+      // Debug report includes the audit section.
+      assert(src.indexOf("'--- per-phase perf audit") >= 0,
+        'debug report must include a per-phase perf-audit section');
+      // UI elements.
+      const html = readMpmHtml();
+      assert(html.indexOf('id="perf-audit-btn"') >= 0,
+        'UI must include a #perf-audit-btn button');
+      assert(html.indexOf('id="perf-audit-status"') >= 0,
+        'UI must include a #perf-audit-status progress line');
+      // Chip-label refresher.
+      assert(src.indexOf('refreshPhaseChipLabels') >= 0,
+        'refreshPhaseChipLabels() must update chip text with cost suffixes');
+    });
+
     test('gpu-mpm v131: live tunable sliders + debug-report extensions', () => {
       const src = readMpmScript();
       // state.tunables exists with the 5 expected keys.

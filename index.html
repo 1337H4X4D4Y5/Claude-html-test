@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v131</span>
+    <span class="tag">v132</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v131: live tunable sliders — the FX panel now has a Tunables section with five orange range sliders for worldSigma, worldRangeSigma, thicknessScale, R0_water, and refractStrength. R0_water promoted from shader constant to a CompositeParams uniform slot. Debug report extended with toggle state + tunable values + computed empirical render stats (Gaussian σ in screen px, absorption % at max path, Fresnel at each cosθ, thinClamp saturation point, etc.).</div>
+  <div class="desc">MLS-MPM on the GPU. v132: automated per-toggle perf audit. New "Run perf audit (~16s)" button cycles each of 16 toggles ON for 45 frames then OFF for 45 frames, measures frame-ms delta, attributes the cost to that toggle. Each chip label updates with its measured cost ("Smoothing  ·  1.20 ms") and the debug report ranks the costs descending so the heaviest phases bubble to the top.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

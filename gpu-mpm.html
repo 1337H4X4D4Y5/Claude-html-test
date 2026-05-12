@@ -403,6 +403,8 @@
   <button class="bulk" id="tunables-reset" style="margin-top: 6px;">Reset tunables</button>
   <h4>Diagnostics</h4>
   <button class="phase cycle" id="debug-viz-cycle">Debug viz: off</button>
+  <button class="bulk" id="perf-audit-btn" style="margin-top: 6px;">Run perf audit (~16s)</button>
+  <div id="perf-audit-status" style="font-size: 11px; opacity: 0.7; margin-top: 4px; min-height: 14px;"></div>
 </div>
 <button id="presets-btn" title="Fluid preset">💧</button>
 <div id="presets-panel">
@@ -446,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v131 (2026-05-12 — live tunable sliders: worldSigma / worldRangeSigma / thicknessScale / R0_water / refractStrength all exposed as orange sliders in a Tunables section. R0_water promoted to a uniform slot. Debug report extended with toggle state + tunable values + computed empirical render stats.)';
+const APP_VERSION = 'mpm-v132 (2026-05-12 — automated per-toggle perf audit. "Run perf audit" cycles each of 16 toggles on/off for 45 frames each, measures frame-ms delta, attributes cost. Result lands on chip labels ("Smoothing  ·  1.2 ms") and in the debug report ranked by cost.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -746,6 +748,14 @@ const state = {
     R0_water:        0.020,
     refractStrength: 35.0,
   },
+  // v132: per-toggle performance audit. auditState cycles each toggle
+  // ON for AUDIT_WARMUP frames + AUDIT_FRAMES sample frames, then OFF
+  // for the same, measuring mean frame-ms each side. The delta tells
+  // us how many ms the toggle costs (positive = phase contributes that
+  // many ms when on). Results are stored in phaseCosts and surfaced in
+  // both the debug report and on the chip labels themselves.
+  phaseCosts: {},     // { toggleKey: ms_delta } after audit completes
+  auditState: null,   // populated while running; null when idle
 };
 // Slider range + step descriptors for each tunable, used to build the UI.
 const TUNABLE_DEFS = [
@@ -783,6 +793,84 @@ function saveTogglesToStorage() {
     obj.__tunables = state.tunables;
     localStorage.setItem('water-box-toggles', JSON.stringify(obj));
   } catch (_) {}
+}
+
+// v132: per-toggle perf audit. Cycle each toggle ON for WARMUP+SAMPLES
+// frames, then OFF for the same, capturing mean frame-ms each side.
+// delta = mean(OFF) - mean(ON), so a POSITIVE delta means the toggle
+// costs that many ms when on. Some toggles flip default-off (e.g.,
+// additiveThickness) — the machine probes both directions correctly
+// because it forces the toggle to a known state before measuring.
+const AUDIT_WARMUP = 15;   // frames to settle after flipping
+const AUDIT_SAMPLES = 30;  // frames whose ms we average
+function startPerfAudit() {
+  if (state.auditState) return;
+  // Order: pipeline phases first (likely most expensive), then surface
+  // shading (cheap), then post.
+  const keys = ['additiveThickness', 'flowNoise', 'translucentShadow',
+                'chromaticCaustics', 'caustics', 'smoothing', 'curvatureFlow',
+                'beerLambert', 'subsurface', 'refraction', 'fresnel',
+                'spec', 'iblAmbient', 'cubemapReflect', 'toneMap',
+                'gaussianOnly'];
+  state.auditState = {
+    keys,
+    keyIdx: 0,
+    direction: 'on',     // 'on' phase, then 'off' phase
+    frame: 0,
+    onAccum: 0, onCount: 0,
+    offAccum: 0, offCount: 0,
+    originalToggles: Object.assign({}, state.toggles),
+    originalDebugViz: state.debugViz,
+    progressLabel: 'Audit: starting…',
+  };
+  // Pin debugViz off during audit; it can override the composite cost.
+  state.debugViz = 0;
+  // Force the first toggle to its 'on' position to begin sampling.
+  const firstKey = state.auditState.keys[0];
+  state.toggles[firstKey] = true;
+  state.auditState.progressLabel = 'Audit: ' + firstKey + ' (on)';
+}
+function stepPerfAudit(frameMs) {
+  const a = state.auditState;
+  if (!a) return;
+  a.frame++;
+  // Skip the warmup frames; sample the rest.
+  if (a.frame > AUDIT_WARMUP) {
+    if (a.direction === 'on')  { a.onAccum  += frameMs; a.onCount++;  }
+    else                       { a.offAccum += frameMs; a.offCount++; }
+  }
+  if (a.frame < AUDIT_WARMUP + AUDIT_SAMPLES) return;
+  // Side done — flip direction or advance to next key.
+  const key = a.keys[a.keyIdx];
+  if (a.direction === 'on') {
+    a.direction = 'off';
+    a.frame = 0;
+    state.toggles[key] = false;
+    a.progressLabel = 'Audit: ' + key + ' (off)';
+  } else {
+    // Both sides done — record delta, advance to next key.
+    const onMs  = a.onCount  ? a.onAccum  / a.onCount  : 0;
+    const offMs = a.offCount ? a.offAccum / a.offCount : 0;
+    state.phaseCosts[key] = onMs - offMs;  // positive ⇒ toggle costs ms
+    a.keyIdx++;
+    a.frame = 0; a.onAccum = a.onCount = 0; a.offAccum = a.offCount = 0;
+    a.direction = 'on';
+    if (a.keyIdx >= a.keys.length) {
+      // All done — restore.
+      for (const k of Object.keys(a.originalToggles)) state.toggles[k] = a.originalToggles[k];
+      state.debugViz = a.originalDebugViz;
+      state.auditState = null;
+      saveTogglesToStorage();
+      // Refresh the chip labels with the new cost suffixes.
+      if (typeof window !== 'undefined' && window.__refreshPhaseChipLabels) {
+        window.__refreshPhaseChipLabels();
+      }
+      return;
+    }
+    const nextKey = a.keys[a.keyIdx];
+    state.toggles[nextKey] = true;
+    a.progressLabel = 'Audit: ' + nextKey + ' (on)';
+  }
 }
 const TOGGLE_PRESETS = {
   reference:    { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false },
@@ -996,6 +1084,46 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
     buildTunables();
     saveTogglesToStorage();
   });
+
+  // v132: perf audit button + chip-label cost suffix refresher.
+  // The chip labels carry a base text (e.g. "Smoothing — bilateral
+  // Gauss") that gets a " (X.X ms)" suffix appended when state.phaseCosts
+  // has a value for this toggle. Refreshed after each audit completes.
+  const phaseChipBaseText = new Map();
+  for (const b of document.querySelectorAll('#phases-panel button.phase[data-toggle]')) {
+    phaseChipBaseText.set(b.getAttribute('data-toggle'), b.textContent);
+  }
+  function refreshPhaseChipLabels() {
+    for (const [key, base] of phaseChipBaseText.entries()) {
+      const cost = state.phaseCosts[key];
+      const text = (typeof cost === 'number' && Number.isFinite(cost))
+        ? base + '  ·  ' + cost.toFixed(2) + ' ms'
+        : base;
+      const b = document.querySelector('#phases-panel button.phase[data-toggle="' + key + '"]');
+      if (b) b.textContent = text;
+    }
+  }
+  if (typeof window !== 'undefined') window.__refreshPhaseChipLabels = refreshPhaseChipLabels;
+  refreshPhaseChipLabels();
+  const auditBtn = document.getElementById('perf-audit-btn');
+  const auditStatus = document.getElementById('perf-audit-status');
+  if (auditBtn) auditBtn.addEventListener('click', function () {
+    if (state.auditState) return;   // already running
+    startPerfAudit();
+  });
+  // Tick the audit progress label every frame.
+  setInterval(function () {
+    if (!auditStatus) return;
+    if (state.auditState) {
+      const a = state.auditState;
+      const pct = Math.round(100 * (a.keyIdx + (a.direction === 'off' ? 0.5 : 0)) / a.keys.length);
+      auditStatus.textContent = a.progressLabel + '  (' + pct + '%)';
+    } else if (Object.keys(state.phaseCosts).length) {
+      auditStatus.textContent = 'Audit done — costs on chip labels.';
+    } else {
+      auditStatus.textContent = '';
+    }
+  }, 200);
 
   // v129: debug-viz cycle chip. Increments state.debugViz 0-5, updates
   // the label, marks .on whenever the mode is non-zero so the user
@@ -3966,6 +4094,11 @@ async function initAndRun() {
     if (frameMs > state.frameMsMax) state.frameMsMax = frameMs;
     state.frameMsAcc += frameMs;
     state.frameMsCount++;
+    // v132: per-toggle perf audit. When auditState is non-null, the
+    // state machine drives state.toggles[targetKey] alternately on/off,
+    // collects frame-ms samples for each side, computes the delta, and
+    // moves to the next toggle until done.
+    if (state.auditState) stepPerfAudit(frameMs);
     frames++; fpsAcc += dt;
     if (fpsAcc > 0.5) {
       state.fps = frames / fpsAcc;
@@ -4123,6 +4256,19 @@ function buildDebugReport() {
     'Fresnel @ 60°:        ' + (fresnel60 * 100).toFixed(2) + '%',
     'Fresnel @ grazing:    ' + (fresnelGrazing * 100).toFixed(2) + '%',
     'thinClamp saturates:  pathLen=' + thinSatPath.toFixed(3) + '  (' + (thinSatPath / maxPathLen * 100).toFixed(1) + '% of max pathLen)',
+    '',
+    '--- per-phase perf audit (v132) ---',
+    (function () {
+      const keys = Object.keys(state.phaseCosts);
+      if (!keys.length) return '(not run yet — tap "Run perf audit" in the FX panel)';
+      // Sort by cost descending so heaviest phases bubble up.
+      const sorted = keys.slice().sort((a, b) => (state.phaseCosts[b] || 0) - (state.phaseCosts[a] || 0));
+      return sorted.map(k => {
+        const ms = state.phaseCosts[k];
+        const sign = ms >= 0 ? '+' : '−';
+        return ('  ' + k).padEnd(22) + sign + Math.abs(ms).toFixed(2) + ' ms';
+      }).join('\n');
+    })(),
     '',
     'init error: ' + (state.initError || 'none'),
     'gpu error:  ' + (state.gpuError || 'none'),

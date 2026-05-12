@@ -259,7 +259,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v118 (2026-05-12 — Share button: one-tap iOS share sheet with canvas PNG + debug text attached. Uses navigator.share() with files API; falls back to PNG download + clipboard text.)';
+const APP_VERSION = 'mpm-v119 (2026-05-12 — PARTICLE_RADIUS 0.017 → 0.022. Single-particle imposters at the silhouette (left/right/bottom edges) had no neighbours to overlap with, leaving discrete particle circles visible. Bigger imposters bridge.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -475,7 +475,13 @@ function applyPreset(key) {
 // R=20 bilateral; we're now at R=26 + depthThresh 0.05 + half-res bloom
 // which should bridge adjacent imposters at the smaller size. Thickness
 // imposter is scaled 1.6x (= 0.0272 effective).
-const PARTICLE_RADIUS = 0.017;
+// v119: 0.017 → 0.022. Smaller imposters were leaving discrete
+// particle circles visible around the silhouette (left/right/bottom
+// of the fluid) because single-particle pixels at the edge have no
+// neighbour to smooth with. Bigger imposters overlap their neighbours
+// even at thin-water silhouettes, eliminating the per-particle outline
+// pattern. Body interior was fine; this only affects the rim.
+const PARTICLE_RADIUS = 0.022;
 // Fixed-point scale for atomicAdd into i32 storage. iOS WebGPU has no
 // atomic<f32>, so each float value is encoded as round(v * SCALE) and
 // decoded after the P2G pass by dividing back.

@@ -1324,6 +1324,24 @@
     // (e.g. v107's units change, v114's σ/R convention bug).
     // -----------------------------------------------------------------
 
+    test('gpu-mpm regression: PARTICLE_RADIUS in sensible range (silhouette stays smooth)', () => {
+      // Too small leaves discrete particle circles visible around the
+      // silhouette where single particles don't overlap a neighbour;
+      // too big over-extends the fluid past where particles actually
+      // are. v119 settled on 0.022 after observing silhouette artifacts
+      // at 0.017.
+      const src = readMpmScript();
+      const prMatch = src.match(/const\s+PARTICLE_RADIUS\s*=\s*([0-9.]+);/);
+      assert(prMatch, 'PARTICLE_RADIUS constant not found');
+      const particleRadius = parseFloat(prMatch[1]);
+      assert(particleRadius >= 0.018,
+        'PARTICLE_RADIUS too small (' + particleRadius +
+        '); silhouette imposters won\'t overlap neighbours, single-particle circles will show');
+      assert(particleRadius <= 0.035,
+        'PARTICLE_RADIUS too large (' + particleRadius +
+        '); silhouette will visibly extend past actual fluid extent');
+    });
+
     test('gpu-mpm regression: Gaussian σ ≥ PARTICLE_RADIUS (kernel spans particle features)', () => {
       // If worldSigma < PARTICLE_RADIUS the depth-smoothing Gaussian
       // can't actually blur across particle imposters — surface keeps

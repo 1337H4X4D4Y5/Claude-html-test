@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v118</span>
+    <span class="tag">v119</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v118: Share button — one-tap iOS share sheet with the current canvas PNG + debug text attached, for easy bug reports. Uses navigator.share() with the files API; falls back to PNG download + clipboard text on browsers without that. Builds on v117 Fresnel-aliasing fix, v116 anti-spec stencil, v115 smoothing.</div>
+  <div class="desc">MLS-MPM on the GPU. v119: PARTICLE_RADIUS 0.017 → 0.022. Smaller imposters were leaving discrete particle circles visible at the silhouette (left/right/bottom of the fluid) because single-particle pixels at the edge had no neighbour to smooth with. Bigger imposters bridge the gap. Body interior was already clean from v115 smoothing.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

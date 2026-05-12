@@ -111,6 +111,54 @@
     cursor: pointer; -webkit-tap-highlight-color: transparent;
     z-index: 9;
   }
+  /* v121: render-phase toggles button + panel. Sits below the gear,
+     opens a checklist of NVIDIA SSF pipeline phases so the user can
+     A/B compare which phase needs work. */
+  #phases-btn {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 76px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    width: 34px; height: 34px; border: none; border-radius: 17px;
+    background: rgba(74,163,255,0.28);
+    color: #cfe8ff; font-size: 16px; font-weight: 600;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    z-index: 9;
+  }
+  #phases-panel {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 8px) + 116px);
+    right: calc(env(safe-area-inset-right, 8px) + 8px);
+    width: 280px; max-height: 70vh; overflow-y: auto;
+    padding: 12px 14px; border-radius: 12px;
+    background: rgba(14,32,55,0.96);
+    border: 1px solid rgba(74,163,255,0.30);
+    color: #e8f1ff;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    z-index: 11; display: none;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  }
+  #phases-panel.open { display: block; }
+  #phases-panel h4 {
+    margin: 0 0 8px; font-size: 11px; opacity: 0.65;
+    text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600;
+  }
+  #phases-panel label.phase {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 4px; border-radius: 6px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    min-height: 30px;
+  }
+  #phases-panel label.phase:active { background: rgba(74,163,255,0.12); }
+  #phases-panel input[type=checkbox] { width: 16px; height: 16px; accent-color: #4aa3ff; }
+  #phases-panel select {
+    width: 100%; margin: 4px 0 10px;
+    appearance: none; -webkit-appearance: none;
+    background: rgba(74,163,255,0.10);
+    border: 1px solid rgba(74,163,255,0.30);
+    color: #e8f1ff; padding: 8px 10px; border-radius: 8px;
+    font-family: inherit; font-size: 13px;
+  }
   #settings-panel {
     position: fixed;
     top: calc(env(safe-area-inset-top, 8px) + 80px);
@@ -217,6 +265,35 @@
   <button id="settings-apply">Apply (reloads)</button>
   <button id="settings-cancel">Cancel</button>
 </div>
+<button id="phases-btn" title="Render phases">🎚</button>
+<div id="phases-panel">
+  <h4>Phase preset</h4>
+  <select id="phases-preset-select">
+    <option value="">(pick a preset…)</option>
+    <option value="reference">Reference — all phases on</option>
+    <option value="minimalist">Minimalist — body + Fresnel</option>
+    <option value="caustics">Caustics showcase</option>
+    <option value="mirror">Mirror surface (no body)</option>
+    <option value="body_only">Body only (no reflection)</option>
+    <option value="glassy_mirror">Glassy mirror (no absorption)</option>
+    <option value="raw_depth">Raw depth (no smoothing/effects)</option>
+  </select>
+  <h4>Pipeline (depth → surface)</h4>
+  <label class="phase"><input type="checkbox" data-toggle="smoothing"> Smoothing — bilateral Gaussian</label>
+  <label class="phase"><input type="checkbox" data-toggle="curvatureFlow"> Curvature flow</label>
+  <label class="phase"><input type="checkbox" data-toggle="caustics"> Caustics — ray-traced sun</label>
+  <h4>Body shading</h4>
+  <label class="phase"><input type="checkbox" data-toggle="beerLambert"> Beer-Lambert absorption</label>
+  <label class="phase"><input type="checkbox" data-toggle="subsurface"> Subsurface scatter</label>
+  <label class="phase"><input type="checkbox" data-toggle="refraction"> Refraction warp</label>
+  <h4>Surface shading</h4>
+  <label class="phase"><input type="checkbox" data-toggle="fresnel"> Fresnel reflection</label>
+  <label class="phase"><input type="checkbox" data-toggle="spec"> Spec highlight</label>
+  <label class="phase"><input type="checkbox" data-toggle="iblAmbient"> IBL ambient (vs flat)</label>
+  <label class="phase"><input type="checkbox" data-toggle="cubemapReflect"> Cubemap reflection sample</label>
+  <h4>Post</h4>
+  <label class="phase"><input type="checkbox" data-toggle="toneMap"> ACES tone mapping</label>
+</div>
 <button id="presets-btn" title="Fluid preset">💧</button>
 <div id="presets-panel">
   <div class="label">Fluid preset</div>
@@ -259,7 +336,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v120 (2026-05-12 — PARTICLE_RADIUS 0.022 → 0.019 (compromise). v119 cost too much perf (60→39 FPS) and made imposters visible as Fresnel-reflected bumps on the top surface. 0.019 helps silhouette without those costs.)';
+const APP_VERSION = 'mpm-v121 (2026-05-12 — render-phase toggle panel: 11 per-phase A/B toggles (smoothing, curvature, caustics, Beer-Lambert, SSS, refraction, Fresnel, spec, IBL, cubemap, ACES) + 7 preset looks. Tap 🎚 to open.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -512,6 +589,42 @@ const state = {
   frameMsAcc: 0, frameMsCount: 0,
   initError: null, gpuError: null,
   preset: DEFAULT_PRESET, presetLabel: findPreset(DEFAULT_PRESET).label,
+  // v121: per-phase render toggles. Each is a JS boolean; persisted
+  // in localStorage so reloads keep the user's A/B setup. Defaults
+  // match the v120 visual baseline (everything on).
+  toggles: {
+    smoothing:      true,  // Gaussian + bilateral depth pre-smooth (slide 18-19)
+    curvatureFlow:  true,  // Müller curvature flow refinement (slide 19+)
+    caustics:       true,  // Ray-traced refracted-sun caustic splatting
+    beerLambert:    true,  // Body absorption by view-space thickness (slide 23)
+    subsurface:     true,  // Body internal scatter glow
+    refraction:     true,  // Normal-warped bg sample (slide 25)
+    fresnel:        true,  // Body → sky reflection mix (slide 22)
+    spec:           true,  // Blinn-Phong sun specular
+    iblAmbient:     true,  // Cubemap-sampled ambient irradiance (slide 20)
+    cubemapReflect: true,  // Sample cubemap for reflectedV (vs. flat grey)
+    toneMap:        true,  // ACES Filmic at end of composite
+  },
+};
+(function loadTogglesFromStorage() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('water-box-toggles') || '{}');
+    for (const k of Object.keys(state.toggles)) {
+      if (typeof saved[k] === 'boolean') state.toggles[k] = saved[k];
+    }
+  } catch (_) {}
+})();
+function saveTogglesToStorage() {
+  try { localStorage.setItem('water-box-toggles', JSON.stringify(state.toggles)); } catch (_) {}
+}
+const TOGGLE_PRESETS = {
+  reference:    { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true  },
+  minimalist:   { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: false, refraction: true,  fresnel: true,  spec: false, iblAmbient: false, cubemapReflect: true,  toneMap: true  },
+  caustics:     { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: false, refraction: true,  fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: true  },
+  mirror:       { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: false, fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true  },
+  raw_depth:    { smoothing: false, curvatureFlow: false, caustics: false, beerLambert: true,  subsurface: false, refraction: false, fresnel: false, spec: false, iblAmbient: false, cubemapReflect: false, toneMap: false },
+  body_only:    { smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: true,  subsurface: true,  refraction: false, fresnel: false, spec: false, iblAmbient: true,  cubemapReflect: false, toneMap: true  },
+  glassy_mirror:{ smoothing: true,  curvatureFlow: true,  caustics: false, beerLambert: false, subsurface: false, refraction: true,  fresnel: true,  spec: true,  iblAmbient: false, cubemapReflect: true,  toneMap: true  },
 };
 
 const DEG = Math.PI / 180;
@@ -600,6 +713,36 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
   }
   // Highlight whichever preset matches the initial SIM_TUNE (water by default).
   applyPreset(state.preset);
+})();
+
+// v121: render-phase toggle UI. Open button + panel with one checkbox
+// per pipeline phase + a preset dropdown for quick A/B configurations.
+(function () {
+  const btn = document.getElementById('phases-btn');
+  const panel = document.getElementById('phases-panel');
+  const presetSel = document.getElementById('phases-preset-select');
+  btn.addEventListener('click', function () { panel.classList.toggle('open'); });
+  function syncUI() {
+    for (const cb of document.querySelectorAll('#phases-panel input[type=checkbox][data-toggle]')) {
+      const key = cb.getAttribute('data-toggle');
+      cb.checked = state.toggles[key] !== false;
+    }
+  }
+  for (const cb of document.querySelectorAll('#phases-panel input[type=checkbox][data-toggle]')) {
+    cb.addEventListener('change', function () {
+      state.toggles[cb.getAttribute('data-toggle')] = cb.checked;
+      saveTogglesToStorage();
+      presetSel.value = '';   // user diverged from any preset
+    });
+  }
+  presetSel.addEventListener('change', function () {
+    const preset = TOGGLE_PRESETS[presetSel.value];
+    if (!preset) return;
+    for (const k of Object.keys(preset)) state.toggles[k] = preset[k];
+    syncUI();
+    saveTogglesToStorage();
+  });
+  syncUI();
 })();
 
 // Collapsible debug strip: tap the strip to expand/collapse. Starts
@@ -1123,7 +1266,10 @@ const WGSL_DEPTH_BILATERAL = `
 struct BilateralParams {
   near: f32, far: f32, fAspect: f32, fVert: f32,
   resolutionX: f32, resolutionY: f32, worldSigma: f32, maxScreenRadius: f32,
-  worldRangeSigma: f32, _pad0: f32, _pad1: f32, _pad2: f32,
+  // v121: 'enabled' is the toggle — 0 = passthrough (return source depth
+  // unmodified), 1 = run the full bilateral. Repurposes one of the
+  // pad slots so the struct size stays at 48 bytes.
+  worldRangeSigma: f32, enabled: f32, _pad1: f32, _pad2: f32,
 };
 
 @group(0) @binding(0) var srcDepth: texture_depth_2d;
@@ -1146,6 +1292,8 @@ fn linearizeNDC(zn: f32) -> f32 {
 fn bilateral1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
   let zN = textureLoad(srcDepth, coord, 0);
   if (zN >= 0.99999) { return 1.0; }
+  // v121 passthrough toggle — write source depth unchanged.
+  if (P.enabled < 0.5) { return zN; }
 
   let viewZc = linearizeNDC(zN);
   // View-space size of one screen pixel at this depth.
@@ -1206,7 +1354,8 @@ fn fs_v(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
 const WGSL_CURVATURE = `
 struct CurvParams {
   resolutionX: f32, resolutionY: f32, Cx: f32, Cy: f32,
-  near: f32, far: f32, dt: f32, _pad: f32,
+  // v121: enabled is the toggle — 0 = passthrough, 1 = run mean-curvature step.
+  near: f32, far: f32, dt: f32, enabled: f32,
 };
 
 @group(0) @binding(0) var srcDepth: texture_depth_2d;
@@ -1235,6 +1384,8 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @builtin(frag_depth) f32 {
   let coord = vec2<i32>(i32(frag.x), i32(frag.y));
   let zN = textureLoad(srcDepth, coord, 0);
   if (zN >= 0.99999) { return 1.0; }
+  // v121 passthrough toggle — return source depth unmodified.
+  if (P.enabled < 0.5) { return zN; }
 
   let z = linearizeNDC(zN);
 
@@ -1427,12 +1578,24 @@ struct CompositeParams {
   baseColorR: f32, baseColorG: f32, baseColorB: f32, time: f32,
 };
 
+// v121: RenderToggles — per-effect on/off floats (0.0 = bypass, 1.0 = on).
+// The shader mixes between the effect's "off" baseline and its "on"
+// computation, branchless via mix(). Lets the user A/B compare each
+// section of the NVIDIA SSF pipeline live in the running sim.
+struct RenderToggles {
+  beerLambert: f32, subsurface: f32, refraction: f32, fresnel: f32,
+  spec: f32, iblAmbient: f32, toneMap: f32, cubemapReflect: f32,
+  _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32,
+  _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
+};
+
 @group(0) @binding(0) var depthTex: texture_depth_2d;
 @group(0) @binding(1) var<uniform> P: CompositeParams;
 @group(0) @binding(2) var backDepthTex: texture_depth_2d;
 @group(0) @binding(3) var backgroundTex: texture_2d<f32>;
 @group(0) @binding(4) var skyCube: texture_cube<f32>;
 @group(0) @binding(5) var skySampler: sampler;
+@group(0) @binding(6) var<uniform> T: RenderToggles;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -1541,11 +1704,14 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let backViewZ = P.near * P.far / (backDepthN * (P.far - P.near) - P.far);
   let pathLen = max(0.0, viewPos.z - backViewZ);
   let thickness = pathLen * P.thicknessScale;
-  let absorption = vec3<f32>(
+  // v121: Beer-Lambert toggle — when off, absorption = identity (water
+  // transmits 100%, body becomes glass-clear).
+  let absorption_on = vec3<f32>(
     exp(-P.absorptionR * thickness),
     exp(-P.absorptionG * thickness),
     exp(-P.absorptionB * thickness)
   );
+  let absorption = mix(vec3<f32>(1.0), absorption_on, T.beerLambert);
 
   // v113: thinClamp recalibrated. v107 switched thickness from additive-
   // sprite values to view-space path length (units of BOX_HALF_Z*2 ≈
@@ -1562,58 +1728,54 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 
   // Refraction warp: still scaled by thinClamp so thin-water silhouettes
   // don't yank the bg sample off-screen via a nearly-horizontal normal.
-  let strength = P.refractStrength * thinClamp;
+  // v121: refraction toggle — multiplies the warp by T.refraction so
+  // off = sample background at the same screen coord (no warp).
+  let strength = P.refractStrength * thinClamp * T.refraction;
   let resMax = vec2<i32>(i32(P.resolutionX) - 1, i32(P.resolutionY) - 1);
   let warp = vec2<i32>(i32(n.x * strength), i32(-n.y * strength));
   let bgCoord = clamp(coord + warp, vec2<i32>(0), resMax);
   let bg = textureLoad(backgroundTex, bgCoord, 0).rgb;
 
-  // v111: image-based ambient (NVIDIA SSF deck slide 20 — "shade as
-  // usual" with surface position + normal both derived from the
-  // smoothed depth). Replaces the flat 0.30 ambient with the sky
-  // cubemap sampled in the normal direction: real environment
-  // irradiance. Clamped to keep the HDR sun core (cubemap luminance
-  // ~9.0) from blowing out the diffuse term — the sun's direct
-  // contribution belongs to the Blinn-Phong specular branch below.
+  // v121: IBL ambient toggle — mix between flat constant ambient (the
+  // v110-and-earlier behaviour) and the v111 sky-cubemap-sampled
+  // environment irradiance. Flat ambient is a neutral cool grey-blue
+  // so when toggled off the body still reads as lit.
   let baseColor = vec3<f32>(P.baseColorR, P.baseColorG, P.baseColorB);
-  let skyAmbient = min(textureSampleLevel(skyCube, skySampler, n, 0.0).rgb,
-                       vec3<f32>(1.4));
+  let skyAmbient_on = min(textureSampleLevel(skyCube, skySampler, n, 0.0).rgb,
+                          vec3<f32>(1.4));
+  let flatAmbient = vec3<f32>(0.55, 0.62, 0.72);
+  let ambientColor = mix(flatAmbient, skyAmbient_on, T.iblAmbient);
   let sunTint = vec3<f32>(1.00, 0.95, 0.85);
-  let litBase = baseColor * (sunTint * diffuse * 0.62 + skyAmbient * 0.32);
+  let litBase = baseColor * (sunTint * diffuse * 0.62 + ambientColor * 0.32);
   let avgAbsorb = (absorption.r + absorption.g + absorption.b) * (1.0 / 3.0);
   let opacity = 1.0 - avgAbsorb;
   let absorbedBg = bg * absorption;
-  // v106: cheap subsurface-scatter approximation. Inside thicker fluid
-  // the body picks up a gentle internal glow tinted by baseColor —
-  // light is bouncing around, not just being absorbed. Peaks at
-  // medium thickness (Henyey-Greenstein-ish "phase peak") then dies
-  // off as absorption dominates. Subtle: just enough to keep the body
-  // from looking flat at depth, the way the NVIDIA reference reads.
+  // v121: subsurface scatter toggle.
   let scatterPeak = thickness * exp(-thickness * 0.6);
-  let sss = baseColor * scatterPeak * (0.35 + 0.55 * diffuse) * 0.65;
+  let sss_on = baseColor * scatterPeak * (0.35 + 0.55 * diffuse) * 0.65;
+  let sss = sss_on * T.subsurface;
   let transmitted = mix(absorbedBg, litBase, opacity) + sss;
 
-  // v105: real cubemap sample for Fresnel reflection (was procedural
-  // in v104). v117: clamp the reflection sample so the HDR sun core
-  // (luminance ~9) can't cause 10× brightness deltas between adjacent
-  // pixels whose normals point just slightly differently. With the
-  // sun reflection capped near 3.5, small normal variations still
-  // brighten/darken the reflection — just much less dramatically.
-  // ACES tone mapping then compresses the cap to a clean wet-rim peak.
+  // v121: Fresnel + cubemap-reflection + spec all under independent
+  // toggles. cubemapReflect controls the sky-direction lookup itself
+  // (off = sample a constant grey instead of the cubemap, useful for
+  // confirming whether reflection is contributing). fresnel scales
+  // the body→sky mix amount (off = body fully replaces sky). spec
+  // scales the Blinn-Phong contribution.
   let reflectedV = reflect(-viewDir, n);
-  let sky = min(textureSampleLevel(skyCube, skySampler, reflectedV, 0.0).rgb,
-                vec3<f32>(3.5));
-
-  // v113: Fresnel applied unmasked. The body→sky mix is what makes
-  // water look reflective; masking it with thinClamp killed sky
-  // reflection everywhere there wasn't very deep fluid.
-  // v116: spec multiplier 1.6 → 1.0. Combined with the ±3 normal
-  // stencil (which kills the small-scale variation that was firing
-  // tight spec hot-spots), the surface highlights now read as a soft
-  // wet sheen rather than scattered sparkles.
-  let outColor = mix(transmitted, sky, fresnel)
-               + vec3<f32>(1.0, 0.97, 0.92) * specMasked * 1.0;
-  return vec4<f32>(acesFilm(outColor), 1.0);
+  let cubeSample = min(textureSampleLevel(skyCube, skySampler, reflectedV, 0.0).rgb,
+                       vec3<f32>(3.5));
+  let flatSky = vec3<f32>(0.55, 0.62, 0.75);
+  let sky = mix(flatSky, cubeSample, T.cubemapReflect);
+  let fresnelEff = fresnel * T.fresnel;
+  let specEff = specMasked * T.spec;
+  let linearOut = mix(transmitted, sky, fresnelEff)
+                + vec3<f32>(1.0, 0.97, 0.92) * specEff * 1.0;
+  // v121: tone-map toggle — off = clamped linear (no compression),
+  // on = ACES Filmic.
+  let mappedOut = mix(clamp(linearOut, vec3<f32>(0.0), vec3<f32>(1.0)),
+                      acesFilm(linearOut), T.toneMap);
+  return vec4<f32>(mappedOut, 1.0);
 }
 `;
 
@@ -2000,6 +2162,17 @@ async function initAndRun() {
   // Jacobian shows up.
   const CAUSTIC_SOURCE_GRID_N = 96;
 
+  // v121: RenderToggles uniform — 16 floats / 64 bytes. Bound to the
+  // composite at @binding(6). Field order MUST match the WGSL struct
+  // declared above (beerLambert, subsurface, refraction, fresnel, spec,
+  // iblAmbient, toneMap, cubemapReflect, 8 pads).
+  const TOGGLES_PARAMS_SIZE = 64;
+  const togglesParamsBuf = device.createBuffer({
+    size: TOGGLES_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const togglesBufScratch = new Float32Array(TOGGLES_PARAMS_SIZE / 4);
+
   // v106: procedural sky cubemap, baked once, NOW HDR (rgba16float).
   // The v105 rgba8unorm version clipped the sun core (which we author
   // at >1.0 luminance) down to white, so the ACES tone mapper had
@@ -2299,6 +2472,7 @@ async function initAndRun() {
         { binding: 3, resource: backgroundTex.createView() },
         { binding: 4, resource: skyCubeTex.createView({ dimension: 'cube' }) },
         { binding: 5, resource: skySampler },
+        { binding: 6, resource: { buffer: togglesParamsBuf } },
       ],
     });
     // v108: caustic pass reads the curvature-flowed depth (depthB) to
@@ -2556,7 +2730,8 @@ async function initAndRun() {
     // directly: a slightly more wavy surface = more interesting Snell
     // refraction = more visible focusing patterns on the floor.
     curvBuf[6] = 0.00030;
-    curvBuf[7] = 0;
+    // v121: enabled flag (1.0 = run; 0.0 = passthrough).
+    curvBuf[7] = state.toggles.curvatureFlow ? 1.0 : 0.0;
     device.queue.writeBuffer(curvParamsBuf, 0, curvBuf);
 
     // v115: smoothing was still leaving visible per-particle bumps
@@ -2580,8 +2755,25 @@ async function initAndRun() {
     gaussBuf[6] = 0.030;
     gaussBuf[7] = 50.0;
     gaussBuf[8] = 0.15;
-    gaussBuf[9] = 0; gaussBuf[10] = 0; gaussBuf[11] = 0;
+    // v121: enabled flag (1.0 = run; 0.0 = passthrough).
+    gaussBuf[9] = state.toggles.smoothing ? 1.0 : 0.0;
+    gaussBuf[10] = 0; gaussBuf[11] = 0;
     device.queue.writeBuffer(gaussParamsBuf, 0, gaussBuf);
+
+    // v121: render-toggles uniform. One float per phase (0 = bypass,
+    // 1 = on). The composite shader uses mix() to blend off/on states
+    // branchlessly; this is the user's A/B test interface.
+    const togBuf = togglesBufScratch;
+    togBuf[0]  = state.toggles.beerLambert    ? 1.0 : 0.0;
+    togBuf[1]  = state.toggles.subsurface     ? 1.0 : 0.0;
+    togBuf[2]  = state.toggles.refraction     ? 1.0 : 0.0;
+    togBuf[3]  = state.toggles.fresnel        ? 1.0 : 0.0;
+    togBuf[4]  = state.toggles.spec           ? 1.0 : 0.0;
+    togBuf[5]  = state.toggles.iblAmbient     ? 1.0 : 0.0;
+    togBuf[6]  = state.toggles.toneMap        ? 1.0 : 0.0;
+    togBuf[7]  = state.toggles.cubemapReflect ? 1.0 : 0.0;
+    for (let i = 8; i < 16; i++) togBuf[i] = 0;
+    device.queue.writeBuffer(togglesParamsBuf, 0, togBuf);
 
     // v108: caustic-pass uniform. Sun direction shares the composite
     // keylight so the focused light comes from the same place the
@@ -2694,9 +2886,9 @@ async function initAndRun() {
     }
     // v108: TRUE light-ray caustics. With the smoothed front depth
     // (depthB) just refreshed by the curvature-flow loop, splat refracted
-    // sun rays into backgroundTex. Additive blending over the tile
-    // backdrop — the composite's refraction warp then picks them up.
-    {
+    // sun rays into backgroundTex. v121: skipped entirely when the
+    // caustics toggle is off.
+    if (state.toggles.caustics) {
       const p = enc2.beginRenderPass({
         colorAttachments: [{
           view: backgroundTex.createView(),

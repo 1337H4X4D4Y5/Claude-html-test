@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v120</span>
+    <span class="tag">v121</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v120: PARTICLE_RADIUS 0.022 → 0.019 (compromise). v119's 0.022 cost too much perf (60 → 39 FPS) and made imposters individually visible as bumps reflected through the Fresnel surface. 0.019 keeps most of the silhouette improvement while restoring ~75% of the lost fragment-shading budget.</div>
+  <div class="desc">MLS-MPM on the GPU. v121: render-phase toggle panel — tap 🎚 to A/B test 11 individual pipeline stages (smoothing, curvature, caustics, Beer-Lambert, SSS, refraction, Fresnel, spec, IBL ambient, cubemap reflection, ACES). 7 preset looks (Reference, Minimalist, Caustics, Mirror, Body-only, Glassy mirror, Raw depth) for instant comparison. Toggle state persists in localStorage.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

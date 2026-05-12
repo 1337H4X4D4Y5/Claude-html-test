@@ -1287,8 +1287,11 @@
       const compositeSrc = src.slice(compIdx, compEnd);
       assert(compositeSrc.indexOf('fn acesFilm') >= 0,
         'composite must define acesFilm() tone-mapping helper');
-      assert(compositeSrc.indexOf('acesFilm(outColor)') >= 0,
-        'composite must tone-map the final colour through acesFilm()');
+      // v121: ACES is now toggleable via T.toneMap; tone-mapped output
+      // appears inside a mix() rather than as a top-level call. Accept
+      // any acesFilm(...) call at all.
+      assert(compositeSrc.indexOf('acesFilm(') >= 0,
+        'composite must call acesFilm() somewhere in the final colour path');
     });
 
     test('gpu-mpm v106: sky cubemap is HDR (rgba16float) + composite has subsurface scatter', () => {
@@ -1323,6 +1326,87 @@
     // than pattern-matching, so they catch silent calibration drift
     // (e.g. v107's units change, v114's σ/R convention bug).
     // -----------------------------------------------------------------
+
+    test('gpu-mpm v121: RenderToggles uniform wired into composite shader', () => {
+      // Live per-phase A/B toggles. 8-field RenderToggles struct, bound
+      // at @binding(6) on the composite. Each effect in fs_main is mixed
+      // through its toggle so off-state vs on-state is branchless.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.indexOf('struct RenderToggles') >= 0,
+        'composite must declare RenderToggles uniform struct');
+      assert(compositeSrc.match(/@group\(0\)\s*@binding\(6\)\s*var<uniform>\s+T:\s*RenderToggles/) !== null,
+        'RenderToggles must be bound at @binding(6) as `T`');
+      // The eight named toggles.
+      const expected = ['beerLambert','subsurface','refraction','fresnel',
+                        'spec','iblAmbient','toneMap','cubemapReflect'];
+      for (const name of expected) {
+        assert(compositeSrc.indexOf(name + ': f32') >= 0,
+          'RenderToggles must include `' + name + '` field');
+        assert(compositeSrc.indexOf('T.' + name) >= 0,
+          'composite must consume T.' + name + ' in its effect chain');
+      }
+    });
+
+    test('gpu-mpm v121: depth-smoothing passthrough flags (Bilateral + Curvature)', () => {
+      // The smoothing/curvature passes get an `enabled` toggle on their
+      // own uniforms (since their pipeline can't be skipped without
+      // rebinding composite to a different depth source). When the
+      // toggle is 0, the shader returns the source depth unmodified.
+      const src = readMpmScript();
+      const bilIdx = src.indexOf('const WGSL_DEPTH_BILATERAL');
+      const bilEnd = src.indexOf('`;', bilIdx);
+      const bilSrc = src.slice(bilIdx, bilEnd);
+      assert(bilSrc.indexOf('enabled: f32') >= 0,
+        'BilateralParams must declare `enabled: f32` field');
+      assert(bilSrc.indexOf('P.enabled < 0.5') >= 0,
+        'Bilateral shader must passthrough when P.enabled < 0.5');
+
+      const curvIdx = src.indexOf('const WGSL_CURVATURE');
+      const curvEnd = src.indexOf('`;', curvIdx);
+      const curvSrc = src.slice(curvIdx, curvEnd);
+      assert(curvSrc.indexOf('enabled: f32') >= 0,
+        'CurvParams must declare `enabled: f32` field');
+      assert(curvSrc.indexOf('P.enabled < 0.5') >= 0,
+        'Curvature shader must passthrough when P.enabled < 0.5');
+    });
+
+    test('gpu-mpm v121: state.toggles, localStorage persistence, JS uniform write', () => {
+      const src = readMpmScript();
+      assert(src.indexOf('toggles:') >= 0 && src.indexOf('state.toggles') >= 0,
+        'state.toggles must exist with per-phase booleans');
+      // Persistence layer.
+      assert(src.indexOf("localStorage.getItem('water-box-toggles')") >= 0 ||
+             src.indexOf("'water-box-toggles'") >= 0,
+        'toggles must persist in localStorage');
+      // Toggles uniform buffer written per frame.
+      assert(src.indexOf('togglesParamsBuf') >= 0,
+        'togglesParamsBuf must be created');
+      assert(src.indexOf('writeBuffer(togglesParamsBuf') >= 0,
+        'togglesParamsBuf must be written each frame');
+      // Caustic dispatch is conditional on the toggle.
+      assert(src.match(/if\s*\(\s*state\.toggles\.caustics\s*\)/) !== null,
+        'caustic dispatch must be gated by state.toggles.caustics');
+    });
+
+    test('gpu-mpm v121: phase-preset dropdown with multiple canned configurations', () => {
+      const src = readMpmScript();
+      assert(src.indexOf('TOGGLE_PRESETS') >= 0,
+        'TOGGLE_PRESETS dictionary must exist');
+      // Must include at least these named presets.
+      const required = ['reference', 'minimalist', 'caustics', 'mirror', 'raw_depth'];
+      for (const name of required) {
+        assert(src.indexOf(name + ':') >= 0 || src.indexOf("'" + name + "'") >= 0,
+          'TOGGLE_PRESETS must include "' + name + '" preset');
+      }
+      // UI panel must exist.
+      assert(src.indexOf('phases-preset-select') >= 0,
+        'Phases panel must include a preset <select> element');
+      assert(src.indexOf("getElementById('phases-btn')") >= 0,
+        'Phases-panel toggle button must be wired in JS');
+    });
 
     test('gpu-mpm regression: PARTICLE_RADIUS in sensible range (silhouette stays smooth)', () => {
       // Too small leaves discrete particle circles visible around the
@@ -1448,9 +1532,8 @@
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
       const compEnd = src.indexOf('`;', compIdx);
       const compositeSrc = src.slice(compIdx, compEnd);
-      assert(compositeSrc.match(/mix\(\s*transmitted\s*,\s*sky\s*,\s*fresnel\s*\)/) !== null,
-        'Body→sky mix must use raw fresnel (not fresnelMasked). ' +
-        'Masking with thinClamp kills sky reflection in the bulk.');
+      assert(compositeSrc.match(/mix\(\s*transmitted\s*,\s*sky\s*,\s*fresnel(Eff)?\s*\)/) !== null,
+        'Body→sky mix must use raw fresnel (or fresnel*toggle = fresnelEff) — never fresnelMasked');
     });
 
     test('gpu-mpm regression: normal-reconstruction stencil ≥ 2 px (anti-specular-aliasing)', () => {
@@ -1509,8 +1592,10 @@
       const compIdx = src.indexOf('const WGSL_COMPOSITE');
       const compEnd = src.indexOf('`;', compIdx);
       const compositeSrc = src.slice(compIdx, compEnd);
-      assert(compositeSrc.match(/let\s+sky\s*=\s*min\(\s*textureSampleLevel\(\s*skyCube/) !== null,
-        'cubemap reflection sample in body→sky must be wrapped in min() to clamp HDR aliasing');
+      // v121: the cubemap sample is now `cubeSample = min(textureSampleLevel(skyCube, ...), 3.5)`
+      // and then mixed against a flat colour by T.cubemapReflect.
+      assert(compositeSrc.match(/min\(\s*textureSampleLevel\(\s*skyCube[\s\S]*?,\s*vec3<f32>\(\s*3\.[0-9]+\s*\)\s*\)/) !== null,
+        'cubemap reflection sample must be wrapped in min(..., vec3(N)) to clamp HDR aliasing');
     });
 
     test('gpu-mpm regression: Schlick R₀ baseline present (non-zero at normal incidence)', () => {
@@ -1654,8 +1739,12 @@
         'thinClamp multiplier must be >= 15 so it saturates within the box (got ' + tcMul + ')');
       // Fresnel must be applied UNMASKED to the body-sky mix. The
       // composite's final mix() should call fresnel, not fresnelMasked.
-      assert(compositeSrc.match(/mix\(\s*transmitted\s*,\s*sky\s*,\s*fresnel\s*\)/) !== null,
-        'final body-sky mix should use raw fresnel (not fresnelMasked) — bilateral/curvature flow preserve silhouettes well enough');
+      // v121: fresnel is now multiplied by T.fresnel (toggle) into
+      // fresnelEff; still no thinClamp on it.
+      assert(compositeSrc.match(/mix\(\s*transmitted\s*,\s*sky\s*,\s*fresnel(Eff)?\s*\)/) !== null,
+        'final body-sky mix should use raw fresnel (or fresnel*toggle = fresnelEff) — never fresnelMasked');
+      assert(compositeSrc.indexOf('fresnelMasked') < 0,
+        'fresnelMasked (thinClamp-multiplied) form must not appear in v121+');
     });
 
     test('gpu-mpm v112: full Schlick Fresnel R₀ + (1-R₀)·(1-cosθ)⁵ (slide 22)', () => {

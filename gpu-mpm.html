@@ -114,19 +114,23 @@
   /* v121: render-phase toggles button + panel. Sits below the gear,
      opens a checklist of NVIDIA SSF pipeline phases so the user can
      A/B compare which phase needs work. */
+  /* v125 fix: was top: 76px, which overlapped the 💧 presets button at
+     78px (the 🎚 button was hidden beneath it on the iPhone screen).
+     Moved to 118px so the three top-right buttons stack cleanly:
+     38 ⚙ → 78 💧 → 118 🎚. */
   #phases-btn {
     position: fixed;
-    top: calc(env(safe-area-inset-top, 8px) + 76px);
+    top: calc(env(safe-area-inset-top, 8px) + 118px);
     right: calc(env(safe-area-inset-right, 8px) + 8px);
     width: 34px; height: 34px; border: none; border-radius: 17px;
-    background: rgba(74,163,255,0.28);
-    color: #cfe8ff; font-size: 16px; font-weight: 600;
+    background: rgba(74,163,255,0.40);
+    color: #ffffff; font-size: 18px; font-weight: 700;
     cursor: pointer; -webkit-tap-highlight-color: transparent;
     z-index: 9;
   }
   #phases-panel {
     position: fixed;
-    top: calc(env(safe-area-inset-top, 8px) + 116px);
+    top: calc(env(safe-area-inset-top, 8px) + 158px);
     right: calc(env(safe-area-inset-right, 8px) + 8px);
     width: 280px; max-height: 70vh; overflow-y: auto;
     padding: 12px 14px; border-radius: 12px;
@@ -312,7 +316,7 @@
   <button id="settings-apply">Apply (reloads)</button>
   <button id="settings-cancel">Cancel</button>
 </div>
-<button id="phases-btn" title="Render phases">🎚</button>
+<button id="phases-btn" title="Render phases">FX</button>
 <div id="phases-panel">
   <h4>Phase preset (tap to apply)</h4>
   <div id="phases-presets">
@@ -390,7 +394,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v125 (2026-05-12 — deck-38 flow noise: particle imposters sample procedural 3D value-noise at their world centres, composite gradient-perturbs the surface normal. Tap "Flow noise (deck-38)" or "Flow detail" preset.)';
+const APP_VERSION = 'mpm-v126 (2026-05-12 — fix: phases button (now labelled FX) moved from top: 76px to 118px — was overlapping the 💧 presets button at 78px on iPhone, hiding the toggle panel entirely. Plus white "FX" text replaces the 🎚 emoji.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 

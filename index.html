@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v116</span>
+    <span class="tag">v117</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v116: anti-specular-aliasing — normal-reconstruction stencil widened from ±1 to ±3 pixels, so sub-σ noise in the smoothed depth no longer fires tight Schlick specular into visible sparkles on the top surface. Spec multiplier 1.6 → 1.0 for a softer wet-sheen highlight. Plus 8 numerical regression tests catching calibration drift, not just code patterns.</div>
+  <div class="desc">MLS-MPM on the GPU. v117: Fresnel-aliasing fix — normal stencil ±3 → ±6 (averages across one particle width) and cubemap reflection sample clamped to min(·, 3.5). The HDR sun core (luminance ~9) was driving 10× brightness deltas between adjacent pixels via tiny normal variations, creating a fingerprint pattern. Capped reflection + wider gradient stencil = clean wet sheen.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

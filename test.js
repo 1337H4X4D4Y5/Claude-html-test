@@ -1449,8 +1449,23 @@
       const stencil = parseInt(stencilMatch[1], 10);
       assert(stencil >= 2,
         'NORMAL_STENCIL must be ≥ 2 to avoid spec aliasing on the smoothed surface (got ' + stencil + ')');
-      assert(stencil <= 6,
-        'NORMAL_STENCIL too wide will blur silhouettes (got ' + stencil + '; recommended 2-4)');
+      assert(stencil <= 10,
+        'NORMAL_STENCIL too wide will blur silhouettes (got ' + stencil + '; recommended 3-8)');
+    });
+
+    test('gpu-mpm regression: cubemap reflection clamped in body→sky branch', () => {
+      // v117 fix. The HDR cubemap has sun core at brightness ~9; small
+      // normal variations between adjacent pixels can swing the
+      // reflection sample between 9 and ~0.5, producing a high-contrast
+      // dotted pattern through Fresnel. Clamping the sample to a
+      // moderate maximum kills that aliasing while ACES tone-maps the
+      // capped peak to a clean bright wet-rim look.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.match(/let\s+sky\s*=\s*min\(\s*textureSampleLevel\(\s*skyCube/) !== null,
+        'cubemap reflection sample in body→sky must be wrapped in min() to clamp HDR aliasing');
     });
 
     test('gpu-mpm regression: Schlick R₀ baseline present (non-zero at normal incidence)', () => {

@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v116 (2026-05-12 — anti-specular-aliasing: normal-reconstruction stencil ±1 → ±3 pixels so sub-σ noise in smoothed depth doesn\'t fire bright spec sparkles; spec multiplier 1.6 → 1.0)';
+const APP_VERSION = 'mpm-v117 (2026-05-12 — Fresnel-aliasing fix: normal stencil ±3 → ±6, cubemap reflection clamped to min(·, 3.5). HDR sun core was driving 10× brightness deltas through small normal variations.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1450,7 +1450,7 @@ fn viewPosFromDepth(fragXY: vec2<f32>, depth: f32) -> vec3<f32> {
 // pattern on the top surface. Silhouette behaviour preserved: the
 // "closer-to-the-surface wins" select() picks the smaller |Δz| on
 // each axis, so silhouette pixels still get a clean one-sided normal.
-const NORMAL_STENCIL: i32 = 3;
+const NORMAL_STENCIL: i32 = 6;
 fn reconstructNormal(coord: vec2<i32>, fragXY: vec2<f32>, viewC: vec3<f32>, depthC: f32) -> vec3<f32> {
   let dL = textureLoad(depthTex, coord + vec2<i32>(-NORMAL_STENCIL,  0), 0);
   let dR = textureLoad(depthTex, coord + vec2<i32>( NORMAL_STENCIL,  0), 0);
@@ -1583,11 +1583,15 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let transmitted = mix(absorbedBg, litBase, opacity) + sss;
 
   // v105: real cubemap sample for Fresnel reflection (was procedural
-  // in v104). The cube texture is baked once at init with the same
-  // gradient + sun-disk content, so the per-pixel cost drops from
-  // ~10 ALU + branch to a single textureSampleLevel.
+  // in v104). v117: clamp the reflection sample so the HDR sun core
+  // (luminance ~9) can't cause 10× brightness deltas between adjacent
+  // pixels whose normals point just slightly differently. With the
+  // sun reflection capped near 3.5, small normal variations still
+  // brighten/darken the reflection — just much less dramatically.
+  // ACES tone mapping then compresses the cap to a clean wet-rim peak.
   let reflectedV = reflect(-viewDir, n);
-  let sky = textureSampleLevel(skyCube, skySampler, reflectedV, 0.0).rgb;
+  let sky = min(textureSampleLevel(skyCube, skySampler, reflectedV, 0.0).rgb,
+                vec3<f32>(3.5));
 
   // v113: Fresnel applied unmasked. The body→sky mix is what makes
   // water look reflective; masking it with thinClamp killed sky

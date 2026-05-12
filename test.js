@@ -1418,6 +1418,37 @@
         'Phases-panel toggle button must be wired in JS');
     });
 
+    test('gpu-mpm v129: debug visualisation cycle (5 viz modes)', () => {
+      // A single cycling chip in the FX panel that selects which
+      // intermediate buffer the composite should output as colour
+      // instead of the final render. 0 = off / 1 = depth / 2 = normal
+      // / 3 = thickness / 4 = noise / 5 = back-depth.
+      const src = readMpmScript();
+      // RenderToggles uniform has the new field.
+      const cIdx = src.indexOf('const WGSL_COMPOSITE');
+      const cEnd = src.indexOf('`;', cIdx);
+      const compositeSrc = src.slice(cIdx, cEnd);
+      assert(compositeSrc.match(/debugViz\s*:\s*f32/) !== null,
+        'RenderToggles must declare debugViz: f32');
+      // The composite must short-circuit to the viz when debugViz > 0.5.
+      assert(compositeSrc.match(/if\s*\(\s*T\.debugViz\s*>\s*0\.5\s*\)/) !== null,
+        'composite must have a debug-viz override branch keyed on T.debugViz');
+      // JS state.debugViz + cycling click handler.
+      assert(src.indexOf('state.debugViz') >= 0,
+        'state.debugViz must exist');
+      assert(src.indexOf('debugVizLabels') >= 0,
+        'state.debugVizLabels (mode names) must exist');
+      // Each frame writes debugViz to a toggles uniform slot.
+      assert(src.indexOf('togBuf[10] = state.debugViz') >= 0,
+        'togBuf[10] must carry state.debugViz to the shader');
+      // UI cycle button.
+      const html = readMpmHtml();
+      assert(html.indexOf('id="debug-viz-cycle"') >= 0,
+        'UI must include a #debug-viz-cycle button');
+      assert(html.indexOf('class="phase cycle"') >= 0,
+        'the cycle chip must use class="phase cycle" for distinct styling');
+    });
+
     test('gpu-mpm v128: deck-37 chromatic-dispersion caustics (3 passes, R/G/B IORs)', () => {
       // Slide 37: "Can perform multiple times with different indices of
       // refraction to simulate refractive dispersion (R, G, B)." Three

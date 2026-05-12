@@ -179,6 +179,20 @@
     content: "●"; color: #4aa3ff;
   }
   #phases-panel button.phase:active { transform: scale(0.985); }
+  /* v129: cycle chip — multi-state debug toggle. Distinct orange tint
+     when the cycle is active (any non-zero mode); off-state matches
+     the regular .phase look. Dot ::before replaced with an arrow to
+     hint at the cyclic behaviour. */
+  #phases-panel button.phase.cycle.on {
+    background: rgba(220,140,80,0.30);
+    border-color: rgba(220,140,80,0.65);
+  }
+  #phases-panel button.phase.cycle::before {
+    content: "▷"; color: rgba(220,140,80,0.6);
+  }
+  #phases-panel button.phase.cycle.on::before {
+    content: "▶"; color: #f0a050;
+  }
   /* Preset chips: same chip style, distinct colour, two-up grid. */
   #phases-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
   #phases-panel button.preset {
@@ -355,6 +369,8 @@
   <button class="phase" data-toggle="cubemapReflect">Cubemap reflection sample</button>
   <h4>Post</h4>
   <button class="phase" data-toggle="toneMap">ACES tone mapping</button>
+  <h4>Diagnostics</h4>
+  <button class="phase cycle" id="debug-viz-cycle">Debug viz: off</button>
 </div>
 <button id="presets-btn" title="Fluid preset">💧</button>
 <div id="presets-panel">
@@ -398,7 +414,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v128 (2026-05-12 — deck-37 chromatic-dispersion caustics: 3 caustic passes per frame at slightly different IORs (R=1.323, G=1.333, B=1.348) with R/G/B-only tints. Where IOR-divergence spreads the refracted rays, rainbow fringes emerge. Tap "Chromatic dispersion (deck-37)" or "Rainbow caustics" preset.)';
+const APP_VERSION = 'mpm-v129 (2026-05-12 — debug visualisations: a single cycling chip at the bottom of the FX panel rotates through 5 viz modes (depth, normal, thickness, noise, back-depth). Composite short-circuits to a false-colour view of the chosen intermediate buffer so broken phases reveal themselves.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -676,6 +692,13 @@ const state = {
                               //       caustic pass run 3× at slightly
                               //       different IORs (R/G/B) for rainbow.
   },
+  // v129: debug viz cycle (integer, not a boolean). 0 = off, 1 = front
+  // depth, 2 = normal, 3 = thickness, 4 = noise, 5 = back depth. Bound
+  // to a single cycling chip whose label updates per state.
+  debugViz: 0,
+  debugVizLabels: ['Debug viz: off', 'Debug viz: depth',
+                   'Debug viz: normal', 'Debug viz: thickness',
+                   'Debug viz: noise', 'Debug viz: back-depth'],
 };
 (function loadTogglesFromStorage() {
   try {
@@ -683,10 +706,18 @@ const state = {
     for (const k of Object.keys(state.toggles)) {
       if (typeof saved[k] === 'boolean') state.toggles[k] = saved[k];
     }
+    // v129: debugViz is an int, persisted alongside the toggles.
+    if (Number.isInteger(saved.__debugViz)) {
+      state.debugViz = Math.max(0, Math.min(5, saved.__debugViz));
+    }
   } catch (_) {}
 })();
 function saveTogglesToStorage() {
-  try { localStorage.setItem('water-box-toggles', JSON.stringify(state.toggles)); } catch (_) {}
+  try {
+    const obj = Object.assign({}, state.toggles);
+    obj.__debugViz = state.debugViz;
+    localStorage.setItem('water-box-toggles', JSON.stringify(obj));
+  } catch (_) {}
 }
 const TOGGLE_PRESETS = {
   reference:    { smoothing: true,  curvatureFlow: true,  caustics: true,  beerLambert: true,  subsurface: true,  refraction: true,  fresnel: true,  spec: true,  iblAmbient: true,  cubemapReflect: true,  toneMap: true,  additiveThickness: false },
@@ -854,6 +885,20 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
       syncUI();
     });
   }
+  // v129: debug-viz cycle chip. Increments state.debugViz 0-5, updates
+  // the label, marks .on whenever the mode is non-zero so the user
+  // sees the cycle is active.
+  const vizBtn = document.getElementById('debug-viz-cycle');
+  function syncDebugViz() {
+    vizBtn.textContent = state.debugVizLabels[state.debugViz] || 'Debug viz: off';
+    vizBtn.classList.toggle('on', state.debugViz > 0);
+  }
+  vizBtn.addEventListener('click', function () {
+    state.debugViz = (state.debugViz + 1) % state.debugVizLabels.length;
+    saveTogglesToStorage();
+    syncDebugViz();
+  });
+  syncDebugViz();
   syncUI();
 })();
 
@@ -1941,7 +1986,12 @@ struct RenderToggles {
   // v125: flowNoise = 1.0 perturbs the surface normal by the screen-
   // space gradient of the noise field (deck slide 38).
   flowNoise: f32,
-  _pad2: f32, _pad3: f32,
+  // v129: debugViz selects a single-buffer visualisation override at
+  // the end of fs_main. 0 = off (normal render), 1 = front depth,
+  // 2 = normal, 3 = thickness (pathLen), 4 = noise, 5 = back depth.
+  // Lets the user see each intermediate pipeline buffer directly so a
+  // broken phase reveals itself visually.
+  debugViz: f32, _pad3: f32,
   _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
 };
 
@@ -2163,6 +2213,40 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   // on = ACES Filmic.
   let mappedOut = mix(clamp(linearOut, vec3<f32>(0.0), vec3<f32>(1.0)),
                       acesFilm(linearOut), T.toneMap);
+
+  // v129: debug visualisation override. Selected by integer T.debugViz
+  // (0 = off, 1=depth, 2=normal, 3=thickness, 4=noise, 5=back depth).
+  // Each branch returns a grayscale or false-colour visualisation of
+  // one intermediate buffer; the regular composite path is bypassed.
+  if (T.debugViz > 0.5) {
+    if (T.debugViz < 1.5) {
+      // Front depth — linearize then scale to 0-1 across the box's z range.
+      let zV = abs(viewPos.z);
+      let zN_norm = (zV - 1.5) / 1.5;  // map [1.5, 3.0] view-z to [0,1]
+      let v = clamp(1.0 - zN_norm, 0.0, 1.0);
+      return vec4<f32>(v, v, v, 1.0);
+    } else if (T.debugViz < 2.5) {
+      // Surface normal — (n + 1) * 0.5 to [0,1].
+      let nViz = n * 0.5 + 0.5;
+      return vec4<f32>(nViz, 1.0);
+    } else if (T.debugViz < 3.5) {
+      // Thickness — pathLen scaled. Hot colourmap: blue→cyan→white.
+      let t = clamp(pathLen * 12.0, 0.0, 1.0);
+      let r = t;
+      let g = clamp(t * 1.5, 0.0, 1.0);
+      let b = clamp(0.4 + t * 0.6, 0.0, 1.0);
+      return vec4<f32>(r, g, b, 1.0);
+    } else if (T.debugViz < 4.5) {
+      // Noise (only meaningful when flowNoise pass ran this frame).
+      let nn = textureLoad(noiseTex, coord / 2, 0).r;
+      return vec4<f32>(nn, nn, nn, 1.0);
+    } else {
+      // Back-face depth — linearize like the front, show as red ramp.
+      let bz = abs(backViewZ);
+      let bn = clamp(1.0 - (bz - 1.5) / 1.5, 0.0, 1.0);
+      return vec4<f32>(bn, bn * 0.4, 0.2, 1.0);
+    }
+  }
   return vec4<f32>(mappedOut, 1.0);
 }
 `;
@@ -3404,7 +3488,8 @@ async function initAndRun() {
     togBuf[7]  = state.toggles.cubemapReflect ? 1.0 : 0.0;
     togBuf[8]  = state.toggles.additiveThickness ? 1.0 : 0.0;
     togBuf[9]  = state.toggles.flowNoise ? 1.0 : 0.0;
-    for (let i = 10; i < 16; i++) togBuf[i] = 0;
+    togBuf[10] = state.debugViz;
+    for (let i = 11; i < 16; i++) togBuf[i] = 0;
     device.queue.writeBuffer(togglesParamsBuf, 0, togBuf);
 
     // v127: light view-projection matrix for the shadow pass + backdrop.

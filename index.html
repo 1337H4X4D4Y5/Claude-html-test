@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v134</span>
+    <span class="tag">v135</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v134: flowNoise toggle no longer freezes the sim — the noise render pass was pairing a half-res color attachment with a full-res depth attachment (WebGPU rejects mismatched sizes), so the depth test is dropped and last-writer-wins is used for the screen-space noise. Slider defaults retuned to the current BOX_HALF_Z = 0.25 box (thicknessScale 1.8 → 0.40 to stop 99% red absorption, worldRangeSigma 0.15 → 0.10, refractStrength 35 → 30) — schema-bumped so existing users pick them up. Stale gpuError banner clears after 300 clean frames. WGSL_LIGHT_DEPTH switched to auto-depth (no explicit frag_depth write) for iOS Safari compiler stability.</div>
+  <div class="desc">MLS-MPM on the GPU. v135: perf audit now reports stderr alongside the on/off delta. The v134 report's negative phase costs (toggle ON makes the sim FASTER, physically impossible) were JS-side measurement noise dwarfing the sub-ms per-phase cost on Apple GPU — Welford-online variance plus a 1.96·σ noise-floor clamp surfaces those as "< noise" instead of printing a misleading sign. Sample count bumped 30 → 120 to halve stderr.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

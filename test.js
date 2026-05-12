@@ -1458,6 +1458,30 @@
         'refreshPhaseChipLabels() must update chip text with cost suffixes');
     });
 
+    test('gpu-mpm v135: perf audit tracks stderr and suppresses sub-noise deltas', () => {
+      // Without this, the audit reports negative phase costs (toggle ON
+      // makes the sim FASTER, physically impossible) as soon as the
+      // per-phase JS cost drops below the frame-to-frame jitter. v135
+      // adds Welford-online variance + a 1.96·σ noise floor so those
+      // false signals are surfaced as "< noise" instead.
+      const src = readMpmScript();
+      assert(src.indexOf('onM2') >= 0 && src.indexOf('offM2') >= 0,
+        'Welford accumulators (onM2/offM2) must be tracked per side');
+      assert(src.indexOf('belowNoise') >= 0,
+        'phaseCosts entries must carry a belowNoise flag');
+      assert(src.match(/stderr\s*=\s*Math\.sqrt/),
+        'stderr-of-the-mean must be sqrt(var_on/n_on + var_off/n_off)');
+      assert(src.indexOf('1.96 * stderr') >= 0,
+        'noise threshold must be 1.96·σ (95% CI for "delta is zero")');
+      // Sample count bumped — 30 was way too few for sub-ms phases.
+      const samplesMatch = src.match(/const\s+AUDIT_SAMPLES\s*=\s*(\d+)/);
+      assert(samplesMatch && parseInt(samplesMatch[1], 10) >= 100,
+        'AUDIT_SAMPLES must be ≥ 100 to drive stderr below typical per-phase cost');
+      // Debug-report rendering knows about the new shape.
+      assert(src.indexOf('< noise') >= 0,
+        'debug report must display "< noise" for below-threshold deltas');
+    });
+
     test('gpu-mpm v131: live tunable sliders + debug-report extensions', () => {
       const src = readMpmScript();
       // state.tunables exists with the 5 expected keys.

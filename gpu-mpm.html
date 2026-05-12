@@ -403,7 +403,7 @@
   <button class="bulk" id="tunables-reset" style="margin-top: 6px;">Reset tunables</button>
   <h4>Diagnostics</h4>
   <button class="phase cycle" id="debug-viz-cycle">Debug viz: off</button>
-  <button class="bulk" id="perf-audit-btn" style="margin-top: 6px;">Run perf audit (~16s)</button>
+  <button class="bulk" id="perf-audit-btn" style="margin-top: 6px;">Run perf audit (~64s)</button>
   <div id="perf-audit-status" style="font-size: 11px; opacity: 0.7; margin-top: 4px; min-height: 14px;"></div>
 </div>
 <button id="presets-btn" title="Fluid preset">💧</button>
@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v134 (2026-05-12 — fix: flowNoise toggle froze the sim (validation error: half-res color attachment paired with full-res depth attachment in the noise render pass — dropped the depth test, last-writer-wins is fine for screen-space noise). Retune: tunable defaults shipped (thicknessScale 1.8 → 0.40 — was absorbing 99% red at BOX_HALF_Z 0.25; worldRangeSigma 0.15 → 0.10; refractStrength 35 → 30). Schema-bumped localStorage so existing users pick up the new defaults. Stale gpuError now clears after 300 clean frames. WGSL_LIGHT_DEPTH dropped explicit @builtin(frag_depth) write — auto-depth path, less compiler trouble on iOS Safari.)';
+const APP_VERSION = 'mpm-v135 (2026-05-12 — perf audit honest-about-noise. Negative phase costs in the v134 report ("flowNoise: −0.20 ms") were the JS-side measurement noise floor exceeding the per-phase cost on Apple GPU. v135 adds Welford-online variance per side, computes the standard error of the mean delta, and labels any |Δ| < 1.96·σ as "< noise" instead of printing the misleading sign. AUDIT_SAMPLES bumped 30 → 120 (halves stderr; run time ~64s).)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -821,8 +821,11 @@ function saveTogglesToStorage() {
 // costs that many ms when on. Some toggles flip default-off (e.g.,
 // additiveThickness) — the machine probes both directions correctly
 // because it forces the toggle to a known state before measuring.
-const AUDIT_WARMUP = 15;   // frames to settle after flipping
-const AUDIT_SAMPLES = 30;  // frames whose ms we average
+const AUDIT_WARMUP = 15;    // frames to settle after flipping
+// v135: bumped 30 → 120. We measure JS-side encoding cost (sub-ms on
+// Apple GPU) where sample variance dominates the signal — quadrupling
+// samples halves stderr. ~2s per side × 16 toggles ≈ 64s total run.
+const AUDIT_SAMPLES = 120;
 function startPerfAudit() {
   if (state.auditState) return;
   // Order: pipeline phases first (likely most expensive), then surface
@@ -837,8 +840,11 @@ function startPerfAudit() {
     keyIdx: 0,
     direction: 'on',     // 'on' phase, then 'off' phase
     frame: 0,
-    onAccum: 0, onCount: 0,
-    offAccum: 0, offCount: 0,
+    // v135: Welford online variance — tracks mean + M2 per side so we
+    // can publish stderr-of-the-mean alongside the on/off delta. The
+    // toggle cost is meaningful only when |delta| > 1.96 · stderrDelta.
+    onMean: 0, onM2: 0, onN: 0,
+    offMean: 0, offM2: 0, offN: 0,
     originalToggles: Object.assign({}, state.toggles),
     originalDebugViz: state.debugViz,
     progressLabel: 'Audit: starting…',
@@ -856,8 +862,18 @@ function stepPerfAudit(frameMs) {
   a.frame++;
   // Skip the warmup frames; sample the rest.
   if (a.frame > AUDIT_WARMUP) {
-    if (a.direction === 'on')  { a.onAccum  += frameMs; a.onCount++;  }
-    else                       { a.offAccum += frameMs; a.offCount++; }
+    // v135: Welford update for whichever side we're sampling.
+    if (a.direction === 'on') {
+      a.onN++;
+      const d = frameMs - a.onMean;
+      a.onMean += d / a.onN;
+      a.onM2 += d * (frameMs - a.onMean);
+    } else {
+      a.offN++;
+      const d = frameMs - a.offMean;
+      a.offMean += d / a.offN;
+      a.offM2 += d * (frameMs - a.offMean);
+    }
   }
   if (a.frame < AUDIT_WARMUP + AUDIT_SAMPLES) return;
   // Side done — flip direction or advance to next key.
@@ -868,12 +884,26 @@ function stepPerfAudit(frameMs) {
     state.toggles[key] = false;
     a.progressLabel = 'Audit: ' + key + ' (off)';
   } else {
-    // Both sides done — record delta, advance to next key.
-    const onMs  = a.onCount  ? a.onAccum  / a.onCount  : 0;
-    const offMs = a.offCount ? a.offAccum / a.offCount : 0;
-    state.phaseCosts[key] = onMs - offMs;  // positive ⇒ toggle costs ms
+    // v135: record delta + standard error of the delta. stderr_delta =
+    // sqrt(var_on/n_on + var_off/n_off). If |delta| < 1.96 · stderr it's
+    // noise — surfaced as `belowNoise: true` so the UI can hide the
+    // misleading sign.
+    const onMs  = a.onN  ? a.onMean  : 0;
+    const offMs = a.offN ? a.offMean : 0;
+    const onVar  = a.onN  > 1 ? a.onM2  / (a.onN  - 1) : 0;
+    const offVar = a.offN > 1 ? a.offM2 / (a.offN - 1) : 0;
+    const stderr = Math.sqrt((a.onN  ? onVar  / a.onN  : 0) +
+                             (a.offN ? offVar / a.offN : 0));
+    const delta  = onMs - offMs;
+    state.phaseCosts[key] = {
+      delta:      delta,
+      stderr:     stderr,
+      belowNoise: Math.abs(delta) < 1.96 * stderr,
+    };
     a.keyIdx++;
-    a.frame = 0; a.onAccum = a.onCount = 0; a.offAccum = a.offCount = 0;
+    a.frame = 0;
+    a.onMean = a.onM2 = a.onN = 0;
+    a.offMean = a.offM2 = a.offN = 0;
     a.direction = 'on';
     if (a.keyIdx >= a.keys.length) {
       // All done — restore.
@@ -1116,9 +1146,17 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
   function refreshPhaseChipLabels() {
     for (const [key, base] of phaseChipBaseText.entries()) {
       const cost = state.phaseCosts[key];
-      const text = (typeof cost === 'number' && Number.isFinite(cost))
-        ? base + '  ·  ' + cost.toFixed(2) + ' ms'
-        : base;
+      let text = base;
+      // v135: cost is now { delta, stderr, belowNoise }. Old runs may
+      // still have plain-number entries until a fresh audit overwrites
+      // them — keep a fallback so the chip text doesn't show NaN.
+      if (cost && typeof cost === 'object' && Number.isFinite(cost.delta)) {
+        text = cost.belowNoise
+          ? base + '  ·  < noise'
+          : base + '  ·  ' + cost.delta.toFixed(2) + ' ± ' + cost.stderr.toFixed(2) + ' ms';
+      } else if (typeof cost === 'number' && Number.isFinite(cost)) {
+        text = base + '  ·  ' + cost.toFixed(2) + ' ms';
+      }
       const b = document.querySelector('#phases-panel button.phase[data-toggle="' + key + '"]');
       if (b) b.textContent = text;
     }
@@ -4297,16 +4335,34 @@ function buildDebugReport() {
     'Fresnel @ grazing:    ' + (fresnelGrazing * 100).toFixed(2) + '%',
     'thinClamp saturates:  pathLen=' + thinSatPath.toFixed(3) + '  (' + (thinSatPath / maxPathLen * 100).toFixed(1) + '% of max pathLen)',
     '',
-    '--- per-phase perf audit (v132) ---',
+    '--- per-phase perf audit (v132, v135 stderr) ---',
     (function () {
       const keys = Object.keys(state.phaseCosts);
       if (!keys.length) return '(not run yet — tap "Run perf audit" in the FX panel)';
-      // Sort by cost descending so heaviest phases bubble up.
-      const sorted = keys.slice().sort((a, b) => (state.phaseCosts[b] || 0) - (state.phaseCosts[a] || 0));
+      // v135: costs are { delta, stderr, belowNoise }. Sort by signed
+      // delta but display "< noise" for entries where |delta| < 1.96·σ.
+      function getDelta(k) {
+        const c = state.phaseCosts[k];
+        if (c && typeof c === 'object') return Number.isFinite(c.delta) ? c.delta : 0;
+        return typeof c === 'number' ? c : 0;
+      }
+      const sorted = keys.slice().sort((a, b) => getDelta(b) - getDelta(a));
       return sorted.map(k => {
-        const ms = state.phaseCosts[k];
+        const c = state.phaseCosts[k];
+        const label = ('  ' + k).padEnd(22);
+        if (c && typeof c === 'object') {
+          if (c.belowNoise) {
+            return label + '< noise  (Δ=' +
+              (c.delta >= 0 ? '+' : '−') + Math.abs(c.delta).toFixed(2) +
+              ', σ=' + c.stderr.toFixed(2) + ')';
+          }
+          const sign = c.delta >= 0 ? '+' : '−';
+          return label + sign + Math.abs(c.delta).toFixed(2) + ' ± ' + c.stderr.toFixed(2) + ' ms';
+        }
+        // Legacy fallback (plain number).
+        const ms = typeof c === 'number' ? c : 0;
         const sign = ms >= 0 ? '+' : '−';
-        return ('  ' + k).padEnd(22) + sign + Math.abs(ms).toFixed(2) + ' ms';
+        return label + sign + Math.abs(ms).toFixed(2) + ' ms';
       }).join('\n');
     })(),
     '',

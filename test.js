@@ -1338,8 +1338,8 @@
       const gIdx = src.indexOf('const WGSL_DEPTH_BILATERAL');
       const gEnd = src.indexOf('`;', gIdx);
       const gaussSrc = src.slice(gIdx, gEnd);
-      assert(gaussSrc.indexOf('worldRadius') >= 0,
-        'depth-filter shader must declare worldRadius uniform (constant in world space)');
+      assert(gaussSrc.indexOf('worldSigma') >= 0 || gaussSrc.indexOf('worldRadius') >= 0,
+        'depth-filter shader must declare a world-space σ (or radius) uniform');
       assert(gaussSrc.indexOf('maxScreenRadius') >= 0,
         'depth-filter shader must clamp R to maxScreenRadius (perf cap from the deck)');
       assert(gaussSrc.indexOf('pixelView') >= 0 || gaussSrc.match(/2\.0\s*\*\s*abs\(viewZ/),
@@ -1353,6 +1353,29 @@
       assert(fcIdx >= 0, 'curvaturePipeline must still be dispatched');
       assert(fhIdx < fcIdx && fvIdx < fcIdx,
         'gaussH and gaussV must run BEFORE the curvature-flow loop (pre-smooth)');
+    });
+
+    test('gpu-mpm v114: depth-filter sigma/R convention (worldSigma = true σ, R = 3σ)', () => {
+      // v109-v113 had a sigma/R convention bug: R was treated as the
+      // truncation radius BUT sigma was set to R/2, which meant the
+      // effective world-space σ was worldRadius/2 — half what the
+      // uniform name implied, and smaller than a particle (so the
+      // Gaussian couldn't actually smooth over particle-scale noise).
+      // v114 fixes: uniform field is now worldSigma (the actual σ), and
+      // R is computed as min(3 * sigmaScreen, maxScreenRadius).
+      const src = readMpmScript();
+      const gIdx = src.indexOf('const WGSL_DEPTH_BILATERAL');
+      const gEnd = src.indexOf('`;', gIdx);
+      const shader = src.slice(gIdx, gEnd);
+      assert(shader.indexOf('worldSigma') >= 0,
+        'shader must declare worldSigma uniform field (true world-space σ)');
+      assert(shader.match(/sigmaScreen\s*=\s*P\.worldSigma\s*\/\s*max\(\s*pixelView/) !== null,
+        'sigmaScreen must be P.worldSigma / pixelView (the world σ in screen units)');
+      assert(shader.match(/3\.0\s*\*\s*sigmaScreen/) !== null,
+        'R truncation must use 3 * sigmaScreen (standard Gaussian 3σ cutoff)');
+      // No more "sigma = R/2" half-σ convention.
+      assert(shader.match(/sigma\s*=\s*f32\(R\)\s*\*\s*0\.5/) === null,
+        'old sigma = R/2 half-σ convention should be gone in v114');
     });
 
     test('gpu-mpm v110: depth filter is bilateral (range weight in world depth units)', () => {

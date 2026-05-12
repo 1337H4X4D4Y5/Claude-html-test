@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v113</span>
+    <span class="tag">v114</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v113: thickness-shading recalibration (NVIDIA SSF deck slide 23) — thicknessScale 0.10 → 1.8 to match v107's view-space path-length units (was tuned for old additive-sprite range, water appeared clear). thinClamp multiplier 6 → 25 so it saturates at proper depth; Fresnel un-masked. v112 Schlick, v111 IBL ambient, v110 bilateral, v108 caustics underneath.</div>
+  <div class="desc">MLS-MPM on the GPU. v114: fixes the σ/R convention in the depth-smoothing filter (slide 18) — v109-v113 had σ = R/2 which meant the effective world-space σ was HALF the advertised value, smaller than a single particle. Now worldSigma is the true world σ and R = 3σ (standard Gaussian cutoff). Surface smoothing actually spans particle-scale features. v113 thickness recalibration, v112 Schlick, v111 IBL ambient underneath.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v113 (2026-05-12 — thickness shading recalibration (NVIDIA SSF slide 23): thicknessScale 0.10 → 1.8 for v107 path-length units; thinClamp ×6 → ×25; Fresnel unmasked. Water was "clear" because Beer-Lambert + Fresnel were both calibrated to old units.)';
+const APP_VERSION = 'mpm-v114 (2026-05-12 — fix Gaussian σ/R convention: worldSigma is the true world σ, R = 3σ. v109-v113 had σ = R/2 which meant effective σ_world was HALF the advertised value, smaller than a particle, so smoothing was undersized.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1089,22 +1089,29 @@ fn fs_main(in: VOut) -> @builtin(frag_depth) f32 {
 // inline in the composite shader. Net pipeline savings: 1 fewer
 // per-particle pass + 2 fewer full-screen blur passes.
 
-// v109/v110: view-invariant BILATERAL depth filter per NVIDIA SSF deck
-// slides 18-19. Two view-invariant properties:
-//   1. SPATIAL kernel width is constant in world space (slide 18) —
-//      per-pixel screen radius from local depth × pixelView. Clamped
-//      to maxScreenRadius=50 px for perf.
-//   2. RANGE kernel width (v110, slide 19) is constant in world depth
+// v109/v110/v114: view-invariant BILATERAL depth filter per NVIDIA SSF
+// deck slides 18-19. Two view-invariant properties:
+//   1. SPATIAL kernel σ is constant in world space (slide 18) — the
+//      screen-pixel σ scales with local depth so the physical kernel
+//      width is the same everywhere in the scene. The truncation
+//      radius is 3σ (standard cutoff — weights below 3σ are < 1.1%).
+//      Clamped to maxScreenRadius = 50 px for perf.
+//   2. RANGE kernel σ (v110, slide 19) is constant in world depth
 //      units — sample weight depends on the world-space depth delta
 //      between center and sample, exp(-(Δview_z)² / worldRangeSigma²).
 //      This preserves depth discontinuities WITHIN the fluid (separate
 //      sloshes, splashes, wall edges) the way the explicit silhouette
 //      skip handled background edges in v109.
-// Runs as a separable H+V pre-pass before the v104 curvature-flow loop.
+//
+// v114 fixes a sigma/R convention bug. v109-v113 had R = worldRadius /
+// pixelView (treating worldRadius as truncation) AND sigma = R/2,
+// which meant the effective world-space σ was worldRadius/2 — half
+// what was advertised, and smaller than a particle. v114 makes the
+// uniform field worldSigma the actual world σ, and R = 3σ.
 const WGSL_DEPTH_BILATERAL = `
 struct BilateralParams {
   near: f32, far: f32, fAspect: f32, fVert: f32,
-  resolutionX: f32, resolutionY: f32, worldRadius: f32, maxScreenRadius: f32,
+  resolutionX: f32, resolutionY: f32, worldSigma: f32, maxScreenRadius: f32,
   worldRangeSigma: f32, _pad0: f32, _pad1: f32, _pad2: f32,
 };
 
@@ -1132,10 +1139,12 @@ fn bilateral1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
   let viewZc = linearizeNDC(zN);
   // View-space size of one screen pixel at this depth.
   let pixelView = 2.0 * abs(viewZc) / (P.fAspect * P.resolutionX);
-  let R = max(1, i32(min(P.worldRadius / max(pixelView, 1e-6), P.maxScreenRadius)));
+  // Screen-space σ = world σ / view-space pixel size.
+  let sigmaScreen = P.worldSigma / max(pixelView, 1e-6);
+  // Truncate at 3σ (Gaussian weight ≈ 0.011 at 3σ). Clamp to perf cap.
+  let R = max(1, i32(min(3.0 * sigmaScreen, P.maxScreenRadius)));
 
-  let spatialSigma = f32(R) * 0.5;
-  let spatialSigma2_inv = 1.0 / max(spatialSigma * spatialSigma, 1.0);
+  let spatialSigma2_inv = 1.0 / max(sigmaScreen * sigmaScreen, 1.0);
   let rangeSigma2_inv  = 1.0 / max(P.worldRangeSigma * P.worldRangeSigma, 1e-9);
 
   var sum: f32 = zN;
@@ -2528,20 +2537,24 @@ async function initAndRun() {
     curvBuf[7] = 0;
     device.queue.writeBuffer(curvParamsBuf, 0, curvBuf);
 
-    // v109/v110: view-invariant BILATERAL uniform.
-    //   worldRadius      = 0.012 (spatial kernel: ~1.2% of box width).
+    // v114: view-invariant BILATERAL uniform with the corrected sigma
+    // convention.
+    //   worldSigma       = 0.018 (true σ in world space ≈ 1 particle
+    //                              width, so kernel actually smooths
+    //                              over multiple particles).
     //   maxScreenRadius  = 50    (deck-prescribed perf clamp).
-    //   worldRangeSigma  = 0.04  (range kernel: depth deltas > ~3σ
-    //                              are downweighted — preserves edges
-    //                              within the fluid as well as the
-    //                              background silhouette).
+    //   worldRangeSigma  = 0.05  (range kernel: depth deltas in view-
+    //                              space units; preserves intra-fluid
+    //                              edges + background silhouette).
+    // Effective truncation R = 3σ_screen — kernel reaches the same
+    // physical extent regardless of view distance, exactly per slide 18.
     const gaussBuf = gaussBufScratch;
     gaussBuf[0] = 0.1; gaussBuf[1] = 100;
     gaussBuf[2] = f / aspect; gaussBuf[3] = f;
     gaussBuf[4] = canvas.width; gaussBuf[5] = canvas.height;
-    gaussBuf[6] = 0.012;
+    gaussBuf[6] = 0.018;
     gaussBuf[7] = 50.0;
-    gaussBuf[8] = 0.04;
+    gaussBuf[8] = 0.05;
     gaussBuf[9] = 0; gaussBuf[10] = 0; gaussBuf[11] = 0;
     device.queue.writeBuffer(gaussParamsBuf, 0, gaussBuf);
 

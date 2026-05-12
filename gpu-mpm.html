@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v115 (2026-05-12 — smoothing actually-smooths fix: worldSigma 0.018→0.030 + worldRangeSigma 0.05→0.15 so bilateral doesn\'t preserve every particle outline. + 7 numerical regression tests to catch this class of calibration bug.)';
+const APP_VERSION = 'mpm-v116 (2026-05-12 — anti-specular-aliasing: normal-reconstruction stencil ±1 → ±3 pixels so sub-σ noise in smoothed depth doesn\'t fire bright spec sparkles; spec multiplier 1.6 → 1.0)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1440,28 +1440,31 @@ fn viewPosFromDepth(fragXY: vec2<f32>, depth: f32) -> vec3<f32> {
   return vec3<f32>(viewX, viewY, viewZ);
 }
 
-// v105: silhouette-aware 5-tap normal reconstruction. dpdx/dpdy worked
-// for the deep interior of the fluid but produced visible 2×2 quad
-// blockiness on smooth surfaces and bad cross-silhouette derivatives.
-// 5-tap reads view positions at all four axial neighbours and picks
-// whichever neighbour on each axis has the smaller |Δz| (the standard
-// "closer-to-the-surface wins" trick from the NVIDIA SSF deck). Costs
-// 4 extra depth reads per fluid pixel but the normal is dramatically
-// cleaner at crests, troughs, and silhouettes — exactly the geometry
-// the curvature flow now resolves correctly.
+// v105/v116: silhouette-aware 5-tap normal reconstruction. dpdx/dpdy
+// gave 2×2-quad blockiness and bad cross-silhouette derivatives. v105
+// switched to 5-tap with a ±1-pixel stencil; v116 widens the stencil
+// to ±3 pixels because the ±1 stencil was picking up sub-σ noise in
+// the smoothed depth and firing tight Schlick specular into visible
+// sparkles. The wider stencil averages over more pixels, giving a
+// smoother per-pixel normal that resolves the spec-aliasing dotted
+// pattern on the top surface. Silhouette behaviour preserved: the
+// "closer-to-the-surface wins" select() picks the smaller |Δz| on
+// each axis, so silhouette pixels still get a clean one-sided normal.
+const NORMAL_STENCIL: i32 = 3;
 fn reconstructNormal(coord: vec2<i32>, fragXY: vec2<f32>, viewC: vec3<f32>, depthC: f32) -> vec3<f32> {
-  let dL = textureLoad(depthTex, coord + vec2<i32>(-1,  0), 0);
-  let dR = textureLoad(depthTex, coord + vec2<i32>( 1,  0), 0);
-  let dU = textureLoad(depthTex, coord + vec2<i32>( 0, -1), 0);
-  let dD = textureLoad(depthTex, coord + vec2<i32>( 0,  1), 0);
+  let dL = textureLoad(depthTex, coord + vec2<i32>(-NORMAL_STENCIL,  0), 0);
+  let dR = textureLoad(depthTex, coord + vec2<i32>( NORMAL_STENCIL,  0), 0);
+  let dU = textureLoad(depthTex, coord + vec2<i32>( 0, -NORMAL_STENCIL), 0);
+  let dD = textureLoad(depthTex, coord + vec2<i32>( 0,  NORMAL_STENCIL), 0);
   let zL = select(dL, depthC, dL >= 0.99999);
   let zR = select(dR, depthC, dR >= 0.99999);
   let zU = select(dU, depthC, dU >= 0.99999);
   let zD = select(dD, depthC, dD >= 0.99999);
-  let vL = viewPosFromDepth(vec2<f32>(fragXY.x - 1.0, fragXY.y      ), zL);
-  let vR = viewPosFromDepth(vec2<f32>(fragXY.x + 1.0, fragXY.y      ), zR);
-  let vU = viewPosFromDepth(vec2<f32>(fragXY.x,       fragXY.y - 1.0), zU);
-  let vD = viewPosFromDepth(vec2<f32>(fragXY.x,       fragXY.y + 1.0), zD);
+  let s = f32(NORMAL_STENCIL);
+  let vL = viewPosFromDepth(vec2<f32>(fragXY.x - s, fragXY.y    ), zL);
+  let vR = viewPosFromDepth(vec2<f32>(fragXY.x + s, fragXY.y    ), zR);
+  let vU = viewPosFromDepth(vec2<f32>(fragXY.x,    fragXY.y - s ), zU);
+  let vD = viewPosFromDepth(vec2<f32>(fragXY.x,    fragXY.y + s ), zD);
   let ddxR = vR - viewC;
   let ddxL = viewC - vL;
   let ddyD = vD - viewC;
@@ -1589,8 +1592,12 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   // v113: Fresnel applied unmasked. The body→sky mix is what makes
   // water look reflective; masking it with thinClamp killed sky
   // reflection everywhere there wasn't very deep fluid.
+  // v116: spec multiplier 1.6 → 1.0. Combined with the ±3 normal
+  // stencil (which kills the small-scale variation that was firing
+  // tight spec hot-spots), the surface highlights now read as a soft
+  // wet sheen rather than scattered sparkles.
   let outColor = mix(transmitted, sky, fresnel)
-               + vec3<f32>(1.0, 0.97, 0.92) * specMasked * 1.6;
+               + vec3<f32>(1.0, 0.97, 0.92) * specMasked * 1.0;
   return vec4<f32>(acesFilm(outColor), 1.0);
 }
 `;

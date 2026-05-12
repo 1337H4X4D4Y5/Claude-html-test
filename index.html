@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v115</span>
+    <span class="tag">v116</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v115: smoothing actually-smooths fix — bumped worldSigma 0.018→0.030 and worldRangeSigma 0.05→0.15 so the bilateral filter doesn't preserve every particle imposter boundary as a fake edge. Plus 7 numerical regression tests (worldSigma ≥ PARTICLE_RADIUS, Beer-Lambert ≥ 30% absorption, Schlick R₀ baseline, etc.) that catch silent calibration drift, not just code patterns.</div>
+  <div class="desc">MLS-MPM on the GPU. v116: anti-specular-aliasing — normal-reconstruction stencil widened from ±1 to ±3 pixels, so sub-σ noise in the smoothed depth no longer fires tight Schlick specular into visible sparkles on the top surface. Spec multiplier 1.6 → 1.0 for a softer wet-sheen highlight. Plus 8 numerical regression tests catching calibration drift, not just code patterns.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

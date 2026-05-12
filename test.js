@@ -1435,6 +1435,24 @@
         'Masking with thinClamp kills sky reflection in the bulk.');
     });
 
+    test('gpu-mpm regression: normal-reconstruction stencil ≥ 2 px (anti-specular-aliasing)', () => {
+      // A ±1-pixel stencil picks up sub-σ noise in the smoothed depth
+      // and fires tight Schlick spec into visible sparkles on the top
+      // surface. v116 widened to ±3. Asserting ≥ 2 keeps the door open
+      // for future tuning while catching a regression to ±1.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      const stencilMatch = compositeSrc.match(/NORMAL_STENCIL\s*:\s*i32\s*=\s*(\d+)/);
+      assert(stencilMatch, 'NORMAL_STENCIL constant not found in composite shader');
+      const stencil = parseInt(stencilMatch[1], 10);
+      assert(stencil >= 2,
+        'NORMAL_STENCIL must be ≥ 2 to avoid spec aliasing on the smoothed surface (got ' + stencil + ')');
+      assert(stencil <= 6,
+        'NORMAL_STENCIL too wide will blur silhouettes (got ' + stencil + '; recommended 2-4)');
+    });
+
     test('gpu-mpm regression: Schlick R₀ baseline present (non-zero at normal incidence)', () => {
       // v112 fix. Without R₀ the Fresnel goes to 0 at normal incidence
       // and the body has zero reflection looking straight down.

@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v119</span>
+    <span class="tag">v120</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v119: PARTICLE_RADIUS 0.017 → 0.022. Smaller imposters were leaving discrete particle circles visible at the silhouette (left/right/bottom of the fluid) because single-particle pixels at the edge had no neighbour to smooth with. Bigger imposters bridge the gap. Body interior was already clean from v115 smoothing.</div>
+  <div class="desc">MLS-MPM on the GPU. v120: PARTICLE_RADIUS 0.022 → 0.019 (compromise). v119's 0.022 cost too much perf (60 → 39 FPS) and made imposters individually visible as bumps reflected through the Fresnel surface. 0.019 keeps most of the silhouette improvement while restoring ~75% of the lost fragment-shading budget.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

@@ -259,7 +259,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v119 (2026-05-12 — PARTICLE_RADIUS 0.017 → 0.022. Single-particle imposters at the silhouette (left/right/bottom edges) had no neighbours to overlap with, leaving discrete particle circles visible. Bigger imposters bridge.)';
+const APP_VERSION = 'mpm-v120 (2026-05-12 — PARTICLE_RADIUS 0.022 → 0.019 (compromise). v119 cost too much perf (60→39 FPS) and made imposters visible as Fresnel-reflected bumps on the top surface. 0.019 helps silhouette without those costs.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -475,13 +475,16 @@ function applyPreset(key) {
 // R=20 bilateral; we're now at R=26 + depthThresh 0.05 + half-res bloom
 // which should bridge adjacent imposters at the smaller size. Thickness
 // imposter is scaled 1.6x (= 0.0272 effective).
-// v119: 0.017 → 0.022. Smaller imposters were leaving discrete
-// particle circles visible around the silhouette (left/right/bottom
-// of the fluid) because single-particle pixels at the edge have no
-// neighbour to smooth with. Bigger imposters overlap their neighbours
-// even at thin-water silhouettes, eliminating the per-particle outline
-// pattern. Body interior was fine; this only affects the rim.
-const PARTICLE_RADIUS = 0.022;
+// v119: 0.017 → 0.022 to bridge silhouette gaps.
+// v120: 0.022 → 0.019 (compromise). v119's 0.022 introduced two
+// regressions: (a) FPS dropped 60 → 39 because imposter screen area
+// grew 70%, and (b) the bigger imposters at the top water layer
+// became INDIVIDUALLY visible through the Fresnel reflection as a
+// wavy bump pattern. 0.019 keeps most of the perf back (~25% less
+// depth-pass cost than 0.022) and keeps imposters small enough that
+// they don't read as individual features through the mirror surface,
+// while still helping the silhouette over 0.017.
+const PARTICLE_RADIUS = 0.019;
 // Fixed-point scale for atomicAdd into i32 storage. iOS WebGPU has no
 // atomic<f32>, so each float value is encoded as round(v * SCALE) and
 // decoded after the P2G pass by dividing back.

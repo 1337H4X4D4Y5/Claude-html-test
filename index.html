@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v100</span>
+    <span class="tag">v101</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v100 perf: device-pixel-ratio cap 2 → 1.5. Cuts every render pass's pixel count by ~44% — biggest single GPU win available. Visually nearly identical on retina screens.</div>
+  <div class="desc">MLS-MPM on the GPU. v101 perf: thickness pipeline runs at half resolution — particle thickness pass + 2 blur passes drop to ¼ the pixel count. Thickness feeds an exponential Beer's law and is heavily gaussian-blurred anyway, so the resolution loss is invisible. alphaScale 4× to keep absorption calibration.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

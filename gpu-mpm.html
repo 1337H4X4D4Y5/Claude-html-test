@@ -258,7 +258,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v100 (2026-05-11 — DPR cap 2 -> 1.5 (44% fewer render pixels))';
+const APP_VERSION = 'mpm-v101 (2026-05-11 — half-res thickness pass (4x fewer thickness pixels))';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -1305,7 +1305,11 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let fresnel = pow(1.0 - nv, 5.0);
 
   // Beer's law absorption from the blurred thickness texture (v73).
-  let thicknessRaw = textureLoad(thicknessTex, coord, 0).r;
+  // v101 perf: thickness is now half-res; sample at coord/2. Nearest
+  // upsample is fine since thickness is gaussian-blurred (the highest-
+  // frequency detail of the half-res signal is already below the
+  // canvas-pixel scale).
+  let thicknessRaw = textureLoad(thicknessTex, coord / 2, 0).r;
   let thickness = thicknessRaw * P.thicknessScale;
   let absorption = vec3<f32>(
     exp(-P.absorptionR * thickness),
@@ -1997,8 +2001,15 @@ async function initAndRun() {
     depthRaw = device.createTexture(opts);
     depthH = device.createTexture(opts);
     depthV = device.createTexture(opts);
+    // v101 perf: thickness pipeline at half-resolution. Thickness is just
+    // a scalar field that feeds Beer's-law absorption (exponential) and
+    // gets gaussian-blurred anyway — the high-frequency detail of full-
+    // res is invisible after the blur. Quarter the pixel count for the
+    // thickness particle pass + its 2 blur passes.
+    const halfTW = Math.max(1, Math.floor(w / 2));
+    const halfTH = Math.max(1, Math.floor(h / 2));
     const thicknessOpts = {
-      size: { width: w, height: h },
+      size: { width: halfTW, height: halfTH },
       format: THICKNESS_FORMAT,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     };
@@ -2241,7 +2252,11 @@ async function initAndRun() {
     // at 0.10, the additive thickness sums to ~1.0 at the centre, which
     // (combined with thicknessScale 0.18 in the composite) drops red
     // ~60% via Beer's law — a clear blue tint where the fluid is thick.
-    renderBuf[23] = 0.10;
+    // v101: bumped 0.10 -> 0.40. Half-res thickness pass means each
+    // particle covers 1/4 the fragments, so per-particle integrated
+    // thickness drops 4x; compensate here so Beer's-law absorption
+    // calibration is unchanged.
+    renderBuf[23] = 0.40;
     device.queue.writeBuffer(renderParamsBuf, 0, renderBuf);
 
     ensureDepthTex();

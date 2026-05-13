@@ -1696,6 +1696,27 @@
         aR + '/' + aG + '/' + aB);
     });
 
+    test('gpu-mpm v151: caustic photon-mesh shader guards against OOB depth too', () => {
+      // v149 fixed the composite + bilateral + curvature shaders, but
+      // the photon-mesh caustic shader's 5-tap normal stencil had the
+      // SAME bug. User saw a huge bright-white wash on the left edge —
+      // OOB depth=0 → garbage normal → wild refraction → dpdx/dpdy
+      // Jacobian explodes → clamp(det, 0, 64) ceiling floods the wall.
+      // v151 adds the same `dL < 0.001` guard to the caustic shader.
+      const src = readMpmScript();
+      const causticIdx = src.indexOf('const WGSL_CAUSTIC');
+      const causticEnd = src.indexOf('`;', causticIdx);
+      const causticSrc = src.slice(causticIdx, causticEnd);
+      // Centre check must include the OOB clause.
+      assert(causticSrc.match(/dc\s*>=\s*0\.99999\s*\|\|\s*dc\s*<\s*0\.001/) !== null,
+        'caustic shader centre check must also reject OOB depth (dc < 0.001)');
+      // All 4 stencil taps must guard. Count occurrences of the
+      // pattern; should be 4 (one per tap).
+      const stencilGuards = (causticSrc.match(/\bdL\s*<\s*0\.001|\bdR\s*<\s*0\.001|\bdU\s*<\s*0\.001|\bdD\s*<\s*0\.001/g) || []).length;
+      assert(stencilGuards >= 4,
+        'caustic shader must guard all 4 normal-stencil taps against OOB depth; got ' + stencilGuards);
+    });
+
     test('gpu-mpm v149: OOB depth samples handled in composite/bilateral/curvature', () => {
       // WebGPU's textureLoad returns 0 for out-of-bounds coordinates.
       // v148's camera overscan pushed the box silhouette right against

@@ -452,7 +452,7 @@
 // the multi-paragraph forms were covering most of the screen. Pattern
 // going forward: "vN — one-line summary". Full rationale lives in the
 // commit message.
-const APP_VERSION = 'mpm-v150 — per-preset render overrides: mercury shiny, honey stickier, syrup uniform';
+const APP_VERSION = 'mpm-v151 — fix caustic blowout: OOB depth guard in photon-mesh shader';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2362,17 +2362,29 @@ fn vs_main(@builtin(vertex_index) vi: u32,
   let OFF = vec4<f32>(10.0, 10.0, 0.0, 1.0);
 
   let dc = textureLoad(srcDepth, vec2<i32>(sxi, syi), 0);
-  if (dc >= 0.99999) { out.position = OFF; return out; }
+  // v151: same OOB guard as v149 added in WGSL_COMPOSITE / WGSL_CURVATURE
+  // / WGSL_DEPTH_BILATERAL — out-of-bounds textureLoad returns 0 in
+  // WebGPU, and treating depth=0 as a valid sample produces garbage
+  // view-space positions → wild refracted ray → massive (u,v) jump
+  // across the photon-mesh quad → dpdx/dpdy Jacobian blows up to the
+  // clamp(64) ceiling and floods that wall with bright caustic. Bug
+  // was visible as a huge white wash on the left edge after v148's
+  // camera overscan pushed the box silhouette against the screen.
+  if (dc >= 0.99999 || dc < 0.001) { out.position = OFF; return out; }
 
   // 5-tap silhouette-aware view-space normal — same as v144.
   let dL = textureLoad(srcDepth, vec2<i32>(sxi - 2, syi),     0);
   let dR = textureLoad(srcDepth, vec2<i32>(sxi + 2, syi),     0);
   let dU = textureLoad(srcDepth, vec2<i32>(sxi,     syi - 2), 0);
   let dD = textureLoad(srcDepth, vec2<i32>(sxi,     syi + 2), 0);
-  let zL = select(dL, dc, dL >= 0.99999);
-  let zR = select(dR, dc, dR >= 0.99999);
-  let zU = select(dU, dc, dU >= 0.99999);
-  let zD = select(dD, dc, dD >= 0.99999);
+  // v151: same OOB guard on every stencil tap. The center is already
+  // checked; if a neighbor is OOB we substitute dc (the centre depth)
+  // so the normal collapses to the local geometry instead of pulling
+  // toward the near plane.
+  let zL = select(dL, dc, dL >= 0.99999 || dL < 0.001);
+  let zR = select(dR, dc, dR >= 0.99999 || dR < 0.001);
+  let zU = select(dU, dc, dU >= 0.99999 || dU < 0.001);
+  let zD = select(dD, dc, dD >= 0.99999 || dD < 0.001);
 
   let viewC = viewPosAt(sampleX,       sampleY,       dc);
   let vL    = viewPosAt(sampleX - 2.0, sampleY,       zL);

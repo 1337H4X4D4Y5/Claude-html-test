@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v150</span>
+    <span class="tag">v151</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v150: per-preset render overrides. Mercury: refraction/caustics/subsurface OFF, fresnel ON, R0_water cranked to 0.95 — reads as a polished mirror. Honey: caustics OFF, viscosity 0.20→0.45, wallFriction 0.75→0.55, velDamping 0.985→0.978 — much stickier, no bogus light pools. Maple syrup: caustics OFF, RGB absorption flattened to a uniform 4.3 so the amber stays consistent at every thickness.</div>
+  <div class="desc">MLS-MPM on the GPU. v151: fix caustic blowout on the screen edge. v149 fixed OOB depth reads in composite/bilateral/curvature but missed the photon-mesh caustic shader, which has the same 5-tap normal stencil. OOB depth=0 produced wild refracted rays → huge (u,v) jumps across the photon mesh quad → dpdx/dpdy Jacobian blew up to the clamp(64) ceiling → wall flooded with bright caustic. Same guard (`dL < 0.001`) added to all 4 stencil taps + the centre read.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

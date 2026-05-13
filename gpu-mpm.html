@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v138 (2026-05-12 — caustics now trace to walls, not just the floor. v137 made caustics bright but the shader still hard-discarded every refracted ray that was not heading downward — so any ray that would have lit the back wall died before splat. v138 traces against 4 box faces (floor, back wall, left wall, right wall), picks the first hit, and generalizes the camera projection to use hit.y instead of the hardcoded -boxHalfY. No, you do not need a point light — directional sun works; the rays just needed somewhere to land.)';
+const APP_VERSION = 'mpm-v139 (2026-05-12 — caustics reshaped from round soft blobs into thin sharp streaks (the NVIDIA deck look). Three structural changes: source grid 96² → 192² (4× more refracted rays, so adjacent rays overlap densely on the floor instead of leaving gaps), splat radius 0.014 → 0.006 NDC (~8 px disc → ~3.5 px disc), and falloff (1-r²)² → (1-r²)⁴ (soft Gaussian-ish profile → sharp peak). Intensities dialed down to compensate — peak at convergence still saturates while ambient/diffuse glow drops, producing visible streaks instead of even wash.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2302,9 +2302,15 @@ fn vs_main(@builtin(vertex_index) vi: u32,
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
   let r2 = dot(in.uv, in.uv);
   if (r2 > 1.0) { discard; }
+  // v139: sharper falloff (1-r²)⁴ instead of (1-r²)². Combined with
+  // smaller splat radius + 4× source density (see JS-side constants),
+  // this produces thin "lightning-bolt" caustic streaks instead of
+  // round soft blobs — the NVIDIA deck's caustic look comes from the
+  // local Jacobian of the refraction map, and dense sampling with
+  // sharp splats approximates that integral much better.
   let falloff = (1.0 - r2);
-  let f2 = falloff * falloff;
-  let g = f2 * in.intensity;
+  let f4 = falloff * falloff * falloff * falloff;
+  let g = f4 * in.intensity;
   // v128: tint comes from the uniform (CausticParams.tintR/G/B). The
   // single-IOR mode uses a warm sunny tint (1.0, 0.95, 0.72); the
   // chromatic-dispersion mode runs the shader 3× with isolated R/G/B
@@ -3180,7 +3186,12 @@ async function initAndRun() {
   // to keep VS cost low (each instance does ~5 depth reads), dense
   // enough that adjacent refracted rays overlap on the floor so the
   // Jacobian shows up.
-  const CAUSTIC_SOURCE_GRID_N = 96;
+  // v139: bumped 96 → 192. 4× more refracted rays (36864 vs 9216) so
+  // adjacent source samples on the water surface project close enough
+  // to overlap on the floor — that overlap is what builds thin
+  // "lightning-bolt" caustic streaks. The shader is vertex-bound and
+  // dirt cheap; 36k draws fit comfortably in our ~0.3 ms frame budget.
+  const CAUSTIC_SOURCE_GRID_N = 192;
 
   // v121: RenderToggles uniform — 16 floats / 64 bytes. Bound to the
   // composite at @binding(6). Field order MUST match the WGSL struct
@@ -3964,7 +3975,12 @@ async function initAndRun() {
       buf[2] = f / aspect; buf[3] = f;
       buf[4] = canvas.width; buf[5] = canvas.height;
       buf[6] = CAUSTIC_SOURCE_GRID_N;
-      buf[7] = 0.014;
+      // v139: splatRadius 0.014 → 0.006 NDC. Each ray now paints a
+      // ~3.5 px disc instead of a ~8 px disc — thin streaks become
+      // possible because adjacent rays no longer smear together into
+      // round blobs. Density (4× more rays) compensates for the
+      // smaller individual splat area.
+      buf[7] = 0.006;
       buf[8]  = Lv[0] / Llen;
       buf[9]  = Lv[1] / Llen;
       buf[10] = Lv[2] / Llen;
@@ -3977,24 +3993,24 @@ async function initAndRun() {
       buf[17] = tintR; buf[18] = tintG; buf[19] = tintB;
     }
     if (state.toggles.chromaticCaustics) {
-      // v137: chromatic dispersion overhaul. Old 1.323 / 1.333 / 1.348
-      // (±1%) IOR spread produced barely-visible rainbow fringes. New
-      // values 1.305 / 1.333 / 1.365 (~±2.5%) push R/G/B refracted rays
-      // visibly apart at the water-column silhouette — that's where
-      // the surface normal varies fastest and dispersion shows up as
-      // bright rainbow edges. Intensity bumped 0.025 → 0.18 per channel
-      // (each pass paints ~63% of single-mode peak; three passes sum
-      // to ~2× single, which matches the reference's bright caustics).
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.18);
-      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.18);
-      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.18);
+      // v139: chromatic dispersion. IORs 1.305 / 1.333 / 1.365 give
+      // ±2.5% spread for a visible R/G/B silhouette fringe. Intensity
+      // 0.12 per channel — lower than v137's 0.18 because the v139
+      // splat is sharper (1-r²)⁴ and 4× denser, so peak brightness at
+      // convergence points still saturates while ambient/diffuse
+      // caustic glow drops, giving the deck's thin-streak look.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.12);
+      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.12);
+      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.12);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
       device.queue.writeBuffer(causticParamsBufG, 0, causticBufScratchG);
       device.queue.writeBuffer(causticParamsBufB, 0, causticBufScratchB);
     } else {
-      // v137: single warm-sunny pass — intensity 0.045 → 0.30 (≈7×) so
-      // caustics actually pop against the white-tile backdrop.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.30);
+      // v139: single warm-sunny pass at 0.20 (down from v137's 0.30).
+      // Same rationale — sharper splat + denser sampling means the
+      // PEAK at convergence points is preserved while ambient is
+      // suppressed, producing visible streaks instead of even glow.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.20);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
     }
 

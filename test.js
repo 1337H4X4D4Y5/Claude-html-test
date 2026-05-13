@@ -2225,10 +2225,14 @@
         'fillCausticBuf call sites not found — caustic config may have moved');
       const chromIntensity = parseFloat(chromR[2]);
       const singleIntensity = parseFloat(single[2]);
-      assert(chromIntensity >= 0.10,
-        'chromatic-caustic per-channel intensity must be ≥ 0.10 for visibility on white backdrop; got ' + chromIntensity);
-      assert(singleIntensity >= 0.20,
-        'single-caustic intensity must be ≥ 0.20 for visibility on white backdrop; got ' + singleIntensity);
+      // v139 lowered per-splat intensity (0.18 → 0.12, 0.30 → 0.20)
+      // because the splat is now denser + sharper, so the same peak
+      // brightness is reached at convergence points with less per-splat
+      // light. Floors lowered correspondingly.
+      assert(chromIntensity >= 0.08,
+        'chromatic-caustic per-channel intensity must be ≥ 0.08 for visibility; got ' + chromIntensity);
+      assert(singleIntensity >= 0.15,
+        'single-caustic intensity must be ≥ 0.15 for visibility; got ' + singleIntensity);
       // IOR spread must be wide enough that R-G dispersion produces a
       // visibly chromatic rim. 1.305 → 1.365 = ~4.5% spread → ~3° angle
       // diff at typical refraction → ~5-10 px shift between R and B
@@ -2249,6 +2253,30 @@
       const floorClipInc = causticSrc.match(/abs\([a-z]+\.x\)\s*<=\s*P\.boxHalfX\s*\*\s*[1-9]\d*(\.\d+)?\b/);
       assert(floorClipExc !== null || floorClipInc !== null,
         'caustic floor-clip must be wider than 1× boxHalf so caustics extend onto surrounding floor');
+    });
+
+    test('gpu-mpm v139: caustic streaks via dense rays + tight splats + sharp falloff', () => {
+      // The user said the v138 caustics still look like soft blobs,
+      // not the thin lightning-streak shapes in the reference. v139
+      // restructures the per-splat geometry to reproduce that shape:
+      //   - 4× source density (96 → 192 grid) so adjacent rays overlap
+      //   - half-radius splat (0.014 → 0.006 NDC, ~3.5 px disc) so
+      //     individual rays don't blur into round blobs
+      //   - quartic-of-quartic falloff (1-r²)⁴ for a sharp peak instead
+      //     of a soft Gaussian-ish (1-r²)² profile
+      const src = readMpmScript();
+      const grid = parseInt(src.match(/CAUSTIC_SOURCE_GRID_N\s*=\s*(\d+)/)[1], 10);
+      assert(grid >= 160,
+        'CAUSTIC_SOURCE_GRID_N must be ≥ 160 for dense-enough ray overlap; got ' + grid);
+      const radius = parseFloat(src.match(/buf\[7\]\s*=\s*([0-9.]+);/)[1]);
+      assert(radius <= 0.010,
+        'splatRadius must be ≤ 0.010 NDC for thin-streak look; got ' + radius);
+      // Falloff curve in WGSL_CAUSTIC must be at least (1-r²)⁴.
+      const causticIdx = src.indexOf('const WGSL_CAUSTIC');
+      const causticEnd = src.indexOf('`;', causticIdx);
+      const causticSrc = src.slice(causticIdx, causticEnd);
+      assert(causticSrc.match(/falloff\s*\*\s*falloff\s*\*\s*falloff\s*\*\s*falloff/) !== null,
+        'caustic falloff must be at least (1-r²)⁴ for sharp peak; pre-v139 was only squared');
     });
 
     test('gpu-mpm v138: caustic shader traces refracted rays to walls, not just the floor', () => {

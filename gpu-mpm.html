@@ -452,7 +452,7 @@
 // the multi-paragraph forms were covering most of the screen. Pattern
 // going forward: "vN — one-line summary". Full rationale lives in the
 // commit message.
-const APP_VERSION = 'mpm-v147 — per-fragment flow noise + auto-scale thickness by N';
+const APP_VERSION = 'mpm-v148 — 12% camera overscan so water fills the screen';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -3706,7 +3706,13 @@ async function initAndRun() {
   // v108: fitD hoisted so the caustic pass can use the world↔view
   // translation when projecting floor hit points back to NDC.
   const CAM_FOV_Y = 50 * DEG;
-  const CAM_FIT_D = BOX_HALF_Y / Math.tan(CAM_FOV_Y / 2) + BOX_HALF_Z;
+  // v148: overscan the front face so the box extends past the screen
+  // edges — pulls the camera 12% closer than the perfect-fit distance,
+  // making the visible water appear to spill off the edges of the
+  // display. Front-face corners get clipped by NDC; the centre fluid
+  // is what fills the viewport.
+  const FIT_OVERSCAN = 0.12;
+  const CAM_FIT_D = BOX_HALF_Y / Math.tan(CAM_FOV_Y / 2) * (1.0 - FIT_OVERSCAN) + BOX_HALF_Z;
   function buildViewProj(aspect) {
     // v62: fit so the FRONT face of the box (z = +BOX_HALF_Z) fills the
     // viewport. Front-face is closer to camera, so it projects largest;

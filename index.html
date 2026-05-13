@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v147</span>
+    <span class="tag">v148</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v147: flow noise rewritten as per-fragment (was per-particle × falloff, which produced raindrop-style dimples rather than flow detail). Thickness now auto-scales by 1/N so opacity stays stable across particle counts — pre-v147, sparse imposters at low N under-estimated pathLen so the same slider felt thinner; high N saturated and read thicker. Slider value is now anchored to N=24000 baseline. APP_VERSION shortened so it stops eating the screen.</div>
+  <div class="desc">MLS-MPM on the GPU. v148: camera pulled 12% closer than the perfect-fit distance, so the front face of the box overscans the viewport — the water now visibly extends past the screen edges instead of leaving margin. NDC clips the corners; the centre fluid fills the display.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

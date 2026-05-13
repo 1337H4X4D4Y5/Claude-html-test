@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v146</span>
+    <span class="tag">v147</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v146: user's "looks a lot better" v145 calibration promoted to defaults. Tunables: worldSigma 0.080→0.113, worldRangeSigma 0.50→0.365, thicknessScale 0.40→0.10, R0_water 0.100→0.070, refractStrength 80→98, causticStrength 1.0→2.30. Toggles: fresnel OFF, additiveThickness/translucentShadow/chromaticCaustics/gaussianOnly all ON. Schema bumped 4→5 so existing localStorage migrates. thicknessScale slider min lowered 0.10→0.02 (user is at the old floor, headroom to go thinner).</div>
+  <div class="desc">MLS-MPM on the GPU. v147: flow noise rewritten as per-fragment (was per-particle × falloff, which produced raindrop-style dimples rather than flow detail). Thickness now auto-scales by 1/N so opacity stays stable across particle counts — pre-v147, sparse imposters at low N under-estimated pathLen so the same slider felt thinner; high N saturated and read thicker. Slider value is now anchored to N=24000 baseline. APP_VERSION shortened so it stops eating the screen.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

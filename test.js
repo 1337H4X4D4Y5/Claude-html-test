@@ -1594,6 +1594,65 @@
         'base caustic intensities must be multiplied by the live tunable');
     });
 
+    test('gpu-mpm v147: flow noise is per-fragment world-space, not per-particle', () => {
+      // v125-v146 evaluated noise3 at the particle centre and
+      // multiplied by an imposter falloff, so the gradient that the
+      // composite consumed was the circular bump shape, not noise
+      // variation. v147 reconstructs each fragment's world position
+      // from imposter UV + camera basis so adjacent fragments read
+      // different noise samples.
+      const src = readMpmScript();
+      const noiseIdx = src.indexOf('const WGSL_NOISE');
+      const noiseEnd = src.indexOf('`;', noiseIdx);
+      const noiseSrc = src.slice(noiseIdx, noiseEnd);
+      // Fragment shader must compute a per-fragment world position
+      // before sampling noise — look for cameraRight × uv combination.
+      assert(noiseSrc.match(/R\.cameraRight\s*\*\s*\(\s*in\.uv\.x/) !== null,
+        'noise fragment must reconstruct fragment world pos via cameraRight × uv.x');
+      assert(noiseSrc.match(/R\.cameraUp\s*\*\s*\(\s*in\.uv\.y/) !== null,
+        'noise fragment must reconstruct fragment world pos via cameraUp × uv.y');
+      // The per-particle (in.worldCenter * frequency) form alone must
+      // be gone — noise3 should be called on the per-fragment position.
+      assert(noiseSrc.match(/noise3\(\s*worldFrag/) !== null,
+        'noise3 must be evaluated at per-fragment worldFrag, not particle centre');
+    });
+
+    test('gpu-mpm v147: thickness auto-scales by particle count', () => {
+      // User reported "increasing the number of particles affects the
+      // opacity/thickness×; this should be adjusted automatically".
+      // At low N the depth pass under-estimates pathLen (sparse
+      // imposters miss interior pixels); at high N pathLen → physical.
+      // Same slider value → visibly thicker water at high N. Fix:
+      // multiply by BASELINE_N / N when writing to the composite uniform.
+      const src = readMpmScript();
+      // The constant must be declared and reasonable.
+      const baseMatch = src.match(/const\s+THICKNESS_BASELINE_N\s*=\s*(\d+)/);
+      assert(baseMatch, 'THICKNESS_BASELINE_N constant must be declared');
+      const base = parseInt(baseMatch[1], 10);
+      assert(base >= 10000 && base <= 100000,
+        'THICKNESS_BASELINE_N should be a sensible N anchor (10k-100k); got ' + base);
+      // The composite uniform write must include the per-N scale.
+      assert(src.match(/THICKNESS_BASELINE_N\s*\/\s*Math\.max\(\s*1\s*,\s*N\s*\)/) !== null,
+        'composite uniform write must scale thicknessScale by BASELINE_N / N');
+      // Schema must have bumped so v146 users get the recompensated default.
+      const schemaMatch = src.match(/TUNABLE_SCHEMA\s*=\s*(\d+)/);
+      assert(schemaMatch && parseInt(schemaMatch[1], 10) >= 6,
+        'TUNABLE_SCHEMA must be ≥ 6 (v147 re-tuned thicknessScale default to 0.30)');
+    });
+
+    test('gpu-mpm v147: APP_VERSION text is short (≤ 120 chars)', () => {
+      // The on-screen overlay shows APP_VERSION verbatim; the v146
+      // string was ~700 chars and covered most of the screen. New
+      // pattern: "vN — one-line summary" (≤ 120 chars). Detailed
+      // changelogs live in the git commit, not the overlay.
+      const src = readMpmScript();
+      const match = src.match(/const\s+APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+      assert(match, 'APP_VERSION declaration not found');
+      const ver = match[1];
+      assert(ver.length <= 120,
+        'APP_VERSION must be ≤ 120 chars (was ' + ver.length + '): "' + ver + '"');
+    });
+
     test('gpu-mpm v141/v146: tunable defaults match the user-validated "water" calibration', () => {
       // v141 promoted the user's "looks the most like water" calibration
       // to defaults; v146 re-retuned after photon-mesh caustics shipped
@@ -1608,7 +1667,11 @@
       const expect = {
         worldSigma:      [0.05, 0.15, 0.113],
         worldRangeSigma: [0.30, 0.55, 0.365],
-        thicknessScale:  [0.05, 0.50, 0.10],
+        // v147: thicknessScale slider is now calibrated for N = 24000;
+        // at user's N=73000 the effective value is ~3× lower. Default
+        // bumped from 0.10 → 0.30 to compensate. Range widened to
+        // accommodate both calibrations.
+        thicknessScale:  [0.05, 0.50, 0.30],
         R0_water:        [0.05, 0.20, 0.070],
         refractStrength: [50,   120,  98.0],
       };

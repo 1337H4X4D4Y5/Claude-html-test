@@ -448,7 +448,11 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v146 (2026-05-12 — save user\'s v145 calibration as defaults. User said "looks a lot better, save this as default" after the photon-mesh caustic shader landed. Tunables: worldSigma 0.080→0.113, worldRangeSigma 0.50→0.365, thicknessScale 0.40→0.10, R0_water 0.100→0.070, refractStrength 80→98, causticStrength 1.0→2.30. Toggles: fresnel ON→OFF, additiveThickness OFF→ON, translucentShadow OFF→ON, chromaticCaustics OFF→ON, gaussianOnly OFF→ON. Schema bumped 4→5 so existing localStorage migrates. thicknessScale slider min lowered 0.10→0.02 (user is at the floor, room to go thinner). Tests: Beer-Lambert visibility floors dropped 30%→18% so the new thinner-water default passes at the default box depth.)';
+// v147+: keep this short — the on-screen overlay shows it in full and
+// the multi-paragraph forms were covering most of the screen. Pattern
+// going forward: "vN — one-line summary". Full rationale lives in the
+// commit message.
+const APP_VERSION = 'mpm-v147 — per-fragment flow noise + auto-scale thickness by N';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -465,6 +469,12 @@ function readParticleCount() {
   return Math.max(500, Math.min(200000, parseInt(m[1], 10) || 24000));
 }
 const N = readParticleCount();
+
+// v147: thickness calibration anchor. The thicknessScale slider value
+// represents what the user would see at this N; at any other N the
+// effective scale is multiplied by BASELINE_N / N so the visible
+// opacity stays stable as particle count changes. Default N = 24000.
+const THICKNESS_BASELINE_N = 24000;
 
 // v63: user-controllable box depth via ?d=NN URL param + settings slider.
 // Min 0.10 (thin phone), max 1.50 (deep tank). Default 0.25.
@@ -768,7 +778,11 @@ const state = {
     //   causticStrength  1.0   → 2.30     brighter caustics
     worldSigma:      0.113,
     worldRangeSigma: 0.365,
-    thicknessScale:  0.10,
+    // v147: slider value is calibrated for N = THICKNESS_BASELINE_N
+    // (24000). At higher N the effective scale divides by (N/24000)
+    // to keep opacity constant. User's v146 saved 0.10 at N=73000;
+    // compensated baseline value is 0.10 * 73000/24000 ≈ 0.30.
+    thicknessScale:  0.30,
     R0_water:        0.070,
     refractStrength: 98.0,
     causticStrength: 2.30,
@@ -804,7 +818,7 @@ const TUNABLE_DEFS = [
 // otherwise users with old localStorage data are stuck at the previous
 // thicknessScale = 1.8 that absorbs 99% of red light at the current box
 // depth. Toggles + debugViz are kept; only tunables are reset.
-const TUNABLE_SCHEMA = 5;
+const TUNABLE_SCHEMA = 6;
 (function loadTogglesFromStorage() {
   try {
     const saved = JSON.parse(localStorage.getItem('water-box-toggles') || '{}');
@@ -1943,15 +1957,28 @@ fn noise3(p: vec3<f32>) -> f32 {
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
   let r2 = dot(in.uv, in.uv);
   if (r2 > 1.0) { discard; }
-  // Particle world centre × 10 = noise frequency. Higher = finer flow
-  // detail. Each particle gets one noise value across its imposter;
-  // adjacent particles have different values because their centres are
-  // ~PARTICLE_RADIUS apart in world space.
-  let n = noise3(in.worldCenter * 10.0);
-  // Falloff so the noise field is continuous across the imposter.
-  let falloff = 1.0 - r2;
-  // R = noise, G = unused (could store a second octave later).
-  return vec4<f32>(n * falloff, 0.0, 0.0, 1.0);
+  // v147: PER-FRAGMENT world position. v125-v146 evaluated noise3 at
+  // the particle centre only and multiplied by an imposter falloff,
+  // so each particle contributed a single noise value × a circular
+  // bump. The composite then took the gradient of THAT, which is
+  // dominated by the circular falloff shape — giving raindrop-style
+  // ripples instead of flow-like surface detail. v147 reconstructs
+  // the fragment's own world position from imposter UV + camera
+  // basis, then evaluates noise3 there, producing a continuous noise
+  // field where adjacent fragments read different noise values.
+  // With last-writer-wins additive (no depth test, v134), the
+  // resulting noiseTex has the right wavelength variation for
+  // realistic surface ripples.
+  let worldFrag = in.worldCenter
+                + R.cameraRight * (in.uv.x * R.particleSize)
+                + R.cameraUp    * (in.uv.y * R.particleSize);
+  // Frequency 14: gives ~0.07 world units per noise period, which is
+  // ~3.7 particle radii — fine flow detail without aliasing.
+  let n = noise3(worldFrag * 14.0);
+  // No falloff: we want a continuous noise field, not dots. Edges of
+  // imposters get the same noise as centres so adjacent particles
+  // produce smooth handoff (under last-writer-wins).
+  return vec4<f32>(n, 0.0, 0.0, 1.0);
 }
 `;
 
@@ -3863,9 +3890,20 @@ async function initAndRun() {
     // Box depth ≈ 0.10 world units; with absorption coefs 5.0/2.5/0.8
     // and pathLen up to 0.10, scale 1.8 gives ~60% red absorption at
     // mid-body — visible blue tint instead of clear water.
-    // v131: live from state.tunables instead of fixed v113 (1.8) /
-    // SIM_TUNE.refractStrength so the user can tune both via sliders.
-    compBuf[6] = state.tunables.thicknessScale;
+    // v147: auto-scale thicknessScale by 1/N so opacity stays stable
+    // across particle counts. At low N the front+back depth pass is
+    // sparse — adjacent imposters miss interior pixels and pathLen
+    // under-estimates the true thickness. At high N the depth pass
+    // saturates so pathLen ≈ physical. The visible effect is that
+    // the SAME slider value produces THICKER water at higher N. We
+    // divide by (N/BASELINE_N) so the effective thicknessScale shrinks
+    // as N grows, cancelling the depth-pass accuracy bonus. The
+    // slider value is calibrated to mean "what you'd see at N =
+    // THICKNESS_BASELINE_N (24000 = default N)". The user's v146
+    // default of 0.30 (at baseline) becomes ~0.10 at N=73000 — what
+    // they originally saved.
+    const nScale = THICKNESS_BASELINE_N / Math.max(1, N);
+    compBuf[6] = state.tunables.thicknessScale * nScale;
     compBuf[7] = state.tunables.refractStrength;
     // v144: must match sunDirW above. Tilted lower so caustics land
     // on the back wall (z = -boxHalfZ) instead of the barely-visible
@@ -4388,10 +4426,13 @@ function updateDebug() {
   // slider values without expanding the FX panel or copying the
   // full debug report.
   const T = state.tunables;
+  // v147: thickness gets auto-scaled by particle count at render time;
+  // show both the slider value and the effective (post-scale) value.
+  const thkEff = T.thicknessScale * (THICKNESS_BASELINE_N / Math.max(1, N));
   const tunablesLine =
     'σ=' + T.worldSigma.toFixed(3) +
     '  σz=' + T.worldRangeSigma.toFixed(3) +
-    '  thk×=' + T.thicknessScale.toFixed(2) +
+    '  thk×=' + T.thicknessScale.toFixed(2) + '→' + thkEff.toFixed(2) +
     '  R₀=' + T.R0_water.toFixed(3) +
     '  refr=' + T.refractStrength.toFixed(0) +
     '  caus=' + T.causticStrength.toFixed(2);
@@ -4509,7 +4550,8 @@ function buildDebugReport() {
     '--- live tunables (v131) ---',
     'worldSigma:      ' + T.worldSigma.toFixed(3) + '   (Gaussian σ in world units)',
     'worldRangeSigma: ' + T.worldRangeSigma.toFixed(3) + '   (bilateral edge σ in view-space depth)',
-    'thicknessScale:  ' + T.thicknessScale.toFixed(2) + '    (Beer-Lambert calibration)',
+    'thicknessScale:  ' + T.thicknessScale.toFixed(2) + '   slider; effective at N=' + N + ': ' +
+      (T.thicknessScale * (THICKNESS_BASELINE_N / Math.max(1, N))).toFixed(3) + '  (Beer-Lambert)',
     'R0_water:        ' + T.R0_water.toFixed(3) + '   (Schlick reflectance at normal incidence)',
     'refractStrength: ' + T.refractStrength.toFixed(1) + '    (refraction-warp pixels at thickness=1)',
     'causticStrength: ' + T.causticStrength.toFixed(2) + '    (caustic splat intensity multiplier; 1.0 = baseline)',

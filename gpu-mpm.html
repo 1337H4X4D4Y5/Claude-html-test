@@ -452,7 +452,7 @@
 // the multi-paragraph forms were covering most of the screen. Pattern
 // going forward: "vN — one-line summary". Full rationale lives in the
 // commit message.
-const APP_VERSION = 'mpm-v149 — fix edge artifacts: handle OOB depth reads in normal/bilateral/curvature';
+const APP_VERSION = 'mpm-v150 — per-preset render overrides: mercury shiny, honey stickier, syrup uniform';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -594,12 +594,23 @@ const FLUID_PRESETS = [
   {
     key: 'honey', label: 'Honey',
     tune: {
-      // Soft K + heavy damping + sticky walls + very high XSPH viscosity.
-      pressureKMul: 30, velDamping: 0.985, restitution: 0.05,
-      wallFriction: 0.75, viscosity: 0.20, maxAccel: 25.0,
+      // v150: much stickier than before — user request. Viscosity 0.20
+      // → 0.45 (doubles XSPH momentum sharing → flows slowly, holds
+      // shape). wallFriction 0.75 → 0.55 (lower = MORE friction against
+      // walls → particles climb walls then stay put instead of sliding
+      // down). velDamping 0.985 → 0.978 (slightly more aggressive
+      // per-step energy bleed so motion damps out quickly).
+      pressureKMul: 30, velDamping: 0.978, restitution: 0.02,
+      wallFriction: 0.55, viscosity: 0.45, maxAccel: 22.0,
       baseColorR: 1.00, baseColorG: 0.78, baseColorB: 0.32,
       absorptionR: 0.6, absorptionG: 1.8, absorptionB: 6.0,
       refractStrength: 22.0,
+    },
+    // v150: honey is too opaque + slow to produce visible caustics in
+    // reality — turn the refracted-sun caustic pass off when this
+    // preset is active so the floor doesn't get bogus light pools.
+    overrides: {
+      toggles: { caustics: false, chromaticCaustics: false },
     },
   },
   {
@@ -608,8 +619,17 @@ const FLUID_PRESETS = [
       pressureKMul: 40, velDamping: 0.993, restitution: 0.10,
       wallFriction: 0.85, viscosity: 0.10, maxAccel: 40.0,
       baseColorR: 0.85, baseColorG: 0.48, baseColorB: 0.18,
-      absorptionR: 1.5, absorptionG: 3.5, absorptionB: 8.0,
+      // v150: uniform RGB absorption (was 1.5 / 3.5 / 8.0) so the
+      // syrup keeps a consistent amber hue at every thickness rather
+      // than going dark-red in the thick centre. The mean of the old
+      // values is ~4.3 — keeping that as the uniform coefficient.
+      absorptionR: 4.3, absorptionG: 4.3, absorptionB: 4.3,
       refractStrength: 18.0,
+    },
+    // v150: same caustic-disable rationale as honey — syrup is dense
+    // amber liquid, real refracted-sun caustics would be very dim.
+    overrides: {
+      toggles: { caustics: false, chromaticCaustics: false },
     },
   },
   {
@@ -623,6 +643,20 @@ const FLUID_PRESETS = [
       absorptionR: 8.0, absorptionG: 8.0, absorptionB: 8.0,
       // Metal — barely refracts.
       refractStrength: 4.0,
+    },
+    // v150: mercury is a polished opaque metal. Turn refraction off
+    // (can't see through it), boost R0_water to 0.95 for mirror-like
+    // Schlick reflectance, enable fresnel so the body-to-sky mix
+    // actually fires, kill caustics + subsurface (no transmission).
+    overrides: {
+      toggles: {
+        refraction: false,
+        caustics: false,
+        chromaticCaustics: false,
+        subsurface: false,
+        fresnel: true,
+      },
+      tunables: { R0_water: 0.95 },
     },
   },
 ];
@@ -658,6 +692,29 @@ function applyPreset(key) {
   if (typeof state !== 'undefined') {
     state.preset = p.key;
     state.presetLabel = p.label;
+    // v150: optional render-toggle / live-tunable overrides per preset.
+    // Mercury wants a mirror-like Schlick R0; honey + syrup want
+    // caustics off; etc. Overrides REPLACE the current state — switching
+    // presets is the "reset to that fluid's look" action.
+    if (p.overrides) {
+      if (p.overrides.toggles) {
+        for (const k in p.overrides.toggles) {
+          if (k in state.toggles) state.toggles[k] = p.overrides.toggles[k];
+        }
+      }
+      if (p.overrides.tunables) {
+        for (const k in p.overrides.tunables) {
+          if (k in state.tunables) state.tunables[k] = p.overrides.tunables[k];
+        }
+      }
+      if (typeof saveTogglesToStorage === 'function') saveTogglesToStorage();
+      // Refresh any visible UI that mirrors toggle/tunable state.
+      if (typeof window !== 'undefined') {
+        if (window.__syncToggleUI) window.__syncToggleUI();
+        if (window.__refreshPhaseChipLabels) window.__refreshPhaseChipLabels();
+        if (window.__syncTunableSliders) window.__syncTunableSliders();
+      }
+    }
   }
   if (typeof updateDebug === 'function') updateDebug();
   const btns = document.querySelectorAll('.preset-btn');
@@ -1100,6 +1157,10 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
       b.classList.toggle('active', preset && presetMatches(preset));
     }
   }
+  // v150: external entry-point so applyPreset() (top-level, outside this
+  // IIFE) can resync the phase-button chips after writing into
+  // state.toggles via a preset override.
+  if (typeof window !== 'undefined') window.__syncToggleUI = syncUI;
   // Per-phase tap → flip the boolean, update class, save, refresh preset highlight.
   for (const b of document.querySelectorAll('#phases-panel button.phase[data-toggle]')) {
     b.addEventListener('click', function () {
@@ -1159,6 +1220,24 @@ document.getElementById('home-btn').addEventListener('click', function (e) {
     }
   }
   buildTunables();
+  // v150: external sync entry-point. applyPreset() may overwrite the
+  // tunables when a preset is selected (e.g. mercury bumps R0_water
+  // to 0.95); the sliders need to redraw to match.
+  function syncTunableSliders() {
+    if (!tunablesHost) return;
+    const slots = tunablesHost.querySelectorAll('.tunable');
+    for (const wrap of slots) {
+      const slider = wrap.querySelector('input[type="range"]');
+      const valEl  = wrap.querySelector('.tunable-val');
+      if (!slider || !valEl) continue;
+      const key = slider.dataset.tunable;
+      const def = TUNABLE_DEFS.find(d => d.key === key);
+      if (!def || !(key in state.tunables)) continue;
+      slider.value = state.tunables[key];
+      valEl.textContent = def.fmt(state.tunables[key]);
+    }
+  }
+  if (typeof window !== 'undefined') window.__syncTunableSliders = syncTunableSliders;
   // Reset button restores tunables to their last-committed defaults.
   const resetBtn = document.getElementById('tunables-reset');
   if (resetBtn) resetBtn.addEventListener('click', function () {

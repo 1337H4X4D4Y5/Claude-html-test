@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v149</span>
+    <span class="tag">v150</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v149: fix edge artifacts that appeared after v148's overscan. WebGPU returns depth=0 for out-of-bounds textureLoad; the 5-tap normal stencil, the separable bilateral, and curvature-flow's neighborView were treating those as valid near-plane depths, producing corrupt normals → rainbow stripes / streak distortion at the left edge of the box. All three now reject depth values below 0.001 in addition to the existing sky guard.</div>
+  <div class="desc">MLS-MPM on the GPU. v150: per-preset render overrides. Mercury: refraction/caustics/subsurface OFF, fresnel ON, R0_water cranked to 0.95 — reads as a polished mirror. Honey: caustics OFF, viscosity 0.20→0.45, wallFriction 0.75→0.55, velDamping 0.985→0.978 — much stickier, no bogus light pools. Maple syrup: caustics OFF, RGB absorption flattened to a uniform 4.3 so the amber stays consistent at every thickness.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

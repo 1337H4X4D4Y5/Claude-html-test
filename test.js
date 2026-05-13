@@ -1640,6 +1640,62 @@
         'TUNABLE_SCHEMA must be ≥ 6 (v147 re-tuned thicknessScale default to 0.30)');
     });
 
+    test('gpu-mpm v150: per-preset render overrides for mercury / honey / syrup', () => {
+      // User asked for mercury to be shiny + opaque, honey to be
+      // stickier with no caustics, syrup to have uniform transparent
+      // colour with no caustics. v150 extends the preset structure
+      // with an optional `overrides` block that flips render toggles
+      // and live tunables when the preset is selected.
+      const src = readMpmScript();
+      const presetsMatch = src.match(/const\s+FLUID_PRESETS\s*=\s*\[([\s\S]*?)\];/);
+      assert(presetsMatch, 'FLUID_PRESETS array not found');
+      const presetsSrc = presetsMatch[1];
+      // applyPreset must consume overrides.
+      assert(src.match(/p\.overrides\.toggles/) !== null,
+        'applyPreset must apply p.overrides.toggles');
+      assert(src.match(/p\.overrides\.tunables/) !== null,
+        'applyPreset must apply p.overrides.tunables');
+      // Per-preset assertions: mercury must turn refraction OFF and
+      // bump R0_water to a mirror-like value (≥ 0.5).
+      const mercIdx = presetsSrc.indexOf("key: 'mercury'");
+      assert(mercIdx >= 0, 'mercury preset not found');
+      const mercBlock = presetsSrc.slice(mercIdx, mercIdx + 1500);
+      assert(mercBlock.match(/refraction:\s*false/) !== null,
+        'mercury must disable refraction');
+      assert(mercBlock.match(/R0_water:\s*(0\.[5-9]\d?|[1-9])/) !== null,
+        'mercury must set R0_water to a mirror-like value (≥ 0.5)');
+      assert(mercBlock.match(/caustics:\s*false/) !== null,
+        'mercury must disable caustics');
+      // Honey + syrup must disable caustics + chromaticCaustics.
+      for (const key of ['honey', 'syrup']) {
+        const idx = presetsSrc.indexOf("key: '" + key + "'");
+        assert(idx >= 0, key + ' preset not found');
+        const block = presetsSrc.slice(idx, idx + 1500);
+        assert(block.match(/caustics:\s*false/) !== null,
+          key + ' must disable caustics in overrides');
+        assert(block.match(/chromaticCaustics:\s*false/) !== null,
+          key + ' must disable chromaticCaustics in overrides');
+      }
+      // Honey-specific physics: viscosity bumped (>= 0.30) and
+      // wallFriction lowered (<= 0.65) to make it stickier.
+      const honeyIdx = presetsSrc.indexOf("key: 'honey'");
+      const honeyBlock = presetsSrc.slice(honeyIdx, honeyIdx + 1500);
+      const visc = parseFloat((honeyBlock.match(/viscosity:\s*([0-9.]+)/) || [])[1]);
+      const wf   = parseFloat((honeyBlock.match(/wallFriction:\s*([0-9.]+)/) || [])[1]);
+      assert(visc >= 0.30, 'honey viscosity should be ≥ 0.30 for stickiness; got ' + visc);
+      assert(wf <= 0.65, 'honey wallFriction should be ≤ 0.65 (lower = stickier); got ' + wf);
+      // Syrup-specific absorption: R, G, B all approximately equal (uniform color).
+      const syrupIdx = presetsSrc.indexOf("key: 'syrup'");
+      const syrupBlock = presetsSrc.slice(syrupIdx, syrupIdx + 1500);
+      const aR = parseFloat((syrupBlock.match(/absorptionR:\s*([0-9.]+)/) || [])[1]);
+      const aG = parseFloat((syrupBlock.match(/absorptionG:\s*([0-9.]+)/) || [])[1]);
+      const aB = parseFloat((syrupBlock.match(/absorptionB:\s*([0-9.]+)/) || [])[1]);
+      const maxDiff = Math.max(Math.abs(aR - aG), Math.abs(aG - aB), Math.abs(aR - aB));
+      assert(maxDiff < 0.5,
+        'syrup must have uniform RGB absorption (max channel diff < 0.5); got ' +
+        aR + '/' + aG + '/' + aB);
+    });
+
     test('gpu-mpm v149: OOB depth samples handled in composite/bilateral/curvature', () => {
       // WebGPU's textureLoad returns 0 for out-of-bounds coordinates.
       // v148's camera overscan pushed the box silhouette right against
@@ -1691,7 +1747,10 @@
       // a "still in the water-look envelope" check rather than pinning
       // exact values.
       const src = readMpmScript();
-      const tunMatch = src.match(/tunables:\s*\{([\s\S]*?)\},/);
+      // v150: v150 added per-preset `overrides.tunables` blocks before
+      // state.tunables in source order. Anchor on worldSigma so we
+      // capture the state.tunables block specifically.
+      const tunMatch = src.match(/tunables:\s*\{([^{}]*worldSigma[^{}]*)\}/);
       assert(tunMatch, 'state.tunables block not found');
       const body = tunMatch[1];
       const expect = {

@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v140 (2026-05-12 — live overlay now shows toggle + tunable state. The build report (Copy/Share output) already listed the render-toggles section, but the on-canvas overlay only had preset / fps / sim params — you had to expand the FX panel or copy the full debug to see which phases were on. v140 adds an "N/N on" + "OFF: …" toggle summary line plus the 5 live tunable values to the expanded overlay, and a compact "16/16 fx" count to the collapsed one-liner.)';
+const APP_VERSION = 'mpm-v141 (2026-05-12 — TWO changes. (1) Default tunables promoted to the "looks the most like water" calibration the user landed on: worldSigma 0.030 → 0.080, worldRangeSigma 0.10 → 0.50, R0_water 0.020 → 0.100, refractStrength 30 → 80. Schema bumped 2 → 3 so existing users migrate. Slider caps lifted to give headroom beyond the new defaults. (2) Caustic source depth moved BEFORE the curvature-flow loop. Previously caustics splatted from the heavily-smoothed post-curvature depthB; with v141 worldSigma 0.080 this wiped out the wave-scale features that should drive moving caustic highlights. Now caustics see Gaussian-only smoothed depth, so water movement produces clear shifting bright highlights on the floor — exactly the "light highlights caused by water movement" the user asked for. Intensities bumped 0.20 → 0.35 single / 0.12 → 0.20 chromatic to peak brightly at convergence points.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -747,17 +747,25 @@ const state = {
   // the FX panel and is consumed by the uniform writes each frame.
   // Persisted to localStorage so the user's tuning survives a reload.
   tunables: {
-    // v134: defaults retuned for the current BOX_HALF_Z = 0.25 (max
-    // pathLen 0.5). Old thicknessScale = 1.8 absorbed 98.9% red at max
-    // depth — fluid looked opaque-black. 0.40 gives ~63% red, ~39% green,
-    // ~15% blue absorption at deepest point — visibly water-coloured but
-    // not opaque. worldRangeSigma tightened 0.15 → 0.10 for crisper
-    // separation between sloshes; the others sit at physical baselines.
-    worldSigma:      0.030,
-    worldRangeSigma: 0.10,
+    // v141: defaults retuned to the "looks the most like water"
+    // calibration the user landed on. Three of these are artistic
+    // (not physical): wider Gaussian gives a glassier surface,
+    // pure-Gaussian bilateral (huge range σ) skips the
+    // edge-preservation hop, R0_water 0.10 is 5× the physical 0.02
+    // but reads as a wetter highlight, refractStrength 80 makes the
+    // background warp through the fluid dramatically. v134's
+    // physical defaults are still reachable by dragging sliders down.
+    //
+    //   worldSigma       0.030 → 0.080    glassier surface
+    //   worldRangeSigma  0.10  → 0.50     bilateral acts as pure Gaussian
+    //   thicknessScale   0.40             unchanged (Beer-Lambert)
+    //   R0_water         0.020 → 0.100    artistic, wetter highlight
+    //   refractStrength  30    → 80       strong refraction warp
+    worldSigma:      0.080,
+    worldRangeSigma: 0.50,
     thicknessScale:  0.40,
-    R0_water:        0.020,
-    refractStrength: 30.0,
+    R0_water:        0.100,
+    refractStrength: 80.0,
   },
   // v132: per-toggle performance audit. auditState cycles each toggle
   // ON for AUDIT_WARMUP frames + AUDIT_FRAMES sample frames, then OFF
@@ -769,12 +777,16 @@ const state = {
   auditState: null,   // populated while running; null when idle
 };
 // Slider range + step descriptors for each tunable, used to build the UI.
+// v141: slider caps lifted on three knobs that the user previously
+// pegged at max (worldSigma, R0_water, refractStrength). The old caps
+// were arbitrary — these new ranges keep the simulation stable while
+// giving room to explore beyond the v141 default "water" look.
 const TUNABLE_DEFS = [
-  { key: 'worldSigma',      label: 'Gauss σ',         min: 0.005, max: 0.080, step: 0.001, fmt: v => v.toFixed(3) },
+  { key: 'worldSigma',      label: 'Gauss σ',         min: 0.005, max: 0.150, step: 0.001, fmt: v => v.toFixed(3) },
   { key: 'worldRangeSigma', label: 'Bilateral σ_z',   min: 0.010, max: 0.500, step: 0.005, fmt: v => v.toFixed(3) },
   { key: 'thicknessScale',  label: 'Thickness ×',     min: 0.1,   max: 6.0,   step: 0.1,   fmt: v => v.toFixed(1) },
-  { key: 'R0_water',        label: 'Fresnel R₀',      min: 0.000, max: 0.100, step: 0.002, fmt: v => v.toFixed(3) },
-  { key: 'refractStrength', label: 'Refract strength',min: 0,     max: 80,    step: 1,     fmt: v => v.toFixed(0) },
+  { key: 'R0_water',        label: 'Fresnel R₀',      min: 0.000, max: 0.200, step: 0.002, fmt: v => v.toFixed(3) },
+  { key: 'refractStrength', label: 'Refract strength',min: 0,     max: 150,   step: 1,     fmt: v => v.toFixed(0) },
 ];
 // v134: bump TUNABLE_SCHEMA whenever the *meaning* of a tunable changes
 // (axes retuned, ranges reshaped, a new tunable added). On a mismatch,
@@ -782,7 +794,7 @@ const TUNABLE_DEFS = [
 // otherwise users with old localStorage data are stuck at the previous
 // thicknessScale = 1.8 that absorbs 99% of red light at the current box
 // depth. Toggles + debugViz are kept; only tunables are reset.
-const TUNABLE_SCHEMA = 2;
+const TUNABLE_SCHEMA = 3;
 (function loadTogglesFromStorage() {
   try {
     const saved = JSON.parse(localStorage.getItem('water-box-toggles') || '{}');
@@ -3993,24 +4005,26 @@ async function initAndRun() {
       buf[17] = tintR; buf[18] = tintG; buf[19] = tintB;
     }
     if (state.toggles.chromaticCaustics) {
-      // v139: chromatic dispersion. IORs 1.305 / 1.333 / 1.365 give
-      // ±2.5% spread for a visible R/G/B silhouette fringe. Intensity
-      // 0.12 per channel — lower than v137's 0.18 because the v139
-      // splat is sharper (1-r²)⁴ and 4× denser, so peak brightness at
-      // convergence points still saturates while ambient/diffuse
-      // caustic glow drops, giving the deck's thin-streak look.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.12);
-      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.12);
-      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.12);
+      // v141: with the caustic source now pulling from the less-smoothed
+      // depthB (pre-curvature-flow), wave-scale features survive into
+      // the refraction map → caustic streaks vary frame-to-frame as
+      // the water moves. Intensity bumped 0.12 → 0.20 per channel
+      // because the increased detail produces more convergence points,
+      // each darker on average; the higher intensity restores the
+      // peak brightness where rays focus into "lightning" highlights.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.20);
+      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.20);
+      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.20);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
       device.queue.writeBuffer(causticParamsBufG, 0, causticBufScratchG);
       device.queue.writeBuffer(causticParamsBufB, 0, causticBufScratchB);
     } else {
-      // v139: single warm-sunny pass at 0.20 (down from v137's 0.30).
-      // Same rationale — sharper splat + denser sampling means the
-      // PEAK at convergence points is preserved while ambient is
-      // suppressed, producing visible streaks instead of even glow.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.20);
+      // v141: single warm-sunny pass at 0.35 (up from v139's 0.20).
+      // Same rationale as the chromatic side — restored wave detail
+      // creates more convergence/divergence variation, so each splat
+      // contributes less ambient and we want a brighter peak so
+      // moving water produces clear bright highlights on the floor.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.35);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
     }
 
@@ -4169,28 +4183,18 @@ async function initAndRun() {
       p.setPipeline(gaussV); p.setBindGroup(0, gaussAToB);
       p.draw(3, 1); p.end();
     }
-    // v109: curvature flow now starts from the Gaussian-smoothed depthB.
-    // 4 iterations alternating between depthA and depthB.
-    //   depthB --curv--> depthA --curv--> depthB --curv--> depthA --curv--> depthB
-    // v108: dt reduced 4e-4 → 3e-4 — preserves wave-scale variation.
-    const curvSeq = [
-      { src: curv2, dst: depthA },
-      { src: curv1, dst: depthB },
-      { src: curv2, dst: depthA },
-      { src: curv1, dst: depthB },
-    ];
-    for (const step of curvSeq) {
-      const p = enc2.beginRenderPass({
-        colorAttachments: [],
-        depthStencilAttachment: { view: step.dst.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' },
-      });
-      p.setPipeline(curvaturePipeline); p.setBindGroup(0, step.src);
-      p.draw(3, 1); p.end();
-    }
-    // v108: TRUE light-ray caustics. With the smoothed front depth
-    // (depthB) just refreshed by the curvature-flow loop, splat refracted
-    // sun rays into backgroundTex. v121: skipped entirely when the
-    // caustics toggle is off.
+    // v141: TRUE light-ray caustics — MOVED before the curvature-flow
+    // loop. v108-v140 splatted using the post-curvature-flow depthB,
+    // which is heavily smoothed (especially with the v141 worldSigma
+    // 0.080 default). Heavily-smoothed depth → uniform refraction →
+    // boring uniform caustics. By splatting from the Gaussian-only
+    // depthB (post-gaussV, pre-curvature-flow) we preserve wave-scale
+    // surface detail, so moving waves produce moving bright highlights
+    // on the floor — exactly the "clear light highlights caused by
+    // water movement" the user asked for. The composite still uses
+    // the curvature-flowed depthB for the fluid surface itself, so
+    // surface shading stays smooth; only the caustic source sees the
+    // pre-curvature detail.
     if (state.toggles.caustics) {
       const p = enc2.beginRenderPass({
         colorAttachments: [{
@@ -4211,6 +4215,24 @@ async function initAndRun() {
         p.draw(6, CAUSTIC_SOURCE_GRID_N * CAUSTIC_SOURCE_GRID_N);
       }
       p.end();
+    }
+    // v109: curvature flow now starts from the Gaussian-smoothed depthB.
+    // 4 iterations alternating between depthA and depthB.
+    //   depthB --curv--> depthA --curv--> depthB --curv--> depthA --curv--> depthB
+    // v108: dt reduced 4e-4 → 3e-4 — preserves wave-scale variation.
+    const curvSeq = [
+      { src: curv2, dst: depthA },
+      { src: curv1, dst: depthB },
+      { src: curv2, dst: depthA },
+      { src: curv1, dst: depthB },
+    ];
+    for (const step of curvSeq) {
+      const p = enc2.beginRenderPass({
+        colorAttachments: [],
+        depthStencilAttachment: { view: step.dst.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      p.setPipeline(curvaturePipeline); p.setBindGroup(0, step.src);
+      p.draw(3, 1); p.end();
     }
     // v104: composite renders straight to the canvas (no bloom chain).
     const view = ctx.getCurrentTexture().createView();

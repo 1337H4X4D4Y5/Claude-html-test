@@ -1482,6 +1482,37 @@
         'debug report must display "< noise" for below-threshold deltas');
     });
 
+    test('gpu-mpm v141: tunable defaults match the user-validated "water" calibration', () => {
+      // After the user landed on a set of slider values they described
+      // as "looks the most like water so far", v141 promoted those to
+      // defaults so a fresh user sees that look and existing users get
+      // them via the schema bump. This test pins the defaults so they
+      // can't silently drift out of the water-look range.
+      const src = readMpmScript();
+      const tunMatch = src.match(/tunables:\s*\{([\s\S]*?)\},/);
+      assert(tunMatch, 'state.tunables block not found');
+      const body = tunMatch[1];
+      const expect = {
+        worldSigma:      [0.05, 0.12, 0.080],
+        worldRangeSigma: [0.30, 0.55, 0.50],
+        thicknessScale:  [0.30, 0.50, 0.40],
+        R0_water:        [0.05, 0.20, 0.100],
+        refractStrength: [50,   120,  80.0],
+      };
+      for (const key of Object.keys(expect)) {
+        const m = body.match(new RegExp(key + ':\\s*([0-9.]+)'));
+        assert(m, key + ' default not found in state.tunables');
+        const v = parseFloat(m[1]);
+        const [lo, hi, want] = expect[key];
+        assert(v >= lo && v <= hi,
+          key + ' default ' + v + ' outside water-look range [' + lo + ', ' + hi + '] (want ≈ ' + want + ')');
+      }
+      // Schema must have bumped so localStorage migrates.
+      const schemaMatch = src.match(/TUNABLE_SCHEMA\s*=\s*(\d+)/);
+      assert(schemaMatch && parseInt(schemaMatch[1], 10) >= 3,
+        'TUNABLE_SCHEMA must be ≥ 3 (v141 retuning bumped it from 2)');
+    });
+
     test('gpu-mpm v140: live overlay surfaces toggle + tunable state', () => {
       // User asked to "include which options are toggled in Debug
       // output". The build report (Copy/Share) already had a render-
@@ -2168,15 +2199,17 @@
       assert(compositeSrc.match(/R0_water\s*\+\s*\(\s*1\.0\s*-\s*R0_water\s*\)\s*\*\s*pow\(\s*1\.0\s*-\s*nv/) !== null ||
              compositeSrc.match(/R0\s*\+\s*\(1\.0\s*-\s*R0\)\s*\*\s*pow\(1\.0\s*-\s*nv/) !== null,
         'composite must compute fresnel = R₀ + (1-R₀)·pow(1-cosθ, 5)');
-      // R₀ for water must be sensible (around 0.02 — IOR 1.33).
-      // v131: the live tunable default lives in state.tunables.
-      const r0Match = src.match(/R0_water:\s*(0\.0\d+),/) ||
-                      compositeSrc.match(/R0_water\s*:\s*f32\s*=\s*(0\.0\d+)/) ||
-                      compositeSrc.match(/let\s+R0\s*=\s*(0\.0\d+)/);
+      // R₀ for water — physical is ~0.02 (IOR 1.33), but v141 raised
+      // the default to 0.10 because the user found the wetter
+      // highlight looks more like real water than the physical value
+      // does. Test now accepts the broader "artistic-water" range.
+      const r0Match = src.match(/R0_water:\s*([0-9.]+),/) ||
+                      compositeSrc.match(/R0_water\s*:\s*f32\s*=\s*([0-9.]+)/) ||
+                      compositeSrc.match(/let\s+R0\s*=\s*([0-9.]+)/);
       if (r0Match) {
         const r0 = parseFloat(r0Match[1]);
-        assert(r0 > 0.005 && r0 < 0.06,
-          'R₀ for water should be ~0.020 (IOR 1.33); got ' + r0);
+        assert(r0 > 0.005 && r0 < 0.21,
+          'R₀ for water should be in [0.005, 0.20]; got ' + r0);
       }
     });
 

@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v143 (2026-05-12 — HDR caustic accumulation. The full chain writing into backgroundTex (backdrop tile + boxfaces + wireframe lines + caustic splats) was running in rgba8, so overlapping caustic splats saturated at 1.0 instead of stacking past it — the reference paper\'s bright "lightning-bolt" peaks need values 3-10× the marble baseline to survive Beer-Lambert + tone-map and read as truly bright. v143 introduces BG_FORMAT = rgba16float for all 4 pipelines writing into backgroundTex. Convergence points now produce HDR peaks that pop after tone-mapping; dim ambient caustic regions stay dim instead of being floor-clamped. No other code changes — the composite math is already HDR-correct.)';
+const APP_VERSION = 'mpm-v144 (2026-05-12 — caustics from dots to filaments + back-wall sun. THREE changes. (1) Densify: source-grid 192² → 320² (102k rays vs 37k) so adjacent splats land 2-3 px apart instead of 5-10 px. (2) Widen + soften: splat radius 0.006 → 0.010 NDC, falloff (1-r²)⁴ → (1-r²)⁴ + 0.35·(1-r²)² (sharp peak + soft halo) so neighbours blend into continuous lines instead of dot-pattern. (3) Sun tilt: Lw [0.35, 0.80, 0.50] → [0.30, 0.40, 0.85] (≈53° → 26° elevation). Lower-angle sun sends refracted rays mostly along -Z into the back wall, which is the dominant visible surface in iPhone portrait — caustics now read instead of being hidden on the barely-visible floor. Per-splat intensity reduced (0.20 → 0.09 chromatic, 0.35 → 0.16 single) to compensate for ~12× more total caustic light from the density+width+softening combo.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2320,15 +2320,19 @@ fn vs_main(@builtin(vertex_index) vi: u32,
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
   let r2 = dot(in.uv, in.uv);
   if (r2 > 1.0) { discard; }
-  // v139: sharper falloff (1-r²)⁴ instead of (1-r²)². Combined with
-  // smaller splat radius + 4× source density (see JS-side constants),
-  // this produces thin "lightning-bolt" caustic streaks instead of
-  // round soft blobs — the NVIDIA deck's caustic look comes from the
-  // local Jacobian of the refraction map, and dense sampling with
-  // sharp splats approximates that integral much better.
+  // v144: mixed falloff — sharp peak (1-r²)⁴ + soft halo (1-r²)².
+  // The sharp term preserves the "lightning-bolt" thin filament look
+  // at convergence points (where rays focus into bright peaks). The
+  // soft halo bleeds each splat slightly past its disc edge so
+  // adjacent splats in the now-denser (320²) source grid blend into
+  // continuous lines instead of reading as isolated dots. The dots
+  // were the v143 complaint — pure (1-r²)⁴ falloff has near-zero
+  // weight by r=0.7, leaving gaps between neighbours. Halo weight is
+  // small (×0.35) so it just fills the cracks, not muddies the peak.
   let falloff = (1.0 - r2);
-  let f4 = falloff * falloff * falloff * falloff;
-  let g = f4 * in.intensity;
+  let f2 = falloff * falloff;
+  let f4 = f2 * f2;
+  let g = (f4 + 0.35 * f2) * in.intensity;
   // v128: tint comes from the uniform (CausticParams.tintR/G/B). The
   // single-IOR mode uses a warm sunny tint (1.0, 0.95, 0.72); the
   // chromatic-dispersion mode runs the shader 3× with isolated R/G/B
@@ -3220,12 +3224,16 @@ async function initAndRun() {
   // to keep VS cost low (each instance does ~5 depth reads), dense
   // enough that adjacent refracted rays overlap on the floor so the
   // Jacobian shows up.
-  // v139: bumped 96 → 192. 4× more refracted rays (36864 vs 9216) so
-  // adjacent source samples on the water surface project close enough
-  // to overlap on the floor — that overlap is what builds thin
-  // "lightning-bolt" caustic streaks. The shader is vertex-bound and
-  // dirt cheap; 36k draws fit comfortably in our ~0.3 ms frame budget.
-  const CAUSTIC_SOURCE_GRID_N = 192;
+  // v144: bumped 192 → 320 (102400 rays vs 36864). The user reported
+  // v143 caustics looked like "lots of dots instead of true light" —
+  // even with HDR, individual splats still read as isolated points
+  // because adjacent rays land 3-10 px apart on the floor and our
+  // splats were too small to overlap. 2.8× more rays drops average
+  // adjacency to ~2-3 px, which combined with the v144 wider splat
+  // (radius 0.006 → 0.010 NDC) gives ~80-90% overlap area between
+  // neighbours — caustics now read as continuous filaments instead of
+  // dotted lines. Still vertex-bound and cheap on Apple GPU.
+  const CAUSTIC_SOURCE_GRID_N = 320;
 
   // v121: RenderToggles uniform — 16 floats / 64 bytes. Bound to the
   // composite at @binding(6). Field order MUST match the WGSL struct
@@ -3282,7 +3290,16 @@ async function initAndRun() {
       return sign | (exp16 << 10) | ((mantissa + 0x1000) >>> 13);
     }
 
-    const sunDirW = [0.35, 0.80, 0.50];
+    // v144: sun tilted from [0.35, 0.80, 0.50] (≈53° elevation, mostly
+    // overhead) → [0.30, 0.40, 0.85] (≈26° elevation, mostly horizontal
+    // toward camera). Old sun made refracted rays head mostly downward
+    // so caustics piled up on the floor, which is barely visible in
+    // iPhone portrait. The lower-angle sun sends refracted rays mostly
+    // along -Z (away from camera, into the back wall), which IS the
+    // dominant visible surface through the fluid — caustics now read.
+    // Used by the sky-cubemap bake too; the cubemap gets re-baked at
+    // init so it reflects the new sun-disc + scattering correctly.
+    const sunDirW = [0.30, 0.40, 0.85];
     const sl = Math.hypot(sunDirW[0], sunDirW[1], sunDirW[2]);
     const sunDir = [sunDirW[0]/sl, sunDirW[1]/sl, sunDirW[2]/sl];
     const zenith  = [0.45, 0.65, 0.95];
@@ -3828,7 +3845,12 @@ async function initAndRun() {
     // SIM_TUNE.refractStrength so the user can tune both via sliders.
     compBuf[6] = state.tunables.thicknessScale;
     compBuf[7] = state.tunables.refractStrength;
-    const Lw = [0.35, 0.80, 0.50];
+    // v144: must match sunDirW above. Tilted lower so caustics land
+    // on the back wall (z = -boxHalfZ) instead of the barely-visible
+    // floor. The two arrays must stay in sync — composite shading
+    // (sunDirW, baked into the cubemap) and caustic refraction (Lw,
+    // re-projected into view space each frame) need consistent light.
+    const Lw = [0.30, 0.40, 0.85];
     const Lv = [
       cam.right[0]*Lw[0] + cam.right[1]*Lw[1] + cam.right[2]*Lw[2],
       cam.up[0]*Lw[0]    + cam.up[1]*Lw[1]    + cam.up[2]*Lw[2],
@@ -4017,12 +4039,13 @@ async function initAndRun() {
       buf[2] = f / aspect; buf[3] = f;
       buf[4] = canvas.width; buf[5] = canvas.height;
       buf[6] = CAUSTIC_SOURCE_GRID_N;
-      // v139: splatRadius 0.014 → 0.006 NDC. Each ray now paints a
-      // ~3.5 px disc instead of a ~8 px disc — thin streaks become
-      // possible because adjacent rays no longer smear together into
-      // round blobs. Density (4× more rays) compensates for the
-      // smaller individual splat area.
-      buf[7] = 0.006;
+      // v144: splatRadius 0.006 → 0.010 NDC. ~6 px disc. With v144's
+      // 2.8× denser source grid (320² rays), adjacent splats now
+      // overlap rather than leaving visible gaps — the user reported
+      // v143's caustics "look like a lot of dots instead of true
+      // light", which was the small-radius + sparse-grid combo. Wider
+      // splat + denser grid yields continuous filaments.
+      buf[7] = 0.010;
       buf[8]  = Lv[0] / Llen;
       buf[9]  = Lv[1] / Llen;
       buf[10] = Lv[2] / Llen;
@@ -4040,24 +4063,26 @@ async function initAndRun() {
     // dramatic light pools.
     const cStr = state.tunables.causticStrength;
     if (state.toggles.chromaticCaustics) {
-      // v141: with the caustic source now pulling from the less-smoothed
-      // depthB (pre-curvature-flow), wave-scale features survive into
-      // the refraction map → caustic streaks vary frame-to-frame as
-      // the water moves. Base 0.20 per channel; the live slider scales
-      // this so the user can crank or kill caustics without code changes.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.20 * cStr);
-      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.20 * cStr);
-      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.20 * cStr);
+      // v144: per-splat intensity 0.20 → 0.09 because the same frame now
+      // has 2.8× more rays (grid 192→320), each splat is 2.78× wider
+      // (radius 0.006→0.010), and the mixed falloff contributes ~1.58×
+      // more integrated light — total light delivered is ~12× higher,
+      // so each splat needs to be much dimmer to keep the average
+      // brightness in HDR-tone-mappable range. Peak at convergence
+      // still saturates beautifully because HDR (v143) accumulates
+      // overlapping splats without clipping.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.09 * cStr);
+      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.09 * cStr);
+      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.09 * cStr);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
       device.queue.writeBuffer(causticParamsBufG, 0, causticBufScratchG);
       device.queue.writeBuffer(causticParamsBufB, 0, causticBufScratchB);
     } else {
-      // v141: single warm-sunny pass at 0.35 (up from v139's 0.20).
-      // Same rationale as the chromatic side — restored wave detail
-      // creates more convergence/divergence variation, so each splat
-      // contributes less ambient and we want a brighter peak so
-      // moving water produces clear bright highlights on the floor.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.35 * cStr);
+      // v144: single warm-sunny pass at 0.16 (down from v141's 0.35).
+      // Same v144 calibration as the chromatic side: 12× more total
+      // caustic light per frame from denser + wider + softer-falloff
+      // splats, so per-splat intensity drops to keep ambient sane.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.16 * cStr);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
     }
 

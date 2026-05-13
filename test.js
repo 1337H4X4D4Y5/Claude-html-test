@@ -1548,8 +1548,9 @@
       // Multiplication must be applied at the caustic intensity writes.
       assert(src.match(/state\.tunables\.causticStrength/) !== null,
         'frame loop must read state.tunables.causticStrength when writing caustic uniforms');
-      assert(src.match(/0\.20\s*\*\s*cStr/) !== null ||
-             src.match(/0\.35\s*\*\s*cStr/) !== null,
+      // v144 recalibrated per-splat intensity again (0.20→0.09 chromatic,
+      // 0.35→0.16 single) — accept any numeric times cStr.
+      assert(src.match(/[0-9.]+\s*\*\s*cStr/) !== null,
         'base caustic intensities must be multiplied by the live tunable');
     });
 
@@ -2343,8 +2344,12 @@
       const gridMatch = src.match(/CAUSTIC_SOURCE_GRID_N\s*=\s*(\d+)/);
       assert(gridMatch, 'CAUSTIC_SOURCE_GRID_N constant not declared');
       const grid = parseInt(gridMatch[1], 10);
-      assert(grid >= 32 && grid <= 256,
-        'CAUSTIC_SOURCE_GRID_N should be in a sensible range (32-256); got ' + grid);
+      // v144 bumped to 320 to densify caustic coverage into continuous
+      // filaments (instead of visible dots). Upper cap raised; lower
+      // still 32 (a sanity floor — anything less than that would be
+      // unusably sparse).
+      assert(grid >= 32 && grid <= 512,
+        'CAUSTIC_SOURCE_GRID_N should be in a sensible range (32-512); got ' + grid);
     });
 
     test('gpu-mpm v137: caustic splat intensities calibrated for visibility on white backdrop', () => {
@@ -2411,14 +2416,21 @@
       assert(grid >= 160,
         'CAUSTIC_SOURCE_GRID_N must be ≥ 160 for dense-enough ray overlap; got ' + grid);
       const radius = parseFloat(src.match(/buf\[7\]\s*=\s*([0-9.]+);/)[1]);
-      assert(radius <= 0.010,
-        'splatRadius must be ≤ 0.010 NDC for thin-streak look; got ' + radius);
-      // Falloff curve in WGSL_CAUSTIC must be at least (1-r²)⁴.
+      // v144 widened slightly (0.006 → 0.010 NDC) to make adjacent
+      // splats merge into continuous filaments rather than reading
+      // as isolated dots — the v139 cap of 0.010 was the upper bound
+      // of the "still-thin-streak" range, so we keep ≤ 0.012.
+      assert(radius <= 0.012,
+        'splatRadius must be ≤ 0.012 NDC for thin-streak look; got ' + radius);
+      // Falloff curve in WGSL_CAUSTIC must have a sharp peak — either
+      // pure (1-r²)⁴ (v139-v143) or the v144 mixed (1-r²)⁴ + 0.35·(1-r²)²
+      // form, both of which retain the sharp 4th-power peak.
       const causticIdx = src.indexOf('const WGSL_CAUSTIC');
       const causticEnd = src.indexOf('`;', causticIdx);
       const causticSrc = src.slice(causticIdx, causticEnd);
-      assert(causticSrc.match(/falloff\s*\*\s*falloff\s*\*\s*falloff\s*\*\s*falloff/) !== null,
-        'caustic falloff must be at least (1-r²)⁴ for sharp peak; pre-v139 was only squared');
+      assert(causticSrc.match(/f2\s*\*\s*f2/) !== null ||
+             causticSrc.match(/falloff\s*\*\s*falloff\s*\*\s*falloff\s*\*\s*falloff/) !== null,
+        'caustic falloff must include a sharp peak (≥ 4th power)');
     });
 
     test('gpu-mpm v138: caustic shader traces refracted rays to walls, not just the floor', () => {

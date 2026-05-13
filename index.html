@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v143</span>
+    <span class="tag">v144</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v143: HDR caustic accumulation. The chain writing into backgroundTex (backdrop + boxfaces + wireframe + caustic splats) ran in rgba8, so overlapping caustic splats saturated at 1.0 instead of stacking past it — the reference paper's bright "lightning-bolt" peaks need 3-10× the marble baseline to survive Beer-Lambert and tone-map. v143 routes the whole chain through rgba16float; convergence points now produce HDR peaks that pop after tone-mapping, dim ambient caustic regions stay dim instead of being floor-clamped to white.</div>
+  <div class="desc">MLS-MPM on the GPU. v144: caustics from dots to filaments + sun tilted toward back wall. (1) Densify: source-grid 192² → 320² so adjacent splats land 2-3 px apart instead of 5-10 px. (2) Widen + soften: splat radius 0.006 → 0.010 NDC, mixed falloff (sharp peak + soft halo) so neighbours blend into continuous lines instead of reading as isolated dots. (3) Sun tilt: 53° elevation → 26° so refracted rays head into the back wall (the dominant visible surface in iPhone portrait) instead of the barely-visible floor. Per-splat intensity dialed down to compensate for the ~12× more total caustic light.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

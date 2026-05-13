@@ -1640,6 +1640,36 @@
         'TUNABLE_SCHEMA must be ≥ 6 (v147 re-tuned thicknessScale default to 0.30)');
     });
 
+    test('gpu-mpm v149: OOB depth samples handled in composite/bilateral/curvature', () => {
+      // WebGPU's textureLoad returns 0 for out-of-bounds coordinates.
+      // v148's camera overscan pushed the box silhouette right against
+      // the screen edges, where every 5-tap depth stencil and every
+      // bilateral kernel was reading off-screen → depth=0 → corrupt
+      // linearized view-Z → garbage normals → visible rainbow / streak
+      // artifacts on the left/right edges. v149 detects depth values
+      // below a small epsilon (0.001) and falls back to the centre
+      // depth, same way sky pixels (>= 0.99999) are already handled.
+      const src = readMpmScript();
+      // Composite normal stencil — checks must include both sky and OOB.
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      assert(compositeSrc.match(/dL\s*>=\s*0\.99999\s*\|\|\s*dL\s*<\s*0\.001/) !== null,
+        'composite normal stencil must guard against OOB depth reads (dL < 0.001)');
+      // Bilateral pass — both zL and zR conditions need the OOB guard.
+      const bilatIdx = src.indexOf('const WGSL_DEPTH_BILATERAL');
+      const bilatEnd = src.indexOf('`;', bilatIdx);
+      const bilatSrc = src.slice(bilatIdx, bilatEnd);
+      const bilatGuards = (bilatSrc.match(/zL?R?\s*>\s*0\.001/g) || []).length;
+      assert(bilatGuards >= 2,
+        'bilateral filter must guard zL and zR against OOB depth reads (got ' + bilatGuards + ' guards)');
+      // Curvature flow — neighborView() must reject OOB depth too.
+      const curvIdx = src.indexOf('fn neighborView');
+      const curvSnippet = src.slice(curvIdx, curvIdx + 800);
+      assert(curvSnippet.match(/zr\s*<\s*0\.001/) !== null,
+        'curvature flow neighborView() must reject OOB depth (zr < 0.001)');
+    });
+
     test('gpu-mpm v147: APP_VERSION text is short (≤ 120 chars)', () => {
       // The on-screen overlay shows APP_VERSION verbatim; the v146
       // string was ~700 chars and covered most of the screen. New

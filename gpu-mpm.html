@@ -452,7 +452,7 @@
 // the multi-paragraph forms were covering most of the screen. Pattern
 // going forward: "vN — one-line summary". Full rationale lives in the
 // commit message.
-const APP_VERSION = 'mpm-v148 — 12% camera overscan so water fills the screen';
+const APP_VERSION = 'mpm-v149 — fix edge artifacts: handle OOB depth reads in normal/bilateral/curvature';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2057,7 +2057,10 @@ fn bilateral1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
     let zR = textureLoad(srcDepth, coord + dir * i, 0);
     // Background silhouette: explicit skip is cheaper than a near-zero
     // range weight from the huge Δview_z (depth=1 ⇒ viewZ ≈ -far).
-    if (zL < 0.99999) {
+    // v149: also skip out-of-bounds reads (depth = 0 from OOB
+    // textureLoad) — adding them as if they were "near plane" pixels
+    // pulls the bilateral toward the camera and corrupts edge depth.
+    if (zL < 0.99999 && zL > 0.001) {
       // v130: when gaussianOnly > 0.5 the range weight collapses to 1.0
       // — the filter is then a pure (deck-slide-18) Gaussian.
       let dz = viewZc - linearizeNDC(zL);
@@ -2066,7 +2069,7 @@ fn bilateral1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
       let w = spatialW * rangeW;
       sum = sum + zL * w; totalW = totalW + w;
     }
-    if (zR < 0.99999) {
+    if (zR < 0.99999 && zR > 0.001) {  // v149: skip sky + OOB
       let dz = viewZc - linearizeNDC(zR);
       let rangeFull = exp(-dz * dz * rangeSigma2_inv);
       let rangeW = mix(rangeFull, 1.0, P.gaussianOnly);
@@ -2119,7 +2122,11 @@ fn linearizeNDC(zn: f32) -> f32 {
 
 fn neighborView(coord: vec2<i32>, center: f32) -> f32 {
   let zr = textureLoad(srcDepth, coord, 0);
-  if (zr >= 0.99999) { return center; }
+  // v149: handle BOTH sky (>= 0.99999) and OOB (≈ 0 from WebGPU's
+  // out-of-bounds textureLoad). Without the OOB branch the screen
+  // edges read depth=0 → linearizeNDC produces near-clip distance →
+  // curvature flow pulls the surface dramatically toward the camera.
+  if (zr >= 0.99999 || zr < 0.001) { return center; }
   return linearizeNDC(zr);
 }
 
@@ -2467,10 +2474,17 @@ fn reconstructNormal(coord: vec2<i32>, fragXY: vec2<f32>, viewC: vec3<f32>, dept
   let dR = textureLoad(depthTex, coord + vec2<i32>( NORMAL_STENCIL,  0), 0);
   let dU = textureLoad(depthTex, coord + vec2<i32>( 0, -NORMAL_STENCIL), 0);
   let dD = textureLoad(depthTex, coord + vec2<i32>( 0,  NORMAL_STENCIL), 0);
-  let zL = select(dL, depthC, dL >= 0.99999);
-  let zR = select(dR, depthC, dR >= 0.99999);
-  let zU = select(dU, depthC, dU >= 0.99999);
-  let zD = select(dD, depthC, dD >= 0.99999);
+  // v149: out-of-bounds textureLoad returns 0 in WebGPU. Combined with
+  // the v148 camera overscan that pushed the box silhouette right
+  // against the screen edge, depth=0 was producing garbage view-space
+  // positions → corrupt normals → visible rainbow/streak artifacts on
+  // the left edge. We now fall back to depthC for both sky pixels
+  // (dL >= 0.99999) AND oob reads (dL < 0.001) since a depth of zero
+  // never occurs inside the box.
+  let zL = select(dL, depthC, dL >= 0.99999 || dL < 0.001);
+  let zR = select(dR, depthC, dR >= 0.99999 || dR < 0.001);
+  let zU = select(dU, depthC, dU >= 0.99999 || dU < 0.001);
+  let zD = select(dD, depthC, dD >= 0.99999 || dD < 0.001);
   let s = f32(NORMAL_STENCIL);
   let vL = viewPosFromDepth(vec2<f32>(fragXY.x - s, fragXY.y    ), zL);
   let vR = viewPosFromDepth(vec2<f32>(fragXY.x + s, fragXY.y    ), zR);

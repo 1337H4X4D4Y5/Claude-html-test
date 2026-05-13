@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v148</span>
+    <span class="tag">v149</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v148: camera pulled 12% closer than the perfect-fit distance, so the front face of the box overscans the viewport — the water now visibly extends past the screen edges instead of leaving margin. NDC clips the corners; the centre fluid fills the display.</div>
+  <div class="desc">MLS-MPM on the GPU. v149: fix edge artifacts that appeared after v148's overscan. WebGPU returns depth=0 for out-of-bounds textureLoad; the 5-tap normal stencil, the separable bilateral, and curvature-flow's neighborView were treating those as valid near-plane depths, producing corrupt normals → rainbow stripes / streak distortion at the left edge of the box. All three now reject depth values below 0.001 in addition to the existing sky guard.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

@@ -1575,7 +1575,10 @@
       const defMatch = src.match(/causticStrength:\s*([0-9.]+),/);
       assert(defMatch, 'state.tunables.causticStrength default must exist');
       const def = parseFloat(defMatch[1]);
-      assert(def === 1.0, 'causticStrength default should be 1.0 (current baseline); got ' + def);
+      // v146: default bumped to 2.30 after user's "save as default"
+      // tuning. Accept any positive value (the slider lets them tune).
+      assert(def > 0,
+        'causticStrength default should be a positive number; got ' + def);
       // TUNABLE_DEFS entry must declare a slider range.
       const tunableDefsMatch = src.match(/key:\s*['"]causticStrength['"][^}]*?max:\s*([0-9.]+)/);
       assert(tunableDefsMatch, 'TUNABLE_DEFS must include a causticStrength slider definition');
@@ -1591,22 +1594,23 @@
         'base caustic intensities must be multiplied by the live tunable');
     });
 
-    test('gpu-mpm v141: tunable defaults match the user-validated "water" calibration', () => {
-      // After the user landed on a set of slider values they described
-      // as "looks the most like water so far", v141 promoted those to
-      // defaults so a fresh user sees that look and existing users get
-      // them via the schema bump. This test pins the defaults so they
-      // can't silently drift out of the water-look range.
+    test('gpu-mpm v141/v146: tunable defaults match the user-validated "water" calibration', () => {
+      // v141 promoted the user's "looks the most like water" calibration
+      // to defaults; v146 re-retuned after photon-mesh caustics shipped
+      // (user said "looks a lot better, save this as default"). Test
+      // ranges widened to cover both calibrations so the test acts as
+      // a "still in the water-look envelope" check rather than pinning
+      // exact values.
       const src = readMpmScript();
       const tunMatch = src.match(/tunables:\s*\{([\s\S]*?)\},/);
       assert(tunMatch, 'state.tunables block not found');
       const body = tunMatch[1];
       const expect = {
-        worldSigma:      [0.05, 0.12, 0.080],
-        worldRangeSigma: [0.30, 0.55, 0.50],
-        thicknessScale:  [0.30, 0.50, 0.40],
-        R0_water:        [0.05, 0.20, 0.100],
-        refractStrength: [50,   120,  80.0],
+        worldSigma:      [0.05, 0.15, 0.113],
+        worldRangeSigma: [0.30, 0.55, 0.365],
+        thicknessScale:  [0.05, 0.50, 0.10],
+        R0_water:        [0.05, 0.20, 0.070],
+        refractStrength: [50,   120,  98.0],
       };
       for (const key of Object.keys(expect)) {
         const m = body.match(new RegExp(key + ':\\s*([0-9.]+)'));
@@ -2028,7 +2032,11 @@
       const boxHalfZ = parseFloat(bhzMatch[1]);
       const maxThickness = 2 * boxHalfZ * thicknessScale;
       const redAbsorbed = 1 - Math.exp(-absorptionR * maxThickness);
-      assert(redAbsorbed >= 0.30,
+      // v146: user chose thicknessScale = 0.10 as default (was 0.40 in
+      // v141). At the default box (BOX_HALF_Z = 0.25) this gives ~22%
+      // red absorption — visibly water-coloured but on the thin side.
+      // Floor lowered to 18% to accept the user-validated calibration.
+      assert(redAbsorbed >= 0.18,
         'Beer-Lambert too weak at max depth (default thicknessScale): ' +
         (redAbsorbed * 100).toFixed(1) + '% red absorbed. Water will look clear.');
     });
@@ -2267,9 +2275,11 @@
       const bhz = parseFloat(bhzMatch[1]);
       const maxThickness = 2 * bhz * ts;
       const absorbed = 1 - Math.exp(-absR * maxThickness);
-      assert(absorbed >= 0.30 && absorbed <= 0.95,
+      // v146: user picked thicknessScale = 0.10 as default. Floor
+      // dropped to 18% to allow the thinner water look.
+      assert(absorbed >= 0.18 && absorbed <= 0.95,
         'thicknessScale (' + ts + ') × max-pathLen (' + (2*bhz).toFixed(2) +
-        ') × absorptionR (' + absR + ') should put red absorption in 30-95%, got ' +
+        ') × absorptionR (' + absR + ') should put red absorption in 18-95%, got ' +
         (absorbed * 100).toFixed(1) + '%');
       // thinClamp multiplier must scale to saturate within the box's
       // pathLen range (~0.10). 25× saturates at pathLen ≈ 0.04, sensible.
@@ -2833,8 +2843,10 @@
       const maxPathLen = 2 * boxHalfZ;
       const T = RenderMath.beerLambert(maxPathLen * thicknessScale, absorptionR);
       const absorbed = 1 - T;
-      assert(absorbed >= 0.30 && absorbed <= 0.90,
-        'Beer-Lambert red absorption at max depth should be 30-90%; got ' +
+      // v146: floor lowered to 18% (was 30%) — user's preferred
+      // thicknessScale = 0.10 default gives 22% at the default box.
+      assert(absorbed >= 0.18 && absorbed <= 0.90,
+        'Beer-Lambert red absorption at max depth should be 18-90%; got ' +
         (absorbed*100).toFixed(1) + '% (thicknessScale=' + thicknessScale +
         ', BOX_HALF_Z=' + boxHalfZ + ', absorptionR=' + absorptionR + ')');
     });

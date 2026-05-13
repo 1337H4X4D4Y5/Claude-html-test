@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v145 (2026-05-12 — PHOTON MESH caustics. Rewrote WGSL_CAUSTIC from per-instance splat discs to per-instance quads connecting the 4 corner rays of each source-grid cell. Each of the 6 vertices independently casts its own refracted ray (depth load + 5-tap normal + Snell + multi-wall trace + NDC projection). The fragment shader uses dpdx/dpdy on a source-grid (u,v) varying to compute the 2×2 Jacobian determinant — that IS the local photon density (rays per screen pixel). Energy-conserving by construction: convergence collapses the projected quad, det → infinity, fragment goes very bright (HDR-clamped to 64); divergence spreads the quad, det → 0, fragment dims. No more splat-radius / falloff / density tuning — the caustic shape comes from the physics directly. Source grid dropped 320² → 128² since photon-mesh covers area continuously; per-cell base energy 5.0 (single) / 3.0 (chromatic) calibrated for typical density × cell-overlap range.)';
+const APP_VERSION = 'mpm-v146 (2026-05-12 — save user\'s v145 calibration as defaults. User said "looks a lot better, save this as default" after the photon-mesh caustic shader landed. Tunables: worldSigma 0.080→0.113, worldRangeSigma 0.50→0.365, thicknessScale 0.40→0.10, R0_water 0.100→0.070, refractStrength 80→98, causticStrength 1.0→2.30. Toggles: fresnel ON→OFF, additiveThickness OFF→ON, translucentShadow OFF→ON, chromaticCaustics OFF→ON, gaussianOnly OFF→ON. Schema bumped 4→5 so existing localStorage migrates. thicknessScale slider min lowered 0.10→0.02 (user is at the floor, room to go thinner). Tests: Beer-Lambert visibility floors dropped 30%→18% so the new thinner-water default passes at the default box depth.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -710,30 +710,36 @@ const state = {
   // in localStorage so reloads keep the user's A/B setup. Defaults
   // match the v120 visual baseline (everything on).
   toggles: {
+    // v146: defaults retuned to the user's v145 "looks a lot better"
+    // calibration. fresnel OFF (R0_water still contributes via the
+    // Schlick term, but the body-to-sky-mix path is bypassed —
+    // produces a less mirror-y look). additiveThickness + chromatic
+    // caustics + translucentShadow + gaussianOnly all ON because
+    // they were the user's combo when they said "save as default".
+    // flowNoise stays off — it has known geometric tradeoffs.
     smoothing:         true,  // Gaussian + bilateral depth pre-smooth (slide 18-19)
     curvatureFlow:     true,  // Müller curvature flow refinement (slide 19+)
     caustics:          true,  // Ray-traced refracted-sun caustic splatting
     beerLambert:       true,  // Body absorption by view-space thickness (slide 23)
     subsurface:        true,  // Body internal scatter glow
     refraction:        true,  // Normal-warped bg sample (slide 25)
-    fresnel:           true,  // Body → sky reflection mix (slide 22)
+    fresnel:           false, // v146: off — body-to-sky reflection mix
+                              //       muted in the user's preferred look
     spec:              true,  // Blinn-Phong sun specular
     iblAmbient:        true,  // Cubemap-sampled ambient irradiance (slide 20)
     cubemapReflect:    true,  // Sample cubemap for reflectedV (vs. flat grey)
     toneMap:           true,  // ACES Filmic at end of composite
-    additiveThickness: false, // v124: false = two-layer pathLen (v107+);
-                              //       true  = deck-25 additive sprite splat
+    additiveThickness: true,  // v146: on — deck-25 sprite-splat thickness
+                              //       (v142 fix made this usable at the
+                              //       user's thinner thicknessScale)
     flowNoise:         false, // v125: deck-38 surface detail via 3D noise
                               //       sampled at particle world centres.
-    translucentShadow: false, // v127: deck-30 shadow on the floor cast
-                              //       by fluid sampled from the sun's POV.
-    chromaticCaustics: false, // v128: deck-37 chromatic dispersion —
-                              //       caustic pass run 3× at slightly
-                              //       different IORs (R/G/B) for rainbow.
-    gaussianOnly:      false, // v130: deck-slide-17/18 mode — when on,
-                              //       the bilateral skips the range
-                              //       weight so it's a pure Gaussian
-                              //       (no edge preservation).
+    translucentShadow: true,  // v146: on — fluid casts a sun-driven
+                              //       shadow on the floor (deck-30)
+    chromaticCaustics: true,  // v146: on — caustic dispersion via 3×
+                              //       R/G/B passes at different IORs
+    gaussianOnly:      true,  // v146: on — bilateral skips range weight
+                              //       so it's a pure Gaussian smooth
   },
   // v129: debug viz cycle (integer, not a boolean). 0 = off, 1 = front
   // depth, 2 = normal, 3 = thickness, 4 = noise, 5 = back depth. Bound
@@ -747,30 +753,25 @@ const state = {
   // the FX panel and is consumed by the uniform writes each frame.
   // Persisted to localStorage so the user's tuning survives a reload.
   tunables: {
-    // v141: defaults retuned to the "looks the most like water"
-    // calibration the user landed on. Three of these are artistic
-    // (not physical): wider Gaussian gives a glassier surface,
-    // pure-Gaussian bilateral (huge range σ) skips the
-    // edge-preservation hop, R0_water 0.10 is 5× the physical 0.02
-    // but reads as a wetter highlight, refractStrength 80 makes the
-    // background warp through the fluid dramatically. v134's
-    // physical defaults are still reachable by dragging sliders down.
+    // v146: defaults re-retuned to the user's v145 calibration after
+    // photon-mesh caustics shipped. They reported "looks a lot
+    // better" at this slider configuration; promoting it as the
+    // baseline so a fresh user starts here and existing users get
+    // migrated via the TUNABLE_SCHEMA bump. v141 values are still
+    // reachable by dragging sliders.
     //
-    //   worldSigma       0.030 → 0.080    glassier surface
-    //   worldRangeSigma  0.10  → 0.50     bilateral acts as pure Gaussian
-    //   thicknessScale   0.40             unchanged (Beer-Lambert)
-    //   R0_water         0.020 → 0.100    artistic, wetter highlight
-    //   refractStrength  30    → 80       strong refraction warp
-    worldSigma:      0.080,
-    worldRangeSigma: 0.50,
-    thicknessScale:  0.40,
-    R0_water:        0.100,
-    refractStrength: 80.0,
-    // v142: caustic light strength multiplier applied at uniform-buffer
-    // write time (multiplies the per-channel splat intensity). 1.0 =
-    // v141 baseline; lower dims, higher brightens. Range 0-3 so the
-    // user can both kill caustics and crank them well past saturation.
-    causticStrength: 1.0,
+    //   worldSigma       0.080 → 0.113    even glassier surface
+    //   worldRangeSigma  0.50  → 0.365    slight edge preservation back
+    //   thicknessScale   0.40  → 0.10     much thinner Beer-Lambert
+    //   R0_water         0.100 → 0.070    slightly less Fresnel
+    //   refractStrength  80    → 98       stronger warp
+    //   causticStrength  1.0   → 2.30     brighter caustics
+    worldSigma:      0.113,
+    worldRangeSigma: 0.365,
+    thicknessScale:  0.10,
+    R0_water:        0.070,
+    refractStrength: 98.0,
+    causticStrength: 2.30,
   },
   // v132: per-toggle performance audit. auditState cycles each toggle
   // ON for AUDIT_WARMUP frames + AUDIT_FRAMES sample frames, then OFF
@@ -789,7 +790,10 @@ const state = {
 const TUNABLE_DEFS = [
   { key: 'worldSigma',      label: 'Gauss σ',         min: 0.005, max: 0.150, step: 0.001, fmt: v => v.toFixed(3) },
   { key: 'worldRangeSigma', label: 'Bilateral σ_z',   min: 0.010, max: 0.500, step: 0.005, fmt: v => v.toFixed(3) },
-  { key: 'thicknessScale',  label: 'Thickness ×',     min: 0.1,   max: 6.0,   step: 0.1,   fmt: v => v.toFixed(1) },
+  // v146: thicknessScale min lowered 0.10 → 0.02 since the user's
+  // preferred default is at 0.10 (the old floor) and they may want
+  // to go thinner. Step also tightened so 0.05/0.07/0.10 are reachable.
+  { key: 'thicknessScale',  label: 'Thickness ×',     min: 0.02,  max: 6.0,   step: 0.01,  fmt: v => v.toFixed(2) },
   { key: 'R0_water',        label: 'Fresnel R₀',      min: 0.000, max: 0.200, step: 0.002, fmt: v => v.toFixed(3) },
   { key: 'refractStrength', label: 'Refract strength',min: 0,     max: 150,   step: 1,     fmt: v => v.toFixed(0) },
   { key: 'causticStrength', label: 'Caustic strength',min: 0,     max: 3.0,   step: 0.05,  fmt: v => v.toFixed(2) },
@@ -800,7 +804,7 @@ const TUNABLE_DEFS = [
 // otherwise users with old localStorage data are stuck at the previous
 // thicknessScale = 1.8 that absorbs 99% of red light at the current box
 // depth. Toggles + debugViz are kept; only tunables are reset.
-const TUNABLE_SCHEMA = 4;
+const TUNABLE_SCHEMA = 5;
 (function loadTogglesFromStorage() {
   try {
     const saved = JSON.parse(localStorage.getItem('water-box-toggles') || '{}');

@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v145</span>
+    <span class="tag">v146</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v145: PHOTON MESH caustics. Rewrote the caustic shader from per-instance splat discs to per-instance quads connecting the 4 corner rays of each source-grid cell. Each vertex independently casts its own refracted ray; the fragment uses dpdx/dpdy on a source-grid varying to compute the local 2×2 Jacobian determinant = photon density (rays per screen pixel). Continuous by construction (neighbouring cells share corner vertices) and energy-conserving — convergence collapses the projected quad, density → ∞, peak goes bright in HDR; divergence spreads the quad, density → 0, caustic dims. No more splat-radius / falloff tuning; the shape comes from physics.</div>
+  <div class="desc">MLS-MPM on the GPU. v146: user's "looks a lot better" v145 calibration promoted to defaults. Tunables: worldSigma 0.080→0.113, worldRangeSigma 0.50→0.365, thicknessScale 0.40→0.10, R0_water 0.100→0.070, refractStrength 80→98, causticStrength 1.0→2.30. Toggles: fresnel OFF, additiveThickness/translucentShadow/chromaticCaustics/gaussianOnly all ON. Schema bumped 4→5 so existing localStorage migrates. thicknessScale slider min lowered 0.10→0.02 (user is at the old floor, headroom to go thinner).</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

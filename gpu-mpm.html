@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v142 (2026-05-12 — TWO fixes. (1) additiveThickness toggle made water opaque-black. The sprite-thickness branch in the composite was spriteRaw * 0.10 — a fixed multiplier calibrated for the old thicknessScale=1.8 default. With v141 thicknessScale=0.40 the path-length branch dropped 4.5× but the sprite branch held, so Beer-Lambert over-absorbed. Now spriteThickness = spriteRaw * P.thicknessScale * 0.055 so the slider controls both methods consistently. (2) New causticStrength tunable (slider 0-3, default 1.0) multiplies the per-channel caustic splat intensity at uniform-write time — kill, dim, or crank caustics live without a code change. Schema bumped 3 → 4.)';
+const APP_VERSION = 'mpm-v143 (2026-05-12 — HDR caustic accumulation. The full chain writing into backgroundTex (backdrop tile + boxfaces + wireframe lines + caustic splats) was running in rgba8, so overlapping caustic splats saturated at 1.0 instead of stacking past it — the reference paper\'s bright "lightning-bolt" peaks need values 3-10× the marble baseline to survive Beer-Lambert + tone-map and read as truly bright. v143 introduces BG_FORMAT = rgba16float for all 4 pipelines writing into backgroundTex. Convergence points now produce HDR peaks that pop after tone-mapping; dim ambient caustic regions stay dim instead of being floor-clamped. No other code changes — the composite math is already HDR-correct.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2836,6 +2836,14 @@ async function initAndRun() {
   const ctx = canvas.getContext('webgpu');
   const format = navigator.gpu.getPreferredCanvasFormat();
   ctx.configure({ device: device, format: format, alphaMode: 'premultiplied' });
+  // v143: caustics + backdrop now render into an HDR texture so
+  // overlapping caustic splats can stack past 1.0 instead of saturating
+  // to white in rgba8. The composite samples this HDR backdrop, applies
+  // Beer-Lambert + lighting, then the final tone-map maps the HDR
+  // values back to display range. Without HDR the reference's bright
+  // "lightning-bolt" caustic peaks were getting clipped to the same
+  // 1.0 as the surrounding marble, killing all contrast.
+  const BG_FORMAT = 'rgba16float';
 
   // --- Buffers ---
   const posData = new Float32Array(N * 4);
@@ -3184,8 +3192,11 @@ async function initAndRun() {
     vertex: { module: causticModule, entryPoint: 'vs_main' },
     fragment: {
       module: causticModule, entryPoint: 'fs_main',
+      // v143: render into the HDR backgroundTex (rgba16float). Additive
+      // blending without 1.0 clipping is what produces the reference's
+      // bright "lightning-bolt" peaks at convergence points.
       targets: [{
-        format: format,
+        format: BG_FORMAT,
         blend: {
           color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
           alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
@@ -3360,7 +3371,8 @@ async function initAndRun() {
   const backdropPipeline = device.createRenderPipeline({
     layout: 'auto',
     vertex: { module: backdropModule, entryPoint: 'vs_main' },
-    fragment: { module: backdropModule, entryPoint: 'fs_main', targets: [{ format: format }] },
+    // v143: backdrop writes into the HDR backgroundTex (rgba16float).
+    fragment: { module: backdropModule, entryPoint: 'fs_main', targets: [{ format: BG_FORMAT }] },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
   });
   // v127: backdrop now reads BackdropParams + lightDepthTex for the
@@ -3382,8 +3394,9 @@ async function initAndRun() {
     },
     fragment: {
       module: linesModule, entryPoint: 'fs_main',
+      // v143: lines also write into backgroundTex (HDR rgba16float).
       targets: [{
-        format: format,
+        format: BG_FORMAT,
         blend: {
           color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
           alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' },
@@ -3446,8 +3459,9 @@ async function initAndRun() {
     },
     fragment: {
       module: boxfacesModule, entryPoint: 'fs_main',
+      // v143: boxfaces also write into backgroundTex (HDR rgba16float).
       targets: [{
-        format: format,
+        format: BG_FORMAT,
         blend: {
           color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
           alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -3527,9 +3541,14 @@ async function initAndRun() {
     // v59: the background texture holds the box wireframe + clear colour.
     // Rendered each frame before the fluid composite, then sampled
     // (warped by surface normal) by the composite for refraction.
+    // v143: backgroundTex uses BG_FORMAT (rgba16float) so caustic
+    // splats can accumulate to HDR values. The marble backdrop writes
+    // values in [0,1] to it as before; caustic additive blending
+    // pushes peaks past 1.0 where rays converge; composite samples
+    // and tone-maps so the eye-perceived caustic range is preserved.
     backgroundTex = device.createTexture({
       size: { width: w, height: h },
-      format: format,
+      format: BG_FORMAT,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
     // v104: curvature-flow ping-pong bind groups. 4 iterations:

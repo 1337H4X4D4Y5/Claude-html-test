@@ -1482,6 +1482,31 @@
         'debug report must display "< noise" for below-threshold deltas');
     });
 
+    test('gpu-mpm v143: caustic accumulation chain runs in HDR (rgba16float)', () => {
+      // Pre-v143 the backgroundTex was rgba8 (canvas preferred format),
+      // so overlapping caustic splats saturated at 1.0 instead of
+      // stacking past it. The reference's bright "lightning-bolt" peaks
+      // require values 3-10× the marble baseline to read as bright
+      // through the fluid + tone map. v143 introduces BG_FORMAT =
+      // 'rgba16float' for the entire chain that writes into
+      // backgroundTex (backdrop + lines + boxfaces + caustics).
+      const src = readMpmScript();
+      const bgFormatMatch = src.match(/const\s+BG_FORMAT\s*=\s*['"]([a-z0-9]+)['"]/);
+      assert(bgFormatMatch && bgFormatMatch[1] === 'rgba16float',
+        'BG_FORMAT must be declared as rgba16float so HDR caustic accumulation survives saturation');
+      // backgroundTex must be created with BG_FORMAT, not canvas format.
+      const bgTexBlock = src.match(/backgroundTex\s*=\s*device\.createTexture\(\{[\s\S]*?\}\)/);
+      assert(bgTexBlock, 'backgroundTex createTexture block not found');
+      assert(bgTexBlock[0].indexOf('format: BG_FORMAT') >= 0,
+        'backgroundTex must use BG_FORMAT (HDR) so caustic peaks can exceed 1.0');
+      // The 4 pipelines that write into backgroundTex must all use BG_FORMAT:
+      // backdrop, lines, boxfaces, caustic. Look at how many places swap
+      // `format: format` to `format: BG_FORMAT`.
+      const bgFormatTargets = (src.match(/format:\s*BG_FORMAT/g) || []).length;
+      assert(bgFormatTargets >= 4,
+        'at least 4 pipelines (backdrop, lines, boxfaces, caustic) must target BG_FORMAT; got ' + bgFormatTargets);
+    });
+
     test('gpu-mpm v142: additive-thickness path respects thicknessScale (no more opaque water)', () => {
       // Pre-v142 the sprite-thickness branch was `spriteRaw * 0.10` —
       // a fixed multiplier calibrated for the v53-v107-era thicknessScale

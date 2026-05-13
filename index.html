@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v139</span>
+    <span class="tag">v140</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v139: caustic shape overhaul — round soft blobs → thin sharp streaks (the NVIDIA deck "lightning-bolt" look). Three changes: source grid 96² → 192² (4× more refracted rays so adjacent rays overlap densely instead of leaving gaps), splat radius 0.014 → 0.006 NDC (each ray paints a ~3.5 px disc instead of ~8 px), and per-splat falloff (1-r²)² → (1-r²)⁴ (sharp peak instead of soft Gaussian). Intensities dialed down so peak at convergence still saturates while ambient glow drops.</div>
+  <div class="desc">MLS-MPM on the GPU. v140: live overlay surfaces toggle + tunable state. The build report already listed toggles, but the on-canvas debug strip only showed preset/fps/sim params — you had to expand the FX panel or copy the full debug to see which render phases were on. v140 adds an "N/N on" + "OFF: …" summary plus the 5 live tunable values to the expanded overlay, and a compact "16/16 fx" badge to the collapsed one-liner.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

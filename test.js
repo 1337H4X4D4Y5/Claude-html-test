@@ -1482,6 +1482,40 @@
         'debug report must display "< noise" for below-threshold deltas');
     });
 
+    test('gpu-mpm v140: live overlay surfaces toggle + tunable state', () => {
+      // User asked to "include which options are toggled in Debug
+      // output". The build report (Copy/Share) already had a render-
+      // toggles section, but the on-canvas live overlay only showed
+      // preset/fps/sim params — toggle state was invisible unless you
+      // expanded the FX panel. v140 adds toggle ON/OFF counts + the
+      // 5 tunable values to the expanded overlay, and the on/total
+      // count to the collapsed one-liner.
+      const src = readMpmScript();
+      const updateIdx = src.indexOf('function updateDebug()');
+      assert(updateIdx >= 0, 'updateDebug() must exist');
+      // Walk to the end of the function via brace counting.
+      const openBrace = src.indexOf('{', updateIdx);
+      let depth = 1, j = openBrace + 1;
+      while (j < src.length && depth > 0) {
+        const c = src[j];
+        if (c === '{') depth++; else if (c === '}') depth--;
+        j++;
+      }
+      const fnBody = src.slice(openBrace, j);
+      assert(fnBody.indexOf('state.toggles') >= 0,
+        'updateDebug() must reference state.toggles');
+      assert(fnBody.indexOf('state.tunables') >= 0,
+        'updateDebug() must reference state.tunables');
+      // The collapsed one-liner must include some abbreviated toggle
+      // count (e.g. "16/16 fx").
+      assert(fnBody.match(/fx/) !== null,
+        'collapsed one-liner must include a toggle count badge');
+      // The expanded overlay must include a "toggles:" or "OFF:" line.
+      assert(fnBody.indexOf("'toggles: '") >= 0 ||
+             fnBody.indexOf("'OFF: '")     >= 0,
+        'expanded overlay must label a toggles line');
+    });
+
     test('gpu-mpm v131: live tunable sliders + debug-report extensions', () => {
       const src = readMpmScript();
       // state.tunables exists with the 5 expected keys.

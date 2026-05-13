@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v139 (2026-05-12 — caustics reshaped from round soft blobs into thin sharp streaks (the NVIDIA deck look). Three structural changes: source grid 96² → 192² (4× more refracted rays, so adjacent rays overlap densely on the floor instead of leaving gaps), splat radius 0.014 → 0.006 NDC (~8 px disc → ~3.5 px disc), and falloff (1-r²)² → (1-r²)⁴ (soft Gaussian-ish profile → sharp peak). Intensities dialed down to compensate — peak at convergence still saturates while ambient/diffuse glow drops, producing visible streaks instead of even wash.)';
+const APP_VERSION = 'mpm-v140 (2026-05-12 — live overlay now shows toggle + tunable state. The build report (Copy/Share output) already listed the render-toggles section, but the on-canvas overlay only had preset / fps / sim params — you had to expand the FX panel or copy the full debug to see which phases were on. v140 adds an "N/N on" + "OFF: …" toggle summary line plus the 5 live tunable values to the expanded overlay, and a compact "16/16 fx" count to the collapsed one-liner.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -4266,20 +4266,44 @@ function updateDebug() {
   const cflDt = CELL_SIZE / soundC;
   const debugEl = debugTextEl.parentElement;
   const collapsed = debugEl && debugEl.classList.contains('collapsed');
+  // v140: toggle summary for the overlay. ON list is dropped when all
+  // are on (the typical case is "everything except 2 things"); OFF
+  // list is always shown because it's almost always shorter. Total
+  // count tells you at a glance how heavily configured the render is.
+  const togKeys = Object.keys(state.toggles);
+  const onKeys  = togKeys.filter(k => state.toggles[k]);
+  const offKeys = togKeys.filter(k => !state.toggles[k]);
+  const toggleSummary = onKeys.length + '/' + togKeys.length + ' on' +
+    (offKeys.length ? '   OFF: ' + offKeys.join(', ') : '   (all phases on)');
+
   if (collapsed) {
-    // One-line summary. Tap to expand.
+    // One-line summary. Tap to expand. v140: + on/total toggle count.
     debugTextEl.textContent =
       (state.presetLabel || '—') +
       '  ·  fps ' + state.fps.toFixed(0) +
       '  ·  ' + N + 'p' +
+      '  ·  ' + onKeys.length + '/' + togKeys.length + ' fx' +
       (state.gpuError ? '  ·  GPU ERR' : '');
     return;
   }
+  // v140: live tunables included so the user can see the current
+  // slider values without expanding the FX panel or copying the
+  // full debug report.
+  const T = state.tunables;
+  const tunablesLine =
+    'σ=' + T.worldSigma.toFixed(3) +
+    '  σz=' + T.worldRangeSigma.toFixed(3) +
+    '  thk×=' + T.thicknessScale.toFixed(2) +
+    '  R₀=' + T.R0_water.toFixed(3) +
+    '  refr=' + T.refractStrength.toFixed(0);
+
   debugTextEl.textContent =
     'preset: ' + (state.presetLabel || state.preset) + '   (tap to collapse)\n' +
     'fps: ' + state.fps.toFixed(1) +
       '  frame ms: ' + state.frameMsAvg.toFixed(1) + ' avg / ' + state.frameMsMax.toFixed(1) + ' max\n' +
     'particles: ' + N + '   grid: ' + GRID_SIZE + '³   steps: ' + state.steps + '\n' +
+    'toggles: ' + toggleSummary + '\n' +
+    'tunables: ' + tunablesLine + '\n' +
     'gyro: ' + state.gyroPermission + '   β=' + fmt(state.beta) + ' γ=' + fmt(state.gamma) + '   evt: ' + state.events + '\n' +
     'gravity x:' + fmt(state.gravity.x) + ' y:' + fmt(state.gravity.y) + ' z:' + fmt(state.gravity.z) + '\n' +
     'EOS=' + SIM_TUNE.eos +

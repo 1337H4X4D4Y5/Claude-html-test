@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v141 (2026-05-12 — TWO changes. (1) Default tunables promoted to the "looks the most like water" calibration the user landed on: worldSigma 0.030 → 0.080, worldRangeSigma 0.10 → 0.50, R0_water 0.020 → 0.100, refractStrength 30 → 80. Schema bumped 2 → 3 so existing users migrate. Slider caps lifted to give headroom beyond the new defaults. (2) Caustic source depth moved BEFORE the curvature-flow loop. Previously caustics splatted from the heavily-smoothed post-curvature depthB; with v141 worldSigma 0.080 this wiped out the wave-scale features that should drive moving caustic highlights. Now caustics see Gaussian-only smoothed depth, so water movement produces clear shifting bright highlights on the floor — exactly the "light highlights caused by water movement" the user asked for. Intensities bumped 0.20 → 0.35 single / 0.12 → 0.20 chromatic to peak brightly at convergence points.)';
+const APP_VERSION = 'mpm-v142 (2026-05-12 — TWO fixes. (1) additiveThickness toggle made water opaque-black. The sprite-thickness branch in the composite was spriteRaw * 0.10 — a fixed multiplier calibrated for the old thicknessScale=1.8 default. With v141 thicknessScale=0.40 the path-length branch dropped 4.5× but the sprite branch held, so Beer-Lambert over-absorbed. Now spriteThickness = spriteRaw * P.thicknessScale * 0.055 so the slider controls both methods consistently. (2) New causticStrength tunable (slider 0-3, default 1.0) multiplies the per-channel caustic splat intensity at uniform-write time — kill, dim, or crank caustics live without a code change. Schema bumped 3 → 4.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -766,6 +766,11 @@ const state = {
     thicknessScale:  0.40,
     R0_water:        0.100,
     refractStrength: 80.0,
+    // v142: caustic light strength multiplier applied at uniform-buffer
+    // write time (multiplies the per-channel splat intensity). 1.0 =
+    // v141 baseline; lower dims, higher brightens. Range 0-3 so the
+    // user can both kill caustics and crank them well past saturation.
+    causticStrength: 1.0,
   },
   // v132: per-toggle performance audit. auditState cycles each toggle
   // ON for AUDIT_WARMUP frames + AUDIT_FRAMES sample frames, then OFF
@@ -787,6 +792,7 @@ const TUNABLE_DEFS = [
   { key: 'thicknessScale',  label: 'Thickness ×',     min: 0.1,   max: 6.0,   step: 0.1,   fmt: v => v.toFixed(1) },
   { key: 'R0_water',        label: 'Fresnel R₀',      min: 0.000, max: 0.200, step: 0.002, fmt: v => v.toFixed(3) },
   { key: 'refractStrength', label: 'Refract strength',min: 0,     max: 150,   step: 1,     fmt: v => v.toFixed(0) },
+  { key: 'causticStrength', label: 'Caustic strength',min: 0,     max: 3.0,   step: 0.05,  fmt: v => v.toFixed(2) },
 ];
 // v134: bump TUNABLE_SCHEMA whenever the *meaning* of a tunable changes
 // (axes retuned, ranges reshaped, a new tunable added). On a mismatch,
@@ -794,7 +800,7 @@ const TUNABLE_DEFS = [
 // otherwise users with old localStorage data are stuck at the previous
 // thicknessScale = 1.8 that absorbs 99% of red light at the current box
 // depth. Toggles + debugViz are kept; only tunables are reset.
-const TUNABLE_SCHEMA = 3;
+const TUNABLE_SCHEMA = 4;
 (function loadTogglesFromStorage() {
   try {
     const saved = JSON.parse(localStorage.getItem('water-box-toggles') || '{}');
@@ -2507,13 +2513,18 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let pathLen = max(0.0, viewPos.z - backViewZ);
   // v107 thickness: physical view-space path length × calibrated scale.
   let pathThickness = pathLen * P.thicknessScale;
-  // v124: additive-sprite thickness (deck-25). Half-res tex, sampled
-  // with nearest upsample; the signal is already blurred so coord/2 is
-  // visually fine. Pre-multiplied by an additive-mode calibration scale
-  // (0.10, from the v53-v107 era) so it lives in the same effective
-  // Beer-Lambert units as pathThickness.
+  // v124/v142: additive-sprite thickness (deck-25). Half-res tex,
+  // sampled with nearest upsample; the signal is already blurred so
+  // coord/2 is visually fine. v142 fix: previously the sprite path used
+  // a fixed multiplier (0.10) that ignored thicknessScale. With v141's
+  // thicknessScale=0.40 default, the path-length thickness dropped
+  // ~4.5× but the sprite thickness held — additiveThickness ON
+  // produced opaque-black water. We now scale by P.thicknessScale so
+  // the user's slider controls both methods consistently. The 0.055
+  // calibration constant preserves the v53-v107-era visual baseline
+  // (sprite ≈ pathLen) at the old thicknessScale = 1.8 default.
   let spriteRaw = textureLoad(spriteThicknessTex, coord / 2, 0).r;
-  let spriteThickness = spriteRaw * 0.10;
+  let spriteThickness = spriteRaw * P.thicknessScale * 0.055;
   // v124: which thickness drives Beer-Lambert? toggle picks.
   let thickness = mix(pathThickness, spriteThickness, T.additiveThickness);
   let absorption_on = vec3<f32>(
@@ -4004,17 +4015,20 @@ async function initAndRun() {
       buf[16] = intensity;
       buf[17] = tintR; buf[18] = tintG; buf[19] = tintB;
     }
+    // v142: per-channel base intensities multiplied by the live
+    // causticStrength tunable. 1.0 = baseline; 0 kills caustics; up
+    // to 3.0 cranks them well past saturation for users who want
+    // dramatic light pools.
+    const cStr = state.tunables.causticStrength;
     if (state.toggles.chromaticCaustics) {
       // v141: with the caustic source now pulling from the less-smoothed
       // depthB (pre-curvature-flow), wave-scale features survive into
       // the refraction map → caustic streaks vary frame-to-frame as
-      // the water moves. Intensity bumped 0.12 → 0.20 per channel
-      // because the increased detail produces more convergence points,
-      // each darker on average; the higher intensity restores the
-      // peak brightness where rays focus into "lightning" highlights.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.20);
-      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.20);
-      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.20);
+      // the water moves. Base 0.20 per channel; the live slider scales
+      // this so the user can crank or kill caustics without code changes.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.20 * cStr);
+      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.20 * cStr);
+      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.20 * cStr);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
       device.queue.writeBuffer(causticParamsBufG, 0, causticBufScratchG);
       device.queue.writeBuffer(causticParamsBufB, 0, causticBufScratchB);
@@ -4024,7 +4038,7 @@ async function initAndRun() {
       // creates more convergence/divergence variation, so each splat
       // contributes less ambient and we want a brighter peak so
       // moving water produces clear bright highlights on the floor.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.35);
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.35 * cStr);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
     }
 
@@ -4317,7 +4331,8 @@ function updateDebug() {
     '  σz=' + T.worldRangeSigma.toFixed(3) +
     '  thk×=' + T.thicknessScale.toFixed(2) +
     '  R₀=' + T.R0_water.toFixed(3) +
-    '  refr=' + T.refractStrength.toFixed(0);
+    '  refr=' + T.refractStrength.toFixed(0) +
+    '  caus=' + T.causticStrength.toFixed(2);
 
   debugTextEl.textContent =
     'preset: ' + (state.presetLabel || state.preset) + '   (tap to collapse)\n' +
@@ -4435,6 +4450,7 @@ function buildDebugReport() {
     'thicknessScale:  ' + T.thicknessScale.toFixed(2) + '    (Beer-Lambert calibration)',
     'R0_water:        ' + T.R0_water.toFixed(3) + '   (Schlick reflectance at normal incidence)',
     'refractStrength: ' + T.refractStrength.toFixed(1) + '    (refraction-warp pixels at thickness=1)',
+    'causticStrength: ' + T.causticStrength.toFixed(2) + '    (caustic splat intensity multiplier; 1.0 = baseline)',
     '',
     '--- empirical render stats (computed from above) ---',
     'PARTICLE_RADIUS:      ' + PR.toFixed(3),

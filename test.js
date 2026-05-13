@@ -1482,6 +1482,52 @@
         'debug report must display "< noise" for below-threshold deltas');
     });
 
+    test('gpu-mpm v142: additive-thickness path respects thicknessScale (no more opaque water)', () => {
+      // Pre-v142 the sprite-thickness branch was `spriteRaw * 0.10` —
+      // a fixed multiplier calibrated for the v53-v107-era thicknessScale
+      // = 1.8 default. With v141's thicknessScale = 0.40 default, the
+      // path-length branch dropped ~4.5× but the sprite branch didn't,
+      // so toggling additiveThickness ON drove transmission to near-zero
+      // and the water looked opaque-black. v142 ties the sprite scale
+      // to P.thicknessScale so the slider controls both methods.
+      const src = readMpmScript();
+      const compIdx = src.indexOf('const WGSL_COMPOSITE');
+      const compEnd = src.indexOf('`;', compIdx);
+      const compositeSrc = src.slice(compIdx, compEnd);
+      // The pre-v142 fixed-0.10 multiplier must be gone.
+      assert(compositeSrc.match(/spriteThickness\s*=\s*spriteRaw\s*\*\s*0\.10\s*;/) === null,
+        'pre-v142 fixed spriteThickness = spriteRaw * 0.10 must be replaced with thicknessScale-aware form');
+      // Sprite thickness must now reference P.thicknessScale.
+      assert(compositeSrc.match(/spriteThickness\s*=\s*spriteRaw\s*\*\s*P\.thicknessScale/) !== null,
+        'spriteThickness must scale by P.thicknessScale so the tunable affects both methods');
+    });
+
+    test('gpu-mpm v142: causticStrength tunable slider wires through to splat intensity', () => {
+      // User asked for a slider to control caustic light strength.
+      // The tunable must (a) exist with a sensible default + range,
+      // (b) appear in TUNABLE_DEFS so the slider renders, and (c) be
+      // applied at uniform-write time so the live slider takes effect
+      // immediately without a recompile/reload.
+      const src = readMpmScript();
+      // Default in state.tunables.
+      const defMatch = src.match(/causticStrength:\s*([0-9.]+),/);
+      assert(defMatch, 'state.tunables.causticStrength default must exist');
+      const def = parseFloat(defMatch[1]);
+      assert(def === 1.0, 'causticStrength default should be 1.0 (current baseline); got ' + def);
+      // TUNABLE_DEFS entry must declare a slider range.
+      const tunableDefsMatch = src.match(/key:\s*['"]causticStrength['"][^}]*?max:\s*([0-9.]+)/);
+      assert(tunableDefsMatch, 'TUNABLE_DEFS must include a causticStrength slider definition');
+      const maxVal = parseFloat(tunableDefsMatch[1]);
+      assert(maxVal >= 2.0,
+        'causticStrength slider max should be ≥ 2.0 so users can crank past baseline; got ' + maxVal);
+      // Multiplication must be applied at the caustic intensity writes.
+      assert(src.match(/state\.tunables\.causticStrength/) !== null,
+        'frame loop must read state.tunables.causticStrength when writing caustic uniforms');
+      assert(src.match(/0\.20\s*\*\s*cStr/) !== null ||
+             src.match(/0\.35\s*\*\s*cStr/) !== null,
+        'base caustic intensities must be multiplied by the live tunable');
+    });
+
     test('gpu-mpm v141: tunable defaults match the user-validated "water" calibration', () => {
       // After the user landed on a set of slider values they described
       // as "looks the most like water so far", v141 promoted those to
@@ -2285,9 +2331,13 @@
       // bright caustics + chromatic edge halo).
       const src = readMpmScript();
       // Find both fillCausticBuf call sites by their tint signature.
-      const chromR = src.match(/fillCausticBuf\(\s*causticBufScratchR,\s*1\.0\s*\/\s*([0-9.]+),\s*1\.0,\s*0\.0,\s*0\.0,\s*([0-9.]+)\s*\)/);
-      const chromB = src.match(/fillCausticBuf\(\s*causticBufScratchB,\s*1\.0\s*\/\s*([0-9.]+),\s*0\.0,\s*0\.0,\s*1\.0,\s*([0-9.]+)\s*\)/);
-      const single = src.match(/fillCausticBuf\(\s*causticBufScratchR,\s*1\.0\s*\/\s*([0-9.]+),\s*1\.0,\s*0\.95,\s*0\.72,\s*([0-9.]+)\s*\)/);
+      // v142: intensity arg may now be `0.20 * cStr` (multiplied by
+      // the live causticStrength tunable). Regex accepts either a bare
+      // numeric or a numeric followed by ` * <ident>`.
+      const intRe = '([0-9.]+)(?:\\s*\\*\\s*\\w+)?';
+      const chromR = src.match(new RegExp('fillCausticBuf\\(\\s*causticBufScratchR,\\s*1\\.0\\s*\\/\\s*([0-9.]+),\\s*1\\.0,\\s*0\\.0,\\s*0\\.0,\\s*' + intRe + '\\s*\\)'));
+      const chromB = src.match(new RegExp('fillCausticBuf\\(\\s*causticBufScratchB,\\s*1\\.0\\s*\\/\\s*([0-9.]+),\\s*0\\.0,\\s*0\\.0,\\s*1\\.0,\\s*' + intRe + '\\s*\\)'));
+      const single = src.match(new RegExp('fillCausticBuf\\(\\s*causticBufScratchR,\\s*1\\.0\\s*\\/\\s*([0-9.]+),\\s*1\\.0,\\s*0\\.95,\\s*0\\.72,\\s*' + intRe + '\\s*\\)'));
       assert(chromR && chromB && single,
         'fillCausticBuf call sites not found — caustic config may have moved');
       const chromIntensity = parseFloat(chromR[2]);

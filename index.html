@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v141</span>
+    <span class="tag">v142</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v141: two changes. (1) Tunable defaults promoted to the user's "looks the most like water" calibration (worldSigma 0.030→0.080, worldRangeSigma 0.10→0.50, R0_water 0.020→0.100, refractStrength 30→80) with a schema bump so existing users migrate. Slider caps lifted to give headroom. (2) Caustic source depth moved BEFORE the curvature-flow loop so caustics now see wave-scale surface detail — moving waves produce clear shifting bright highlights on the floor instead of the previous uniform glow. Caustic intensities bumped to peak brightly at convergence points.</div>
+  <div class="desc">MLS-MPM on the GPU. v142: two fixes. (1) additiveThickness toggle made the water opaque-black — the sprite-thickness branch had a hardcoded 0.10 multiplier from the old thicknessScale=1.8 era, so v141's 0.40 default left the sprite path ~4.5× too thick. Sprite thickness now scales with P.thicknessScale so the slider controls both methods. (2) New causticStrength slider (0-3, default 1.0) multiplies caustic splat intensity at uniform-write time — kill, dim, or crank caustics live. Schema bumped so existing users get the new tunable.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

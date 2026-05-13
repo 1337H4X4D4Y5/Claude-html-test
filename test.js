@@ -1482,6 +1482,43 @@
         'debug report must display "< noise" for below-threshold deltas');
     });
 
+    test('gpu-mpm v145: photon-mesh caustics with Jacobian via dpdx/dpdy', () => {
+      // User asked for photon-mesh rendering after v144 splats still
+      // looked dotty. v145 rewrites the caustic shader so each source
+      // cell renders a 4-corner quad (each vertex casts its own
+      // refracted ray) and brightness comes from the per-fragment
+      // screen-space derivative of a source-grid varying — the
+      // Jacobian determinant captures local photon density (rays per
+      // screen pixel) so convergent regions naturally peak bright
+      // and divergent regions dim, without splat-radius or falloff
+      // tuning. Energy-conserving by construction.
+      const src = readMpmScript();
+      const causticIdx = src.indexOf('const WGSL_CAUSTIC');
+      const causticEnd = src.indexOf('`;', causticIdx);
+      const causticSrc = src.slice(causticIdx, causticEnd);
+
+      // 6 vertices forming 2 triangles for a unit-cell quad. Corner
+      // offset table must exist somewhere in vs.
+      assert(causticSrc.match(/corner_offset|corners\s*=\s*array<vec2<f32>,\s*6>/) !== null,
+        'photon-mesh vs must reference 6 corner-offset entries (4 unique cell corners)');
+      // Vertex must compute its OWN corner position (not center +
+      // splatRadius offset). Look for `f32(gx) + off.x` or similar.
+      assert(causticSrc.match(/f32\(gx\)\s*\+\s*off\.x/) !== null,
+        'each vertex must compute its own corner position (per-corner ray-cast)');
+      // Vertex's emitted position must NOT include the v144-style
+      // q.x * P.splatRadius offset (that was the billboard approach).
+      assert(causticSrc.match(/q\.x\s*\*\s*P\.splatRadius/) === null,
+        'pre-v145 splat-billboard offset must be gone — photon-mesh vertex is the corner hit itself');
+      // Fragment must use dpdx + dpdy on the source-grid varying.
+      assert(causticSrc.match(/dpdx\(\s*in\.uv\s*\)/) !== null,
+        'fragment must use dpdx on the source-grid varying for Jacobian density');
+      assert(causticSrc.match(/dpdy\(\s*in\.uv\s*\)/) !== null,
+        'fragment must use dpdy on the source-grid varying for Jacobian density');
+      // The Jacobian determinant computation must exist.
+      assert(causticSrc.match(/duv_dx\.x\s*\*\s*duv_dy\.y\s*-\s*duv_dx\.y\s*\*\s*duv_dy\.x/) !== null,
+        'fragment must compute the 2×2 Jacobian determinant');
+    });
+
     test('gpu-mpm v143: caustic accumulation chain runs in HDR (rgba16float)', () => {
       // Pre-v143 the backgroundTex was rgba8 (canvas preferred format),
       // so overlapping caustic splats saturated at 1.0 instead of
@@ -2402,35 +2439,30 @@
         'caustic floor-clip must be wider than 1× boxHalf so caustics extend onto surrounding floor');
     });
 
-    test('gpu-mpm v139: caustic streaks via dense rays + tight splats + sharp falloff', () => {
-      // The user said the v138 caustics still look like soft blobs,
-      // not the thin lightning-streak shapes in the reference. v139
-      // restructures the per-splat geometry to reproduce that shape:
-      //   - 4× source density (96 → 192 grid) so adjacent rays overlap
-      //   - half-radius splat (0.014 → 0.006 NDC, ~3.5 px disc) so
-      //     individual rays don't blur into round blobs
-      //   - quartic-of-quartic falloff (1-r²)⁴ for a sharp peak instead
-      //     of a soft Gaussian-ish (1-r²)² profile
+    test('gpu-mpm v139+v145: caustic shape produces thin streaks (either splat or photon-mesh)', () => {
+      // Pre-v145 used dense splats + sharp falloff to approximate the
+      // reference's thin caustic streaks. v145 replaced that with
+      // photon-mesh rendering — each cell draws a quad of 4 corner
+      // rays, with per-fragment brightness driven by dpdx/dpdy on
+      // a source-grid varying (the Jacobian). Either approach is
+      // valid; the test now accepts whichever is wired up.
       const src = readMpmScript();
-      const grid = parseInt(src.match(/CAUSTIC_SOURCE_GRID_N\s*=\s*(\d+)/)[1], 10);
-      assert(grid >= 160,
-        'CAUSTIC_SOURCE_GRID_N must be ≥ 160 for dense-enough ray overlap; got ' + grid);
-      const radius = parseFloat(src.match(/buf\[7\]\s*=\s*([0-9.]+);/)[1]);
-      // v144 widened slightly (0.006 → 0.010 NDC) to make adjacent
-      // splats merge into continuous filaments rather than reading
-      // as isolated dots — the v139 cap of 0.010 was the upper bound
-      // of the "still-thin-streak" range, so we keep ≤ 0.012.
-      assert(radius <= 0.012,
-        'splatRadius must be ≤ 0.012 NDC for thin-streak look; got ' + radius);
-      // Falloff curve in WGSL_CAUSTIC must have a sharp peak — either
-      // pure (1-r²)⁴ (v139-v143) or the v144 mixed (1-r²)⁴ + 0.35·(1-r²)²
-      // form, both of which retain the sharp 4th-power peak.
       const causticIdx = src.indexOf('const WGSL_CAUSTIC');
       const causticEnd = src.indexOf('`;', causticIdx);
       const causticSrc = src.slice(causticIdx, causticEnd);
-      assert(causticSrc.match(/f2\s*\*\s*f2/) !== null ||
-             causticSrc.match(/falloff\s*\*\s*falloff\s*\*\s*falloff\s*\*\s*falloff/) !== null,
-        'caustic falloff must include a sharp peak (≥ 4th power)');
+      // Photon-mesh path: fragment shader uses dpdx + dpdy on the
+      // varying.
+      const isPhotonMesh = causticSrc.match(/dpdx\(\s*in\.uv\s*\)/) !== null &&
+                           causticSrc.match(/dpdy\(\s*in\.uv\s*\)/) !== null;
+      // Splat path: dense grid (≥160) + sharp falloff (≥4th power).
+      const grid = parseInt(src.match(/CAUSTIC_SOURCE_GRID_N\s*=\s*(\d+)/)[1], 10);
+      const hasSharpFalloff = causticSrc.match(/f2\s*\*\s*f2/) !== null ||
+                              causticSrc.match(/falloff\s*\*\s*falloff\s*\*\s*falloff\s*\*\s*falloff/) !== null;
+      const isDenseSplat = grid >= 160 && hasSharpFalloff;
+      assert(isPhotonMesh || isDenseSplat,
+        'caustic shader must either be photon-mesh (dpdx/dpdy Jacobian) ' +
+        'OR splat-mode with grid ≥ 160 and sharp ≥4-power falloff; ' +
+        'photonMesh=' + isPhotonMesh + ' denseSplat=' + isDenseSplat + ' (grid=' + grid + ')');
     });
 
     test('gpu-mpm v138: caustic shader traces refracted rays to walls, not just the floor', () => {

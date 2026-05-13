@@ -448,7 +448,7 @@
   });
 })();
 
-const APP_VERSION = 'mpm-v144 (2026-05-12 — caustics from dots to filaments + back-wall sun. THREE changes. (1) Densify: source-grid 192² → 320² (102k rays vs 37k) so adjacent splats land 2-3 px apart instead of 5-10 px. (2) Widen + soften: splat radius 0.006 → 0.010 NDC, falloff (1-r²)⁴ → (1-r²)⁴ + 0.35·(1-r²)² (sharp peak + soft halo) so neighbours blend into continuous lines instead of dot-pattern. (3) Sun tilt: Lw [0.35, 0.80, 0.50] → [0.30, 0.40, 0.85] (≈53° → 26° elevation). Lower-angle sun sends refracted rays mostly along -Z into the back wall, which is the dominant visible surface in iPhone portrait — caustics now read instead of being hidden on the barely-visible floor. Per-splat intensity reduced (0.20 → 0.09 chromatic, 0.35 → 0.16 single) to compensate for ~12× more total caustic light from the density+width+softening combo.)';
+const APP_VERSION = 'mpm-v145 (2026-05-12 — PHOTON MESH caustics. Rewrote WGSL_CAUSTIC from per-instance splat discs to per-instance quads connecting the 4 corner rays of each source-grid cell. Each of the 6 vertices independently casts its own refracted ray (depth load + 5-tap normal + Snell + multi-wall trace + NDC projection). The fragment shader uses dpdx/dpdy on a source-grid (u,v) varying to compute the 2×2 Jacobian determinant — that IS the local photon density (rays per screen pixel). Energy-conserving by construction: convergence collapses the projected quad, det → infinity, fragment goes very bright (HDR-clamped to 64); divergence spreads the quad, det → 0, fragment dims. No more splat-radius / falloff / density tuning — the caustic shape comes from the physics directly. Source grid dropped 320² → 128² since photon-mesh covers area continuously; per-cell base energy 5.0 (single) / 3.0 (chromatic) calibrated for typical density × cell-overlap range.)';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2186,35 +2186,68 @@ fn viewPosAt(sx: f32, sy: f32, depth: f32) -> vec3<f32> {
   return vec3<f32>(viewX, viewY, viewZ);
 }
 
+// v145: PHOTON MESH caustic shader. Rewritten from per-instance splat
+// discs to per-instance quads connecting the 4 corner rays of each
+// source-grid cell. Continuous by construction — neighbouring cells
+// share corner vertices, so there are no gaps between them, and the
+// caustic Jacobian (light concentration at focal lines) emerges from
+// the per-fragment screen-space derivatives of the (u,v) source-grid
+// varying. Where rays converge, the projected quad collapses to a
+// small region, du/dx and dv/dy blow up, and the fragment intensity
+// (proportional to |det J|) goes very bright — that is, the bright
+// "lightning-bolt" caustic peak comes for free from photon density.
+//
+// Each instance ii = one source-grid cell. Each of the 6 vertices
+// represents one of the 4 cell corners (with two corners shared
+// between the two triangles of the quad). Each vertex independently:
+//   1. Loads depth at its corner's screen position
+//   2. Computes the surface normal via 5-tap stencil
+//   3. Refracts the sun direction
+//   4. Multi-wall traces to whichever box face it hits first
+//   5. Reprojects to camera NDC
+// Bad corners (sky, TIR, behind camera) output an off-screen position.
+// Mixed-wall cells (some corners hit floor, others back wall) produce
+// stretched quads but are rare and look fine in practice.
+fn corner_offset(vi: u32) -> vec2<f32> {
+  // Two triangles forming a quad over a unit cell:
+  //   tri 1: (0,0) (1,0) (0,1)
+  //   tri 2: (1,0) (1,1) (0,1)
+  var corners = array<vec2<f32>, 6>(
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+    vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0)
+  );
+  return corners[vi];
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32,
            @builtin(instance_index) ii: u32) -> VOut {
-  var quad = array<vec2<f32>, 6>(
-    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
-    vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0)
-  );
-  let q = quad[vi];
+  let off = corner_offset(vi);
 
   let gridN = i32(P.sourceGridN);
   let gx = i32(ii) % gridN;
   let gy = i32(ii) / gridN;
-  let sampleX = (f32(gx) + 0.5) / f32(gridN) * P.resolutionX;
-  let sampleY = (f32(gy) + 0.5) / f32(gridN) * P.resolutionY;
-  let sxi = i32(sampleX);
-  let syi = i32(sampleY);
-
-  let dc = textureLoad(srcDepth, vec2<i32>(sxi, syi), 0);
+  // v145: corner sample position. Offset is 0 or 1 (cell corner, not
+  // cell center). Stays inside the screen because clamped below.
+  let u = f32(gx) + off.x;
+  let v = f32(gy) + off.y;
+  let sampleX = u / f32(gridN) * P.resolutionX;
+  let sampleY = v / f32(gridN) * P.resolutionY;
+  let sxi = clamp(i32(sampleX), 0, i32(P.resolutionX) - 1);
+  let syi = clamp(i32(sampleY), 0, i32(P.resolutionY) - 1);
 
   var out: VOut;
-  out.uv = q;
+  out.uv = vec2<f32>(u, v);   // v145: varying = source-grid coords for fs Jacobian
   out.intensity = 0.0;
-  // Off-screen position used to discard sources that produce no caustic.
+  // Off-screen position used to discard invalid corners. A triangle
+  // with mixed valid/invalid vertices may still partially rasterize,
+  // producing visual artifacts at the water silhouette — acceptable.
   let OFF = vec4<f32>(10.0, 10.0, 0.0, 1.0);
 
+  let dc = textureLoad(srcDepth, vec2<i32>(sxi, syi), 0);
   if (dc >= 0.99999) { out.position = OFF; return out; }
 
-  // 5-tap silhouette-aware view-space normal — same trick the composite
-  // uses. Coarse over a 4×4 stencil since source grid is sparse anyway.
+  // 5-tap silhouette-aware view-space normal — same as v144.
   let dL = textureLoad(srcDepth, vec2<i32>(sxi - 2, syi),     0);
   let dR = textureLoad(srcDepth, vec2<i32>(sxi + 2, syi),     0);
   let dU = textureLoad(srcDepth, vec2<i32>(sxi,     syi - 2), 0);
@@ -2235,44 +2268,28 @@ fn vs_main(@builtin(vertex_index) vi: u32,
   let ddy = select(ddyD, ddyU, abs(ddyD.z) > abs(ddyU.z));
   let n = normalize(cross(ddy, ddx));
 
-  // View ↔ world for our identity-rotation camera at world (0, 0, fitD).
   let worldPos = vec3<f32>(viewC.x, viewC.y, viewC.z + P.fitD);
   let worldN = n;
 
-  // Snell refraction of the sun direction. lightDir points surface→sun;
-  // incident (direction of light propagation) = -lightDir.
   let lightDir = normalize(vec3<f32>(P.lightDirX, P.lightDirY, P.lightDirZ));
   let incident = -lightDir;
   let refractedDir = refract(incident, worldN, P.refractRatio);
-
-  // Total-internal-reflection guard.
   if (length(refractedDir) < 0.0001) { out.position = OFF; return out; }
 
-  // v138: trace refracted ray to whichever of the 4 useful box faces
-  // it strikes first — floor (y=-boxHalfY), back wall (z=-boxHalfZ),
-  // left wall (x=-boxHalfX), right wall (x=+boxHalfX). The front wall
-  // (z=+boxHalfZ) is between the camera and the water so we skip it
-  // (would block the view of the fluid). The ceiling never receives
-  // caustics from above-sun. Earlier versions only traced to the floor
-  // and discarded sideways-refracting rays, which is why you saw no
-  // caustics on the back wall — the rays existed, we just threw them
-  // away before they could splat.
+  // Multi-wall trace (unchanged from v138).
   let T_INF = 1e9;
   var tBest = T_INF;
   var hit = vec3<f32>(0.0);
-
   if (refractedDir.y < -0.001) {
     let t = (-P.boxHalfY - worldPos.y) / refractedDir.y;
     if (t > 0.0 && t < tBest) {
       let h = worldPos + refractedDir * t;
-      // Floor caustics may spread beyond the box footprint onto the
-      // surrounding marble (the v137 rainbow-halo behaviour).
       if (abs(h.x) <= P.boxHalfX * 2.0 && abs(h.z) <= P.boxHalfZ * 2.0) {
         tBest = t; hit = h;
       }
     }
   }
-  if (refractedDir.z < -0.001) {  // back wall
+  if (refractedDir.z < -0.001) {
     let t = (-P.boxHalfZ - worldPos.z) / refractedDir.z;
     if (t > 0.0 && t < tBest) {
       let h = worldPos + refractedDir * t;
@@ -2281,7 +2298,7 @@ fn vs_main(@builtin(vertex_index) vi: u32,
       }
     }
   }
-  if (refractedDir.x < -0.001) {  // left wall
+  if (refractedDir.x < -0.001) {
     let t = (-P.boxHalfX - worldPos.x) / refractedDir.x;
     if (t > 0.0 && t < tBest) {
       let h = worldPos + refractedDir * t;
@@ -2290,7 +2307,7 @@ fn vs_main(@builtin(vertex_index) vi: u32,
       }
     }
   }
-  if (refractedDir.x > 0.001) {   // right wall
+  if (refractedDir.x > 0.001) {
     let t = (P.boxHalfX - worldPos.x) / refractedDir.x;
     if (t > 0.0 && t < tBest) {
       let h = worldPos + refractedDir * t;
@@ -2301,43 +2318,45 @@ fn vs_main(@builtin(vertex_index) vi: u32,
   }
   if (tBest >= T_INF) { out.position = OFF; return out; }
 
-  // v138: generalized projection — hit.y is no longer hardcoded to
-  // -boxHalfY since wall hits have any y value in the box.
   let hitViewZ = hit.z - P.fitD;
-  if (hitViewZ >= -0.001) { out.position = OFF; return out; }  // behind cam
+  if (hitViewZ >= -0.001) { out.position = OFF; return out; }
   let hitNdcX = -hit.x * P.fAspect / hitViewZ;
   let hitNdcY = -hit.y * P.fVert   / hitViewZ;
 
-  // Splat as a small quad in NDC. Quartic falloff in the fragment.
-  out.position = vec4<f32>(hitNdcX + q.x * P.splatRadius,
-                           hitNdcY + q.y * P.splatRadius,
-                           0.0, 1.0);
+  // v145: each vertex is the projected corner hit. No NDC offset —
+  // the quad's shape IS the photon-mesh cell on the screen, not a
+  // billboard around a center point. Brightness comes from the
+  // fragment shader's Jacobian computation, not a falloff curve.
+  out.position = vec4<f32>(hitNdcX, hitNdcY, 0.0, 1.0);
   out.intensity = P.splatIntensity;
   return out;
 }
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-  let r2 = dot(in.uv, in.uv);
-  if (r2 > 1.0) { discard; }
-  // v144: mixed falloff — sharp peak (1-r²)⁴ + soft halo (1-r²)².
-  // The sharp term preserves the "lightning-bolt" thin filament look
-  // at convergence points (where rays focus into bright peaks). The
-  // soft halo bleeds each splat slightly past its disc edge so
-  // adjacent splats in the now-denser (320²) source grid blend into
-  // continuous lines instead of reading as isolated dots. The dots
-  // were the v143 complaint — pure (1-r²)⁴ falloff has near-zero
-  // weight by r=0.7, leaving gaps between neighbours. Halo weight is
-  // small (×0.35) so it just fills the cracks, not muddies the peak.
-  let falloff = (1.0 - r2);
-  let f2 = falloff * falloff;
-  let f4 = f2 * f2;
-  let g = (f4 + 0.35 * f2) * in.intensity;
-  // v128: tint comes from the uniform (CausticParams.tintR/G/B). The
-  // single-IOR mode uses a warm sunny tint (1.0, 0.95, 0.72); the
-  // chromatic-dispersion mode runs the shader 3× with isolated R/G/B
-  // tints at slightly different refractRatios, summing into rainbow
-  // caustics where IOR-divergence spreads the refracted rays.
+  // v145: photon-density-estimation Jacobian. The varying in.uv carries
+  // the SOURCE-GRID coordinate (u, v) for this vertex's corner; after
+  // perspective-correct interpolation, dpdx(in.uv) and dpdy(in.uv) give
+  // the rate of change of source-grid coords per screen pixel. The
+  // determinant |dpdx.x · dpdy.y − dpdx.y · dpdy.x| is the source-cell
+  // area covered by one screen pixel — which is exactly the local
+  // photon density (rays per unit screen area) at this pixel.
+  //
+  // Where rays converge into a thin caustic line, the projected quad
+  // collapses, du/dx & dv/dy blow up, the determinant approaches
+  // infinity, and the per-fragment intensity sky-rockets — the HDR
+  // accumulation (v143) preserves that peak through tone-mapping for
+  // the bright "lightning-bolt" highlight. Where rays diverge, the
+  // determinant drops toward zero, dimming the caustic. Energy is
+  // conserved automatically — no manual splat-radius / falloff tuning.
+  let duv_dx = dpdx(in.uv);
+  let duv_dy = dpdy(in.uv);
+  let det = abs(duv_dx.x * duv_dy.y - duv_dx.y * duv_dy.x);
+  // Clamp the upper end so a single near-degenerate pixel can't blow
+  // out the entire HDR pipeline; lower bound 0 (no caustic where the
+  // projection is divergent).
+  let density = clamp(det, 0.0, 64.0);
+  let g = density * in.intensity;
   return vec4<f32>(g * P.tintR, g * P.tintG, g * P.tintB, 0.0);
 }
 `;
@@ -3224,16 +3243,15 @@ async function initAndRun() {
   // to keep VS cost low (each instance does ~5 depth reads), dense
   // enough that adjacent refracted rays overlap on the floor so the
   // Jacobian shows up.
-  // v144: bumped 192 → 320 (102400 rays vs 36864). The user reported
-  // v143 caustics looked like "lots of dots instead of true light" —
-  // even with HDR, individual splats still read as isolated points
-  // because adjacent rays land 3-10 px apart on the floor and our
-  // splats were too small to overlap. 2.8× more rays drops average
-  // adjacency to ~2-3 px, which combined with the v144 wider splat
-  // (radius 0.006 → 0.010 NDC) gives ~80-90% overlap area between
-  // neighbours — caustics now read as continuous filaments instead of
-  // dotted lines. Still vertex-bound and cheap on Apple GPU.
-  const CAUSTIC_SOURCE_GRID_N = 320;
+  // v145: photon-mesh — each instance renders a 4-corner quad, not a
+  // splat. Each vertex casts its OWN refracted ray (one per corner).
+  // 128² = 16384 cells × 6 vertices = 98304 ray-casts per frame.
+  // We don't need the v144 density of 320² because quads cover area
+  // continuously by construction — adjacent cells share corner
+  // vertices, so there are no inter-cell gaps. Reducing back to 128²
+  // also keeps the per-vertex cost manageable (each vertex does a
+  // depth load + 4-tap normal stencil + refract + multi-wall trace).
+  const CAUSTIC_SOURCE_GRID_N = 128;
 
   // v121: RenderToggles uniform — 16 floats / 64 bytes. Bound to the
   // composite at @binding(6). Field order MUST match the WGSL struct
@@ -4039,13 +4057,10 @@ async function initAndRun() {
       buf[2] = f / aspect; buf[3] = f;
       buf[4] = canvas.width; buf[5] = canvas.height;
       buf[6] = CAUSTIC_SOURCE_GRID_N;
-      // v144: splatRadius 0.006 → 0.010 NDC. ~6 px disc. With v144's
-      // 2.8× denser source grid (320² rays), adjacent splats now
-      // overlap rather than leaving visible gaps — the user reported
-      // v143's caustics "look like a lot of dots instead of true
-      // light", which was the small-radius + sparse-grid combo. Wider
-      // splat + denser grid yields continuous filaments.
-      buf[7] = 0.010;
+      // v145: splatRadius is unused now (photon-mesh draws actual
+      // quads, not billboards). Kept in the uniform for layout
+      // compatibility. Value irrelevant.
+      buf[7] = 0.0;
       buf[8]  = Lv[0] / Llen;
       buf[9]  = Lv[1] / Llen;
       buf[10] = Lv[2] / Llen;
@@ -4063,26 +4078,25 @@ async function initAndRun() {
     // dramatic light pools.
     const cStr = state.tunables.causticStrength;
     if (state.toggles.chromaticCaustics) {
-      // v144: per-splat intensity 0.20 → 0.09 because the same frame now
-      // has 2.8× more rays (grid 192→320), each splat is 2.78× wider
-      // (radius 0.006→0.010), and the mixed falloff contributes ~1.58×
-      // more integrated light — total light delivered is ~12× higher,
-      // so each splat needs to be much dimmer to keep the average
-      // brightness in HDR-tone-mappable range. Peak at convergence
-      // still saturates beautifully because HDR (v143) accumulates
-      // overlapping splats without clipping.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 0.09 * cStr);
-      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 0.09 * cStr);
-      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 0.09 * cStr);
+      // v145: photon-mesh per-cell base energy. The fragment shader
+      // multiplies this by the dpdx/dpdy Jacobian determinant, so
+      // peak brightness at convergence is set by the density × this
+      // base (not by the base alone like in v144's splat method).
+      // Typical screen pixel sees 1-3 overlapping quads with density
+      // ~0.05; peak (focal line) sees 5+ overlap with density >1.0.
+      // Base 3.0 per chromatic channel lands the average around 0.5
+      // (visible) and peaks comfortably HDR (5-20) for tone-mapping.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.305, 1.0, 0.0, 0.0, 3.0 * cStr);
+      fillCausticBuf(causticBufScratchG, 1.0 / 1.333, 0.0, 1.0, 0.0, 3.0 * cStr);
+      fillCausticBuf(causticBufScratchB, 1.0 / 1.365, 0.0, 0.0, 1.0, 3.0 * cStr);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
       device.queue.writeBuffer(causticParamsBufG, 0, causticBufScratchG);
       device.queue.writeBuffer(causticParamsBufB, 0, causticBufScratchB);
     } else {
-      // v144: single warm-sunny pass at 0.16 (down from v141's 0.35).
-      // Same v144 calibration as the chromatic side: 12× more total
-      // caustic light per frame from denser + wider + softer-falloff
-      // splats, so per-splat intensity drops to keep ambient sane.
-      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 0.16 * cStr);
+      // v145: single warm-sunny pass — base 5.0, one pass instead of
+      // 3 so the per-cell energy is higher to land in the same
+      // visible range. causticStrength slider still scales live.
+      fillCausticBuf(causticBufScratchR, 1.0 / 1.333, 1.0, 0.95, 0.72, 5.0 * cStr);
       device.queue.writeBuffer(causticParamsBufR, 0, causticBufScratchR);
     }
 

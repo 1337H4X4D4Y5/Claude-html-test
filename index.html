@@ -102,9 +102,9 @@
 <a class="card gpu" id="link-mpm" href="./gpu-mpm.html">
   <div class="row">
     <span class="name">GPU fluid (MPM)</span>
-    <span class="tag">v151</span>
+    <span class="tag">v152</span>
   </div>
-  <div class="desc">MLS-MPM on the GPU. v151: fix caustic blowout on the screen edge. v149 fixed OOB depth reads in composite/bilateral/curvature but missed the photon-mesh caustic shader, which has the same 5-tap normal stencil. OOB depth=0 produced wild refracted rays → huge (u,v) jumps across the photon mesh quad → dpdx/dpdy Jacobian blew up to the clamp(64) ceiling → wall flooded with bright caustic. Same guard (`dL < 0.001`) added to all 4 stencil taps + the centre read.</div>
+  <div class="desc">MLS-MPM on the GPU. v152: bilateral kernel cap 50→120 px. v146's wide-σ default (worldSigma=0.113) produced σ_screen ≈ 67 px → wanted 3σ ≈ 200 px truncation; clamped to R=50 the kernel was only sampling 0.75σ — effectively a box filter, which created visible square/streak artifacts on the smoothed surface. New cap lets the Gaussian profile actually run; loop early-exit keeps cost proportional to the active R, so narrow-σ frames don't pay for the wider ceiling.</div>
 </a>
 
 <div class="section-title">Diagnostics</div>

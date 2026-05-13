@@ -452,7 +452,7 @@
 // the multi-paragraph forms were covering most of the screen. Pattern
 // going forward: "vN — one-line summary". Full rationale lives in the
 // commit message.
-const APP_VERSION = 'mpm-v151 — fix caustic blowout: OOB depth guard in photon-mesh shader';
+const APP_VERSION = 'mpm-v152 — bilateral kernel cap 50→120 px so wide σ uses a real Gaussian';
 document.getElementById('overlay-version').textContent = APP_VERSION;
 document.getElementById('version').textContent = APP_VERSION;
 
@@ -2067,7 +2067,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 //      screen-pixel σ scales with local depth so the physical kernel
 //      width is the same everywhere in the scene. The truncation
 //      radius is 3σ (standard cutoff — weights below 3σ are < 1.1%).
-//      Clamped to maxScreenRadius = 50 px for perf.
+//      Clamped to maxScreenRadius = 120 px (v152, was 50) for perf.
 //   2. RANGE kernel σ (v110, slide 19) is constant in world depth
 //      units — sample weight depends on the world-space depth delta
 //      between center and sample, exp(-(Δview_z)² / worldRangeSigma²).
@@ -2127,9 +2127,10 @@ fn bilateral1D(coord: vec2<i32>, dir: vec2<i32>) -> f32 {
 
   var sum: f32 = zN;
   var totalW: f32 = 1.0;
-  // Bounded loop (≤ 50) with early break — WGSL needs a static upper
-  // bound for efficient compilation on iOS Safari.
-  for (var i: i32 = 1; i <= 50; i = i + 1) {
+  // v152: bound raised 50 → 120 to match the JS-side maxScreenRadius
+  // bump. The early break still keeps cost proportional to actual R,
+  // so frames are only more expensive when the user dials up σ.
+  for (var i: i32 = 1; i <= 120; i = i + 1) {
     if (i > R) { break; }
     let spatialW = exp(-f32(i * i) * spatialSigma2_inv);
     let zL = textureLoad(srcDepth, coord - dir * i, 0);
@@ -4081,13 +4082,20 @@ async function initAndRun() {
     //                              bilateral now only preserves jumps
     //                              substantially larger than imposter
     //                              noise — true intra-fluid edges).
-    //   maxScreenRadius  = 50    (deck-prescribed perf clamp).
+    //   maxScreenRadius  = 120   (v152: was 50 — too tight for the v146
+    //                              worldSigma=0.113 default whose σ_screen
+    //                              ≈ 67 px wanted 3σ ≈ 200 px truncation.
+    //                              At R=50 only 0.75σ of the Gaussian
+    //                              was being sampled, making the kernel
+    //                              effectively a box filter, which
+    //                              produced visible square/streak
+    //                              artifacts on wide-σ settings.)
     const gaussBuf = gaussBufScratch;
     gaussBuf[0] = 0.1; gaussBuf[1] = 100;
     gaussBuf[2] = f / aspect; gaussBuf[3] = f;
     gaussBuf[4] = canvas.width; gaussBuf[5] = canvas.height;
     gaussBuf[6] = state.tunables.worldSigma;
-    gaussBuf[7] = 50.0;
+    gaussBuf[7] = 120.0;
     gaussBuf[8] = state.tunables.worldRangeSigma;
     // v121: enabled flag (1.0 = run; 0.0 = passthrough).
     gaussBuf[9] = state.toggles.smoothing ? 1.0 : 0.0;
@@ -4673,7 +4681,7 @@ function buildDebugReport() {
     'rangeSigma / (2·PR):  ' + (T.worldRangeSigma / (2 * PR)).toFixed(2) + 'x  (>1 ⇒ bilateral smooths across particle boundaries)',
     'pixelView@typical-z:  ' + pixelView.toFixed(5) + '  (view-space size of 1 screen pixel at viewZ=-' + viewZ + ')',
     'σ_screen @ typical-z: ' + sigmaScreen.toFixed(1) + ' px  (Gaussian σ on screen)',
-    'R (truncation):       ' + Rscreen.toFixed(0) + ' px  (3σ, clamped to maxScreenRadius=50)',
+    'R (truncation):       ' + Rscreen.toFixed(0) + ' px  (3σ, clamped to maxScreenRadius=120)',
     'max pathLen:          ' + maxPathLen.toFixed(3) + '  (= 2·BOX_HALF_Z)',
     'max optical thickness:' + maxThickness.toFixed(3) + '  (= pathLen × thicknessScale)',
     'absorption @ max:     R=' + absorbR.toFixed(1) + '%  G=' + absorbG.toFixed(1) + '%  B=' + absorbB.toFixed(1) + '%',
